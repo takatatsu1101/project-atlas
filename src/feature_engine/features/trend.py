@@ -69,3 +69,104 @@ class TrendStrengthFeature(IFeature):
 
 # レジストリに特徴量クラスを登録
 feature_registry.register(TrendStrengthFeature)
+
+
+class TrendStrengthScore(IFeature):
+    feature_id: str = "T001_TrendStrengthScore"
+    feature_name: str = "トレンド強度"
+    feature_category: str = "Trend"
+
+    def calculate(
+        self,
+        ohlcv_data: List[OhlcvModel],
+        indicator_data: List[IndicatorSetModel],
+        financial_data: Optional[FinancialModel] = None
+    ) -> List[FeatureResultModel]:
+        
+        if not indicator_data or not ohlcv_data:
+            return []
+
+        results: List[FeatureResultModel] = []
+        for i, ind_set in enumerate(indicator_data):
+            sma5 = ind_set.indicators.get("SMA5")
+            sma25 = ind_set.indicators.get("SMA25")
+            sma75 = ind_set.indicators.get("SMA75")
+            close_price = ohlcv_data[i].close if i < len(ohlcv_data) else None
+
+            # 5日前のインデックス
+            prev_idx = max(0, i - 5)
+            sma5_prev = indicator_data[prev_idx].indicators.get("SMA5") if prev_idx < len(indicator_data) else None
+            sma25_prev = indicator_data[prev_idx].indicators.get("SMA25") if prev_idx < len(indicator_data) else None
+            sma75_prev = indicator_data[prev_idx].indicators.get("SMA75") if prev_idx < len(indicator_data) else None
+
+            low_today = ohlcv_data[i].low if i < len(ohlcv_data) else None
+            high_today = ohlcv_data[i].high if i < len(ohlcv_data) else None
+            low_prev = ohlcv_data[prev_idx].low if prev_idx < len(ohlcv_data) else None
+            high_prev = ohlcv_data[prev_idx].high if prev_idx < len(ohlcv_data) else None
+
+            metadata = {
+                "close": close_price,
+                "sma5": sma5,
+                "sma25": sma25,
+                "sma75": sma75,
+            }
+
+            # データ不足時は一律で中立(50.0)とする
+            if sma5 is None or sma25 is None or sma75 is None or close_price is None:
+                raw_score = 50.0
+            else:
+                score = 0.0
+
+                # 1. 移動平均線の並び (最大40点)
+                if sma5 > sma25 and sma25 > sma75:
+                    score += 40.0 # 完全上昇
+                elif sma5 > sma25 and sma25 <= sma75:
+                    score += 30.0 # 上昇の初期（短期は中期のうえだが中長期はデッドクロス）
+                elif sma5 <= sma25 and sma25 > sma75:
+                    score += 20.0 # 上昇トレンド中の押し目・一時調整
+                elif sma5 < sma25 and sma25 < sma75:
+                    score += 0.0  # 完全下降
+                else:
+                    score += 10.0 # その他
+
+                # 2. 移動平均線の傾き (最大30点)
+                # 5日前の値と比較して、上向きであるかどうかを評価
+                if sma5_prev is not None and sma5 > sma5_prev:
+                    score += 10.0
+                if sma25_prev is not None and sma25 > sma25_prev:
+                    score += 10.0
+                if sma75_prev is not None and sma75 > sma75_prev:
+                    score += 10.0
+
+                # 3. 株価位置 (最大20点)
+                if close_price > sma25:
+                    score += 10.0
+                if close_price > sma75:
+                    score += 10.0
+
+                # 4. 高値・安値更新 (最大10点)
+                if low_today is not None and low_prev is not None and low_today > low_prev:
+                    score += 5.0  # 安値切り上げ
+                if high_today is not None and high_prev is not None and high_today > high_prev:
+                    score += 5.0  # 高値切り上げ
+
+                raw_score = score
+
+            normalized_score = self._normalize_score(raw_score, 0, 100)
+
+            results.append(FeatureResultModel(
+                feature_id=self.feature_id,
+                feature_name=self.feature_name,
+                score=normalized_score,
+                raw_value=raw_score,
+                metadata=metadata
+            ))
+        return results
+
+    def _normalize_score(self, raw_value: float, min_val: float, max_val: float) -> float:
+        if max_val == min_val:
+            return 50.0
+        return max(0.0, min(100.0, ((raw_value - min_val) / (max_val - min_val)) * 100.0))
+
+# レジストリに特徴量クラスを登録
+feature_registry.register(TrendStrengthScore)
