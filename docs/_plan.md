@@ -109,6 +109,8 @@ Project Atlas は、スイングトレード向けの株式分析支援システ
     - [x] 例外処理の一元化とカスタム例外クラスの定義 (`src/common/exceptions.py`)
     - [x] 共通ロギングモジュールの実装 (`src/common/logger.py`)
     - [x] 共通モジュール・例外の単体テスト作成 (`tests/unit/common/test_common.py`)
+    - [ ] 各モジュール（Data Collector, Feature Engine等）へのエラーハンドリング・ロギングの本格適用
+    - [ ] メイン実行フロー (`src/main.py`) のエンドツーエンド実動作テストと検証
 - [ ] **パフォーマンス最適化**
     - [ ] 大量データ処理におけるボトルネックの特定と改善
     - [ ] 並列処理、高速化ライブラリの導入検討
