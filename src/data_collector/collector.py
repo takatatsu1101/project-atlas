@@ -11,6 +11,10 @@ import requests
 
 from src.model.data_models import OhlcvModel, FinancialModel
 from src.config.settings import load_settings
+from src.common.logger import get_logger
+from src.common.exceptions import DataCollectionError
+
+logger = get_logger("DataCollector")
 
 # 設定をロード
 settings = load_settings()
@@ -44,12 +48,12 @@ class DataCollector:
         """
         Yahoo FinanceからOHLCVデータを取得する。
         """
-        print(f"Yahoo Financeから {symbol} のOHLCVデータを取得中... ({start_date} - {end_date})")
+        logger.info(f"Yahoo Financeから {symbol} のOHLCVデータを取得中... ({start_date} - {end_date})")
         try:
             ticker = yf.Ticker(symbol)
             df = ticker.history(start=start_date.strftime("%Y-%m-%d"), end=end_date.strftime("%Y-%m-%d"))
             if df.empty:
-                print(f"警告: {symbol} のOHLCVデータが見つかりませんでした。")
+                logger.warning(f"{symbol} のOHLCVデータが見つかりませんでした。")
                 return pd.DataFrame()
             df = df.reset_index()
             df.columns = [col.lower().replace(' ', '_') for col in df.columns]
@@ -61,8 +65,8 @@ class DataCollector:
                 df["date"] = df["date"].dt.date # 時刻情報を削除
             return df
         except Exception as e:
-            print(f"エラー: {symbol} のOHLCVデータ取得中にエラーが発生しました: {e}")
-            return pd.DataFrame()
+            logger.error(f"{symbol} のOHLCVデータ取得中にエラーが発生しました: {e}")
+            raise DataCollectionError(f"OHLCV data collection failed for {symbol}: {e}") from e
 
     def collect_ohlcv_data(self, symbol: str, start_date: date, end_date: date) -> List[OhlcvModel]:
         """
