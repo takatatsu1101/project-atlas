@@ -1,0 +1,158 @@
+# Project Atlas 開発計画
+
+## 1. 概要
+このドキュメントは、Project Atlas の開発計画を管理します。各タスクのステータス、実施内容、および改善点を記録します。開発は以下のワークフローに従います。
+
+**開発ワークフロー:**
+- 完了条件の設定
+- 実装
+- テスト
+- レビュー
+- 資料修正
+- 計画書更新
+- 改善点がないか検討
+
+## 2. プロジェクトの全体像とドキュメント構造
+
+Project Atlas は、スイングトレード向けの株式分析支援システムです。東京証券取引所に上場する銘柄を対象に、テクニカル指標、チャートパターン、およびファンダメンタルズを統合的に評価し、有望な銘柄をスコアリングして抽出することを目的としています。
+
+本システムは、データの取得から分析、スコアリング、結果表示までを、責務ごとに分離したモジュール構造（モジュラー・モノリス）で構築されています。
+
+### 主要コンポーネント
+- **Data Collector**: 市場データ（OHLCV）や財務データの取得・保存を担当。
+- **Indicator Calculator**: テクニカル指標（MA, RSI等）の計算を担当。
+- **Feature Engine**: 指標や生データを基にした市場・企業の特性（特徴量）の定量化を担当。
+- **Pattern Detector**: チャートパターン（ダブルボトム等）の検出を担当。
+- **Score Engine**: 特徴量とパターン検出結果を統合し、最終的なスコアを算出。
+- **Screener / Ranking**: スコアに基づいた銘柄の絞り込みと順位付け。
+- **Presentation**: 分析結果をユーザーに提示（CLI/将来的なGUI）。
+
+ドキュメントは、目的別に以下の3つのカテゴリに分かれています。
+
+- **要件定義 (Requirements)**: プロジェクトの背景、目的、およびシステムが実現すべき機能を定義しています。
+    - [要件定義書](requirements/requirements.md)
+- **仕様 (Specifications)**: 「何を」評価・検出するかという具体的なロジックや対象を定義しています。
+    - [特徴量一覧](specifications/feature_list.md)
+    - [パターン一覧](specifications/pattern_list.md)
+    - [指標仕様](specifications/indicators.md)
+    - [スコアリング仕様](specifications/scoreing.md)
+- **設計 (Design)**: 「どのように」システムを構築し、各モジュールを実装するかを定義しています。
+    - [設計の全体概要](design/README.md)
+    - [アーキテクチャ設計](design/architecture.md)
+    - [データモデル設計](design/data_model.md)
+    - [特徴量エンジン設計](design/feature_engine.md)
+    - [インジケーター設計](design/indicator.md)
+    - [パターン検出器設計](design/pattern_detector.md)
+    - [スコアエンジン設計](design/score_engine.md)
+    - [ディレクトリ構造設計](design/directory_structure.md)
+    - [クラス設計](design/class_design.md)
+    - [API・モジュール連携設計](design/api_module_design.md)
+
+## 3. 開発フェーズごとの計画
+
+### 3.1. フェーズ1: コア機能の確立 (完了)
+- [x] プロジェクト名とコンセプトの決定
+    - プロジェクト名: Project Atlas
+    - 開発目的: スイングトレード向け株式分析支援システム
+    - ターゲットユーザー: 自分
+    - 売買スタイル: 週〜月のスイングトレード、チャート分析主、ファンダメンタルズ分析補助
+- [x] システム全体構成の定義
+    - システム構成図の作成 (`docs/design/architecture.md`)
+    - データ取得フロー、分析フロー、スコアリングフロー、出力フローの概要定義
+- [x] 主要設計書の作成とレビュー
+    - 要件定義書 (`docs/requirements/requirements.md`)
+    - 各種仕様書 (`docs/specifications/`)
+    - システム設計書 (`docs/design/` 配下の各ファイル)
+        - アーキテクチャ設計 (`docs/design/architecture.md`)
+        - データモデル設計 (`docs/design/data_model.md`)
+        - ディレクトリ構造設計 (`docs/design/directory_structure.md`)
+        - クラス設計 (`docs/design/class_design.md`)
+        - API・モジュール連携設計 (`docs/design/api_module_design.md`)
+- [x] コア機能の基本実装と単体テスト
+    - Data Collector の実装とテスト
+    - Indicator Calculator の実装とテスト
+    - Feature Engine の実装とテスト (最低1つの特徴量)
+    - Pattern Detector の実装とテスト (最低1つのパターン)
+    - Score Engine の実装とテスト (総合スコア)
+    - Screener と Ranking の基本実装
+    - Presentation (CLI) の実装
+
+### 3.2. フェーズ2: 機能拡張と改善 (進行中)
+- [ ] **特徴量とパターンの追加**
+    - [ ] `docs/specifications/feature_list.md` に記載された全ての特徴量を追加実装する
+        - [x] M001: MAAlignmentScore
+        - [ ] P001: PullbackScore
+        - P002: BreakoutScore
+        - T001: TrendStrengthScore
+        - V001: VolumeScore
+        - O001: MomentumScore
+        - R001: VolatilityScore
+        - R002: RiskScore
+        - S001: SupportResistanceScore
+        - F001: ProfitabilityScore
+        - F002: GrowthScore
+        - F003: ValuationScore
+        - F004: FinancialHealthScore
+        - F005: EarningsQualityScore
+    - [ ] `docs/specifications/pattern_list.md` に記載された全てのパターンを追加実装する
+        - R001: DoubleBottom
+        - R002: DoubleTop
+    - [ ] 各特徴量/パターンに対応する単体テストを作成・実行する
+- [ ] **データ永続化の実装**
+    - [ ] OHLCVデータ、財務データ、計算済み指標、特徴量、パターンの永続化ロジックを実装する (SQLite/Parquet)
+    - [ ] キャッシュ機構を強化する
+- [ ] **高機能なスクリーニングとランキング**
+    - [ ] 複数の条件を組み合わせたスクリーニング機能の実装
+    - [ ] ランキング表示のカスタマイズ機能
+- [ ] **エラーハンドリングとロギングの強化**
+    - [ ] 例外処理の一元化と詳細なロギング機能の実装
+    - [ ] 警告・エラーメッセージの改善
+- [ ] **パフォーマンス最適化**
+    - [ ] 大量データ処理におけるボトルネックの特定と改善
+    - [ ] 並列処理、高速化ライブラリの導入検討
+
+### 3.3. フェーズ3: バックテストとUI/UX (未着手)
+- [ ] **バックテスト機能の実装**
+    - [ ] 過去データを用いた売買戦略の検証機能
+    - [ ] パフォーマンス指標の算出と表示
+- [ ] **GUIの開発 (検討)**
+    - [ ] Streamlit, Dash, PyQtなどを用いたGUI化の検討とプロトタイプ開発
+- [ ] **アラート機能**
+    - [ ] 特定の条件が満たされた場合に通知する機能
+
+## 4. 今後のマイルストーン (現時点での暫定版)
+- [ ] 2026/08/31: フェーズ2の「特徴量とパターンの追加」完了
+- [ ] 2026/09/30: フェーズ2の「データ永続化の実装」完了
+- [ ] 2026/10/31: フェーズ2の全項目完了
+- [ ] 2026/12/31: フェーズ3の「バックテスト機能の実装」完了
+
+## 5. 実行ログ (最新の作業のみ記載)
+- 2026/08/23: 移動平均線配列スコア (`M001_MAAlignmentScore`) の実装、および対応する単体テストの作成・調整を実施。全てのテストが正常にパスすることを確認。
+- 2026/08/02: `docs/_plan.md` にフェーズ2の「特徴量とパターンの追加」に関する詳細なタスクと完了条件を追記。
+- 2026/07/26: ディレクトリ構造の作成と、`src/main.py` の基本実装、主要なモデル、設定、各モジュールのインターフェースと初期クラス（データ収集、指標計算、特徴量計算、パターン検出、スコアリング、スクリーニング、ランキング、結果表示）を実装。対応する単体テストも作成・修正し、全テストケースが合格することを確認。`work/plan.md` を `work/initial_setup_plan.md` にリネームし、`docs/_plan.md` をプロジェクト全体の開発計画書として更新。
+
+## 6. テスト計画 (詳細は各モジュールのテストファイルを参照)
+
+### 6.1. Data Collector
+- **テストファイル:** `tests/unit/data_collector/test_collector.py`
+- **主要テストケース:** OHLCVデータ取得成功・空データ処理、財務データ取得、モジュールレベル関数テスト
+
+### 6.2. Indicator Calculator
+- **テストファイル:** `tests/unit/indicator_calculator/test_calculator.py`
+- **主要テストケース:** SMA/RSI/MACD計算、統合計算、空データ処理
+
+### 6.3. Feature Engine
+- **テストファイル:** `tests/unit/feature_engine/test_features.py`
+- **主要テストケース:** 特徴量プロパティ、各種トレンド状況でのスコア計算、空データ処理、スコア正規化
+
+### 6.4. Pattern Detector
+- **テストファイル:** `tests/unit/pattern_detector/test_patterns.py`
+- **主要テストケース:** パターンプロパティ、有効/無効なハンマー検出、空データ処理、信頼度計算
+
+### 6.5. Score Engine
+- **テストファイル:** `tests/unit/score_engine/test_scores.py`
+- **主要テストケース:** スコアプロパティ、総合スコア計算、空データ処理、スコア正規化
+
+### 6.6. Feature Engine (Moving Average)
+- **テストファイル:** `tests/unit/feature_engine/moving_average/test_ma_alignment_score.py`
+- **主要テストケース:** 特徴量プロパティ、各種並び状態（強い上昇、上昇、中立、下降、強い下降）でのスコア計算、データ不足時のハンドリング、スコア正規化

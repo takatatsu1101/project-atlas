@@ -1,0 +1,15 @@
+{
+  "name": "Debug pytest",
+  "type": "debugpy",
+  "request": "launch",
+  "module": "pytest",
+  "args": [
+    "-s",
+    "tests"
+  ],
+  "cwd": "${workspaceFolder}",
+  "python": "${command:python.interpreterPath}",
+  "envFile": "${workspaceFolder}/.env", // この行を追加
+  "purpose": ["debug-test"], // この行を追加
+  "justMyCode": false
+}
