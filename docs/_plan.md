@@ -95,8 +95,8 @@ Project Atlas は、スイングトレード向けの株式分析支援システ
         - [x] F004: FinancialHealthScore
         - [x] F005: EarningsQualityScore
     - [ ] `docs/specifications/pattern_list.md` に記載された全てのパターンを追加実装する
-        - R001: DoubleBottom
-        - R002: DoubleTop
+        - [x] R001: DoubleBottom
+        - [x] R002: DoubleTop
     - [ ] 各特徴量/パターンに対応する単体テストを作成・実行する
 - [ ] **データ永続化の実装**
     - [ ] OHLCVデータ、財務データ、計算済み指標、特徴量、パターンの永続化ロジックを実装する (SQLite/Parquet)
@@ -127,6 +127,7 @@ Project Atlas は、スイングトレード向けの株式分析支援システ
 - [ ] 2026/12/31: フェーズ3の「バックテスト機能の実装」完了
 
 ## 5. 実行ログ (最新の作業のみ記載)
+- 2026/08/23: チャートパターン転換一括パック（`R001: DoubleBottom`、`R002: DoubleTop`）の実装、および対応するすべての単体テスト（計10件）の作成を実施。すべてのテストが正常にパスすることを確認。
 - 2026/08/23: ファンダメンタルズ評価一括パック（`F001`〜`F005`）の実装、および対応するすべての単体テスト（計21件）の作成を実施。すべてのテストが正常にパスすることを確認。
 - 2026/08/23: ボラティリティ評価 (`R001_VolatilityScore`) の実装、および対応する単体テストの作成を実施。全てのテストが正常にパスすることを確認。
 - 2026/08/23: モメンタム評価 (`O001_MomentumScore`) の実装、および対応する単体テストの作成を実施。全てのテストが正常にパスすることを確認。
@@ -187,6 +188,14 @@ Project Atlas は、スイングトレード向けの株式分析支援システ
 ### 6.12. Feature Engine (Volatility)
 - **テストファイル:** `tests/unit/feature_engine/risc/test_volatility_score.py`
 - **主要テストケース:** 特徴量プロパティ、高ボラティリティ（平均の2倍以上）、低ボラティリティ、データ不足時のハンドリング、スコア正規化
+
+### 6.13. Pattern Detector (Reversal - DoubleBottom)
+- **テストファイル:** `tests/unit/pattern_detector/reversal/test_double_bottom.py`
+- **主要テストケース:** パターンプロパティ、有効なダブルボトム（ネック上抜け）、形成途中のダブルボトム、不成立（サポート割れ）の検出、データ不足時のハンドリング
+
+### 6.14. Pattern Detector (Reversal - DoubleTop)
+- **テストファイル:** `tests/unit/pattern_detector/reversal/test_double_top.py`
+- **主要テストケース:** パターンプロパティ、有効なダブルトップ（ネック下抜け）、形成途中のダブルトップ、不成立（高値ブレイク）の検出、データ不足時のハンドリング
 
 ### 6.13. Feature Engine (Fundamental - Profitability)
 - **テストファイル:** `tests/unit/feature_engine/fundamental/test_profitability_score.py`

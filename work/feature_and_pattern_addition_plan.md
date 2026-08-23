@@ -105,7 +105,7 @@
 ### 3.2. パターン (`Pattern`) の追加
 `docs/specifications/patterns/pattern_list.md` より、以下のP1優先度のパターンを実装します。
 
-- [ ] **R001: DoubleBottom (ダブルボトム)**
+- [x] **R001: DoubleBottom (ダブルボトム)**
     - 完了条件:
         - `src/pattern_detector/patterns/reversal/double_bottom.py` を新規作成し、`IPattern` インターフェースを実装する。
         - ダブルボトムパターンを検出するロジックを実装する。
@@ -113,7 +113,7 @@
         - `tests/unit/pattern_detector/test_double_bottom.py` を新規作成し、単体テストを実装・実行し、成功することを確認する。
         - `docs/_plan.md` と本計画書を更新する。
 
-- [ ] **R002: DoubleTop (ダブルトップ)**
+- [x] **R002: DoubleTop (ダブルトップ)**
     - 完了条件:
         - `src/pattern_detector/patterns/reversal/double_top.py` を新規作成し、`IPattern` インターフェースを実装する。
         - ダブルトップパターンを検出するロジックを実装する。
@@ -127,9 +127,10 @@
 - 2026/08/23: 新規ブランチ `feat/P002-breakout-score` にて `P002: BreakoutScore` の実装、および対応する単体テスト of 作成が完了しました。すべてのテストケースがパスすることを確認。
 - 2026/08/23: まとめブランチ `feat/technical-features-pack` にて `T001: TrendStrengthScore` の実装、および対応する単体テストの作成が完了しました。
 - 2026/08/23: まとめブランチ `feat/technical-features-pack` にて `V001: VolumeScore` の実装、および対応する単体テスト of 作成が完了しました。
-- 2026/08/23: まとめブランチ `feat/technical-features-pack` にて `O001: MomentumScore` の実装、および対応する単体テスト of 作成が完了しました。
+- 2026/08/23: まとめブランチ `feat/technical-features-pack` にて `O001: MomentumScore` の実装、および対応する単体テスト of 作成が完了しました.
 - 2026/08/23: まとめブランチ `feat/technical-features-pack` にて `R001: VolatilityScore` の実装、および対応する単体テスト of 作成が完了しました。これでテクニカル特徴量一括パックの実装がすべて完了。
 - 2026/08/23: まとめブランチ `feat/fundamental-features-pack` にて、F001（収益性）、F002（成長性）、F003（割安性）、F004（財務健全性）、F005（利益の質）の5つのファンダメンタルズ特徴量と対応する単体テストをすべて実装完了しました。
+- 2026/08/23: まとめブランチ `feat/reversal-patterns-pack` にて、R001（ダブルボトム）、R002（ダブルトップ）の2つの転換チャートパターン検出モジュールと、対応する単体テストをすべて実装完了しました。
 
 ## 5. 改善点・課題 (work/reflection.mdに詳細を記載)
 - (ここに実装中に見つかった改善点や課題の概要を記載します。詳細は `work/reflection.md` を参照してください)
