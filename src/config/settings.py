@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     # 例えば、特徴量計算の並列処理設定など
     FEATURE_ENGINE_PARALLEL_PROCESSES: int = 4
 
-    model_config = SettingsConfigDict(env_file=".env")
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 def load_settings(env: str = "development") -> Settings:
     """
