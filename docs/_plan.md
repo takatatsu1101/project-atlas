@@ -85,7 +85,7 @@ Project Atlas は、スイングトレード向けの株式分析支援システ
         - [x] P002: BreakoutScore
         - [x] T001: TrendStrengthScore
         - [x] V001: VolumeScore
-        - O001: MomentumScore
+        - [x] O001: MomentumScore
         - R001: VolatilityScore
         - R002: RiskScore
         - S001: SupportResistanceScore
@@ -127,6 +127,7 @@ Project Atlas は、スイングトレード向けの株式分析支援システ
 - [ ] 2026/12/31: フェーズ3の「バックテスト機能の実装」完了
 
 ## 5. 実行ログ (最新の作業のみ記載)
+- 2026/08/23: モメンタム評価 (`O001_MomentumScore`) の実装、および対応する単体テストの作成を実施。全てのテストが正常にパスすることを確認。
 - 2026/08/23: 出来高評価 (`V001_VolumeScore`) の実装、および対応する単体テストの作成を実施。全てのテストが正常にパスすることを確認。
 - 2026/08/23: トレンド強度評価 (`T001_TrendStrengthScore`) の実装、および対応する単体テストの作成を実施。全てのテストが正常にパスすることを確認。
 - 2026/08/23: ブレイクアウト評価 (`P002_BreakoutScore`) の実装、および対応する単体テストの作成を実施。全てのテストが正常にパスすることを確認.
@@ -176,3 +177,7 @@ Project Atlas は、スイングトレード向けの株式分析支援システ
 ### 6.10. Feature Engine (Volume)
 - **テストファイル:** `tests/unit/feature_engine/volume/test_volume_score.py`
 - **主要テストケース:** 特徴量プロパティ、急増水準（平均に対する比率）、短期トレンド、株価方向との整合性を加味したスコア計算、データ不足時のハンドリング、スコア正規化
+
+### 6.11. Feature Engine (Oscillator)
+- **テストファイル:** `tests/unit/feature_engine/oscillator/test_momentum_score.py`
+- **主要テストケース:** 特徴量プロパティ、上昇モメンタム、下降モメンタム、MACDデータ欠損時やデータ不足時のハンドリング、スコア正規化

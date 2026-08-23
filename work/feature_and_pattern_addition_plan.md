@@ -53,6 +53,13 @@
         - `tests/unit/feature_engine/volume/test_volume_score.py` に単体テストを実装・実行し、成功することを確認する。
         - `docs/_plan.md` と本計画書を更新する。
 
+- [x] **O001: MomentumScore (モメンタム評価)**
+    - 完了条件:
+        - `src/feature_engine/features/oscillator/momentum_score.py` を新規作成し、`IFeature` インターフェースを実装する。
+        - RSIとMACDの挙動を組み合わせて売買エネルギーや勢いをスコア化する。
+        - `tests/unit/feature_engine/oscillator/test_momentum_score.py` に単体テストを実装・実行し、成功することを確認する。
+        - `docs/_plan.md` と本計画書を更新する。
+
 ### 3.2. パターン (`Pattern`) の追加
 `docs/specifications/patterns/pattern_list.md` より、以下のP1優先度のパターンを実装します。
 
@@ -78,6 +85,7 @@
 - 2026/08/23: 新規ブランチ `feat/P002-breakout-score` にて `P002: BreakoutScore` の実装、および対応する単体テストの作成が完了しました。すべてのテストケースがパスすることを確認。
 - 2026/08/23: まとめブランチ `feat/technical-features-pack` にて `T001: TrendStrengthScore` の実装、および対応する単体テストの作成が完了しました。
 - 2026/08/23: まとめブランチ `feat/technical-features-pack` にて `V001: VolumeScore` の実装、および対応する単体テストの作成が完了しました。
+- 2026/08/23: まとめブランチ `feat/technical-features-pack` にて `O001: MomentumScore` の実装、および対応する単体テストの作成が完了しました。
 
 ## 5. 改善点・課題 (work/reflection.mdに詳細を記載)
 - (ここに実装中に見つかった改善点や課題の概要を記載します。詳細は `work/reflection.md` を参照してください)
