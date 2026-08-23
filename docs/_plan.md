@@ -78,8 +78,8 @@ Project Atlas は、スイングトレード向けの株式分析支援システ
     - Presentation (CLI) の実装
 
 ### 3.2. フェーズ2: 機能拡張と改善 (進行中)
-- [ ] **特徴量とパターンの追加**
-    - [ ] `docs/specifications/feature_list.md` に記載された全ての特徴量を追加実装する
+- [x] **特徴量とパターンの追加**
+    - [x] `docs/specifications/feature_list.md` に記載された全ての特徴量を追加実装する
         - [x] M001: MAAlignmentScore
         - [x] P001: PullbackScore
         - [x] P002: BreakoutScore
@@ -94,10 +94,10 @@ Project Atlas は、スイングトレード向けの株式分析支援システ
         - [x] F003: ValuationScore
         - [x] F004: FinancialHealthScore
         - [x] F005: EarningsQualityScore
-    - [ ] `docs/specifications/pattern_list.md` に記載された全てのパターンを追加実装する
+    - [x] `docs/specifications/pattern_list.md` に記載された全てのパターンを追加実装する
         - [x] R001: DoubleBottom
         - [x] R002: DoubleTop
-    - [ ] 各特徴量/パターンに対応する単体テストを作成・実行する
+    - [x] 各特徴量/パターンに対応する単体テストおよび統合テストを作成・実行する
 - [ ] **データ永続化の実装**
     - [x] OHLCVデータ、財務データ、計算済み指標、特徴量、パターンの永続化ロジックを実装する (SQLite/Parquet)
     - [x] キャッシュ機構を強化する
@@ -127,6 +127,7 @@ Project Atlas は、スイングトレード向けの株式分析支援システ
 - [ ] 2026/12/31: フェーズ3の「バックテスト機能の実装」完了
 
 ## 5. 実行ログ (最新の作業のみ記載)
+- 2026/08/23: 全ての特徴量・パターンおよびスコアエンジンを統合するパイプライン統合テスト (`tests/integration/test_pipeline_integration.py`) を実装・実行し、レジストリの網羅性と総合スコア算出処理が正常に動作することを確認完了。「特徴量とパターンの追加」タスクを完了に更新。
 - 2026/08/23: データコレクターに、以前取得されたIR BANKの財務データJSONキャッシュ読み込み機能、およびOHLCV株価データのCSVキャッシュ機構を実装完了。Pydantic設定クラスの環境変数無視設定追加。101件すべてのユニットテストに合格。
 - 2026/08/23: チャートパターン転換一括パック（`R001: DoubleBottom`、`R002: DoubleTop`）の実装、および対応するすべての単体テスト（計10件）の作成を実施。すべてのテストが正常にパスすることを確認。
 - 2026/08/23: ファンダメンタルズ評価一括パック（`F001`〜`F005`）の実装、および対応するすべての単体テスト（計21件）の作成を実施。すべてのテストが正常にパスすることを確認。
