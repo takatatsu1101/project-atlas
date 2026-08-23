@@ -15,7 +15,7 @@
 ### 3.1. 特徴量 (`Feature`) の追加
 `docs/specifications/feature_list.md` より、以下のP1優先度の特徴量を実装します。
 
-- [ ] **M001: MAAlignmentScore (移動平均線の並び評価)**
+- [x] **M001: MAAlignmentScore (移動平均線の並び評価)**
     - 完了条件:
         - `src/feature_engine/features/moving_average/ma_alignment_score.py` を新規作成し、`IFeature` インターフェースを実装する。
         - 移動平均線の並び（例: 短期 > 中期 > 長期）に基づいてスコアを算出するロジックを実装する。
@@ -23,12 +23,12 @@
         - `tests/unit/feature_engine/test_ma_alignment_score.py` を新規作成し、単体テストを実装・実行し、成功することを確認する。
         - `docs/_plan.md` と本計画書を更新する。
 
-- [ ] **P001: PullbackScore (押し目の理想度)**
+- [x] **P001: PullbackScore (押し目の理想度)**
     - 完了条件:
         - `src/feature_engine/features/price_action/pullback_score.py` を新規作成し、`IFeature` インターフェースを実装する。
         - 押し目の理想度を評価するロジックを実装する。
         - `src/feature_engine/registry.py` に登録する。
-        - `tests/unit/feature_engine/test_pullback_score.py` を新規作成し、単体テストを実装・実行し、成功することを確認する。
+        - `tests/unit/feature_engine/price_action/test_pullback_score.py` を新規作成し、単体テストを実装・実行し、成功することを確認する。
         - `docs/_plan.md` と本計画書を更新する。
 
 - [ ] **P002: BreakoutScore (ブレイクアウトの強さ)**
@@ -59,7 +59,8 @@
         - `docs/_plan.md` と本計画書を更新する。
 
 ## 4. 実行ログ
-- (ここに作業の進捗を追記します)
+- 2026/08/23: `M001: MAAlignmentScore` の実装と対応する単体テストの調整・作成が完了しました。
+- 2026/08/23: `P001: PullbackScore` の実装、および対応する単体テストの作成が完了しました。すべてのテストケースがパスすることを確認。
 
 ## 5. 改善点・課題 (work/reflection.mdに詳細を記載)
 - (ここに実装中に見つかった改善点や課題の概要を記載します。詳細は `work/reflection.md` を参照してください)

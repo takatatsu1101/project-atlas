@@ -81,7 +81,7 @@ Project Atlas は、スイングトレード向けの株式分析支援システ
 - [ ] **特徴量とパターンの追加**
     - [ ] `docs/specifications/feature_list.md` に記載された全ての特徴量を追加実装する
         - [x] M001: MAAlignmentScore
-        - [ ] P001: PullbackScore
+        - [x] P001: PullbackScore
         - P002: BreakoutScore
         - T001: TrendStrengthScore
         - V001: VolumeScore
@@ -127,6 +127,7 @@ Project Atlas は、スイングトレード向けの株式分析支援システ
 - [ ] 2026/12/31: フェーズ3の「バックテスト機能の実装」完了
 
 ## 5. 実行ログ (最新の作業のみ記載)
+- 2026/08/23: 押し目評価 (`P001_PullbackScore`) の実装、および対応する単体テストの作成を実施。全てのテストが正常にパスすることを確認。
 - 2026/08/23: 移動平均線配列スコア (`M001_MAAlignmentScore`) の実装、および対応する単体テストの作成・調整を実施。全てのテストが正常にパスすることを確認。
 - 2026/08/02: `docs/_plan.md` にフェーズ2の「特徴量とパターンの追加」に関する詳細なタスクと完了条件を追記。
 - 2026/07/26: ディレクトリ構造の作成と、`src/main.py` の基本実装、主要なモデル、設定、各モジュールのインターフェースと初期クラス（データ収集、指標計算、特徴量計算、パターン検出、スコアリング、スクリーニング、ランキング、結果表示）を実装。対応する単体テストも作成・修正し、全テストケースが合格することを確認。`work/plan.md` を `work/initial_setup_plan.md` にリネームし、`docs/_plan.md` をプロジェクト全体の開発計画書として更新。
@@ -156,3 +157,7 @@ Project Atlas は、スイングトレード向けの株式分析支援システ
 ### 6.6. Feature Engine (Moving Average)
 - **テストファイル:** `tests/unit/feature_engine/moving_average/test_ma_alignment_score.py`
 - **主要テストケース:** 特徴量プロパティ、各種並び状態（強い上昇、上昇、中立、下降、強い下降）でのスコア計算、データ不足時のハンドリング、スコア正規化
+
+### 6.7. Feature Engine (Price Action)
+- **テストファイル:** `tests/unit/feature_engine/price_action/test_pullback_score.py`
+- **主要テストケース:** 特徴量プロパティ、各種調整状態（理想的な押し目、浅い押し目、長期線でのサポート押し目、下降トレンド/サポート割れ、データ不足）でのスコア計算、スコア正規化
