@@ -36,7 +36,35 @@
         - `src/feature_engine/features/price_action/breakout_score.py` を新規作成し、`IFeature` インターフェースを実装する。
         - ブレイクアウトの強さを評価するロジックを実装する。
         - `src/feature_engine/registry.py` に登録する。
-        - `tests/unit/feature_engine/price_action/test_breakout_score.py` を新規作成し、単体テストを実装・実行し、成功することを確認する。
+        - `tests/unit/feature_engine/price_action/test_breakout_score.py` を新規作成し、単体テストを実装・実行し、成功することを確認する.
+        - `docs/_plan.md` と本計画書を更新する。
+
+- [x] **T001: TrendStrengthScore (トレンド強度)**
+    - 完了条件:
+        - `src/feature_engine/features/trend.py` に `TrendStrengthScore` を実装する。
+        - 移動平均線の並び、傾き、株価位置、高値・安値を総合的にスコア化する。
+        - `tests/unit/feature_engine/trend/test_trend_strength_score.py` に単体テストを実装・実行し、成功することを確認する。
+        - `docs/_plan.md` と本計画書を更新する。
+
+- [x] **V001: VolumeScore (出来高評価)**
+    - 完了条件:
+        - `src/feature_engine/features/volume/volume_score.py` を新規作成し、`IFeature` インターフェースを実装する。
+        - 出来高の急増、出来高移動平均の短期トレンド、株価方向との整合性をスコア化する。
+        - `tests/unit/feature_engine/volume/test_volume_score.py` に単体テストを実装・実行し、成功することを確認する。
+        - `docs/_plan.md` と本計画書を更新する。
+
+- [x] **O001: MomentumScore (モメンタム評価)**
+    - 完了条件:
+        - `src/feature_engine/features/oscillator/momentum_score.py` を新規作成し、`IFeature` インターフェースを実装する。
+        - RSIとMACDの挙動を組み合わせて売買エネルギーや勢いをスコア化する。
+        - `tests/unit/feature_engine/oscillator/test_momentum_score.py` に単体テストを実装・実行し、成功することを確認する。
+        - `docs/_plan.md` と本計画書を更新する。
+
+- [x] **R001: VolatilityScore (ボラティリティ評価)**
+    - 完了条件:
+        - `src/feature_engine/features/risc/volatility_score.py` を新規作成し、`IFeature` インターフェースを実装する。
+        - 過去の平均値動き(ATR)に対する現在の値動き(True Range)の比率をスコア化する。
+        - `tests/unit/feature_engine/risc/test_volatility_score.py` に単体テストを実装・実行し、成功することを確認する。
         - `docs/_plan.md` と本計画書を更新する。
 
 ### 3.2. パターン (`Pattern`) の追加
@@ -62,6 +90,10 @@
 - 2026/08/23: `M001: MAAlignmentScore` の実装と対応する単体テストの調整・作成が完了しました。
 - 2026/08/23: `P001: PullbackScore` の実装、および対応する単体テストの作成が完了しました。すべてのテストケースがパスすることを確認。
 - 2026/08/23: 新規ブランチ `feat/P002-breakout-score` にて `P002: BreakoutScore` の実装、および対応する単体テストの作成が完了しました。すべてのテストケースがパスすることを確認。
+- 2026/08/23: まとめブランチ `feat/technical-features-pack` にて `T001: TrendStrengthScore` の実装、および対応する単体テストの作成が完了しました。
+- 2026/08/23: まとめブランチ `feat/technical-features-pack` にて `V001: VolumeScore` の実装、および対応する単体テストの作成が完了しました。
+- 2026/08/23: まとめブランチ `feat/technical-features-pack` にて `O001: MomentumScore` の実装、および対応する単体テストの作成が完了しました。
+- 2026/08/23: まとめブランチ `feat/technical-features-pack` にて `R001: VolatilityScore` の実装、および対応する単体テストの作成が完了しました。これでテクニカル特徴量一括パックの実装がすべて完了。
 
 ## 5. 改善点・課題 (work/reflection.mdに詳細を記載)
 - (ここに実装中に見つかった改善点や課題の概要を記載します。詳細は `work/reflection.md` を参照してください)

@@ -83,10 +83,10 @@ Project Atlas は、スイングトレード向けの株式分析支援システ
         - [x] M001: MAAlignmentScore
         - [x] P001: PullbackScore
         - [x] P002: BreakoutScore
-        - T001: TrendStrengthScore
-        - V001: VolumeScore
-        - O001: MomentumScore
-        - R001: VolatilityScore
+        - [x] T001: TrendStrengthScore
+        - [x] V001: VolumeScore
+        - [x] O001: MomentumScore
+        - [x] R001: VolatilityScore
         - R002: RiskScore
         - S001: SupportResistanceScore
         - F001: ProfitabilityScore
@@ -127,7 +127,11 @@ Project Atlas は、スイングトレード向けの株式分析支援システ
 - [ ] 2026/12/31: フェーズ3の「バックテスト機能の実装」完了
 
 ## 5. 実行ログ (最新の作業のみ記載)
-- 2026/08/23: ブレイクアウト評価 (`P002_BreakoutScore`) の実装、および対応する単体テストの作成を実施。全てのテストが正常にパスすることを確認。
+- 2026/08/23: ボラティリティ評価 (`R001_VolatilityScore`) の実装、および対応する単体テストの作成を実施。全てのテストが正常にパスすることを確認。
+- 2026/08/23: モメンタム評価 (`O001_MomentumScore`) の実装、および対応する単体テストの作成を実施。全てのテストが正常にパスすることを確認。
+- 2026/08/23: 出来高評価 (`V001_VolumeScore`) の実装、および対応する単体テストの作成を実施。全てのテストが正常にパスすることを確認。
+- 2026/08/23: トレンド強度評価 (`T001_TrendStrengthScore`) の実装、および対応する単体テストの作成を実施。全てのテストが正常にパスすることを確認。
+- 2026/08/23: ブレイクアウト評価 (`P002_BreakoutScore`) の実装、および対応する単体テストの作成を実施。全てのテストが正常にパスすることを確認.
 - 2026/08/23: 押し目評価 (`P001_PullbackScore`) の実装、および対応する単体テストの作成を実施。全てのテストが正常にパスすることを確認。
 - 2026/08/23: 移動平均線配列スコア (`M001_MAAlignmentScore`) の実装、および対応する単体テストの作成・調整を実施。全てのテストが正常にパスすることを確認。
 - 2026/08/02: `docs/_plan.md` にフェーズ2の「特徴量とパターンの追加」に関する詳細なタスクと完了条件を追記。
@@ -166,3 +170,19 @@ Project Atlas は、スイングトレード向けの株式分析支援システ
 ### 6.8. Feature Engine (Breakout)
 - **テストファイル:** `tests/unit/feature_engine/price_action/test_breakout_score.py`
 - **主要テストケース:** 特徴量プロパティ、各種ブレイクアウト状況（健全なブレイク初動、少し買い遅れのブレイク、過熱したブレイク、ブレイク目前、射程圏内、まだ遠いレンジ相場、データ不足）でのスコア計算、スコア正規化
+
+### 6.9. Feature Engine (Trend)
+- **テストファイル:** `tests/unit/feature_engine/trend/test_trend_strength_score.py`
+- **主要テストケース:** 特徴量プロパティ、上昇・下降トレンド等での総合強度（並び、傾き、株価位置、高安切り上げ）のスコア計算、データ不足時のハンドリング、スコア正規化
+
+### 6.10. Feature Engine (Volume)
+- **テストファイル:** `tests/unit/feature_engine/volume/test_volume_score.py`
+- **主要テストケース:** 特徴量プロパティ、急増水準（平均に対する比率）、短期トレンド、株価方向との整合性を加味したスコア計算、データ不足時のハンドリング、スコア正規化
+
+### 6.11. Feature Engine (Oscillator)
+- **テストファイル:** `tests/unit/feature_engine/oscillator/test_momentum_score.py`
+- **主要テストケース:** 特徴量プロパティ、上昇モメンタム、下降モメンタム、MACDデータ欠損時やデータ不足時のハンドリング、スコア正規化
+
+### 6.12. Feature Engine (Volatility)
+- **テストファイル:** `tests/unit/feature_engine/risc/test_volatility_score.py`
+- **主要テストケース:** 特徴量プロパティ、高ボラティリティ（平均の2倍以上）、低ボラティリティ、データ不足時のハンドリング、スコア正規化
