@@ -82,7 +82,7 @@ Project Atlas は、スイングトレード向けの株式分析支援システ
     - [ ] `docs/specifications/feature_list.md` に記載された全ての特徴量を追加実装する
         - [x] M001: MAAlignmentScore
         - [x] P001: PullbackScore
-        - P002: BreakoutScore
+        - [x] P002: BreakoutScore
         - T001: TrendStrengthScore
         - V001: VolumeScore
         - O001: MomentumScore
@@ -127,6 +127,7 @@ Project Atlas は、スイングトレード向けの株式分析支援システ
 - [ ] 2026/12/31: フェーズ3の「バックテスト機能の実装」完了
 
 ## 5. 実行ログ (最新の作業のみ記載)
+- 2026/08/23: ブレイクアウト評価 (`P002_BreakoutScore`) の実装、および対応する単体テストの作成を実施。全てのテストが正常にパスすることを確認。
 - 2026/08/23: 押し目評価 (`P001_PullbackScore`) の実装、および対応する単体テストの作成を実施。全てのテストが正常にパスすることを確認。
 - 2026/08/23: 移動平均線配列スコア (`M001_MAAlignmentScore`) の実装、および対応する単体テストの作成・調整を実施。全てのテストが正常にパスすることを確認。
 - 2026/08/02: `docs/_plan.md` にフェーズ2の「特徴量とパターンの追加」に関する詳細なタスクと完了条件を追記。
@@ -161,3 +162,7 @@ Project Atlas は、スイングトレード向けの株式分析支援システ
 ### 6.7. Feature Engine (Price Action)
 - **テストファイル:** `tests/unit/feature_engine/price_action/test_pullback_score.py`
 - **主要テストケース:** 特徴量プロパティ、各種調整状態（理想的な押し目、浅い押し目、長期線でのサポート押し目、下降トレンド/サポート割れ、データ不足）でのスコア計算、スコア正規化
+
+### 6.8. Feature Engine (Breakout)
+- **テストファイル:** `tests/unit/feature_engine/price_action/test_breakout_score.py`
+- **主要テストケース:** 特徴量プロパティ、各種ブレイクアウト状況（健全なブレイク初動、少し買い遅れのブレイク、過熱したブレイク、ブレイク目前、射程圏内、まだ遠いレンジ相場、データ不足）でのスコア計算、スコア正規化
