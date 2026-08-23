@@ -31,12 +31,12 @@
         - `tests/unit/feature_engine/price_action/test_pullback_score.py` を新規作成し、単体テストを実装・実行し、成功することを確認する。
         - `docs/_plan.md` と本計画書を更新する。
 
-- [ ] **P002: BreakoutScore (ブレイクアウトの強さ)**
+- [x] **P002: BreakoutScore (ブレイクアウトの強さ)**
     - 完了条件:
         - `src/feature_engine/features/price_action/breakout_score.py` を新規作成し、`IFeature` インターフェースを実装する。
         - ブレイクアウトの強さを評価するロジックを実装する。
         - `src/feature_engine/registry.py` に登録する。
-        - `tests/unit/feature_engine/test_breakout_score.py` を新規作成し、単体テストを実装・実行し、成功することを確認する。
+        - `tests/unit/feature_engine/price_action/test_breakout_score.py` を新規作成し、単体テストを実装・実行し、成功することを確認する。
         - `docs/_plan.md` と本計画書を更新する。
 
 ### 3.2. パターン (`Pattern`) の追加
@@ -61,6 +61,7 @@
 ## 4. 実行ログ
 - 2026/08/23: `M001: MAAlignmentScore` の実装と対応する単体テストの調整・作成が完了しました。
 - 2026/08/23: `P001: PullbackScore` の実装、および対応する単体テストの作成が完了しました。すべてのテストケースがパスすることを確認。
+- 2026/08/23: 新規ブランチ `feat/P002-breakout-score` にて `P002: BreakoutScore` の実装、および対応する単体テストの作成が完了しました。すべてのテストケースがパスすることを確認。
 
 ## 5. 改善点・課題 (work/reflection.mdに詳細を記載)
 - (ここに実装中に見つかった改善点や課題の概要を記載します。詳細は `work/reflection.md` を参照してください)
