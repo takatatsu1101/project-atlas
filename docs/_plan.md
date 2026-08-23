@@ -89,11 +89,11 @@ Project Atlas は、スイングトレード向けの株式分析支援システ
         - [x] R001: VolatilityScore
         - R002: RiskScore
         - S001: SupportResistanceScore
-        - F001: ProfitabilityScore
-        - F002: GrowthScore
-        - F003: ValuationScore
-        - F004: FinancialHealthScore
-        - F005: EarningsQualityScore
+        - [x] F001: ProfitabilityScore
+        - [x] F002: GrowthScore
+        - [x] F003: ValuationScore
+        - [x] F004: FinancialHealthScore
+        - [x] F005: EarningsQualityScore
     - [ ] `docs/specifications/pattern_list.md` に記載された全てのパターンを追加実装する
         - R001: DoubleBottom
         - R002: DoubleTop
@@ -127,6 +127,7 @@ Project Atlas は、スイングトレード向けの株式分析支援システ
 - [ ] 2026/12/31: フェーズ3の「バックテスト機能の実装」完了
 
 ## 5. 実行ログ (最新の作業のみ記載)
+- 2026/08/23: ファンダメンタルズ評価一括パック（`F001`〜`F005`）の実装、および対応するすべての単体テスト（計21件）の作成を実施。すべてのテストが正常にパスすることを確認。
 - 2026/08/23: ボラティリティ評価 (`R001_VolatilityScore`) の実装、および対応する単体テストの作成を実施。全てのテストが正常にパスすることを確認。
 - 2026/08/23: モメンタム評価 (`O001_MomentumScore`) の実装、および対応する単体テストの作成を実施。全てのテストが正常にパスすることを確認。
 - 2026/08/23: 出来高評価 (`V001_VolumeScore`) の実装、および対応する単体テストの作成を実施。全てのテストが正常にパスすることを確認。
@@ -186,3 +187,23 @@ Project Atlas は、スイングトレード向けの株式分析支援システ
 ### 6.12. Feature Engine (Volatility)
 - **テストファイル:** `tests/unit/feature_engine/risc/test_volatility_score.py`
 - **主要テストケース:** 特徴量プロパティ、高ボラティリティ（平均の2倍以上）、低ボラティリティ、データ不足時のハンドリング、スコア正規化
+
+### 6.13. Feature Engine (Fundamental - Profitability)
+- **テストファイル:** `tests/unit/feature_engine/fundamental/test_profitability_score.py`
+- **主要テストケース:** 特徴量プロパティ、高収益ケース（ROE/ROA/営業利益率高）、赤字ケース、データ欠損時のハンドリング、スコア正規化
+
+### 6.14. Feature Engine (Fundamental - Growth)
+- **テストファイル:** `tests/unit/feature_engine/fundamental/test_growth_score.py`
+- **主要テストケース:** 特徴量プロパティ、5年平均成長ケース（売上高・純利益）、3年平均ケース、減収減益ケース、データ欠損時のハンドリング、スコア正規化
+
+### 6.15. Feature Engine (Fundamental - Valuation)
+- **テストファイル:** `tests/unit/feature_engine/fundamental/test_valuation_score.py`
+- **主要テストケース:** 特徴量プロパティ、非常に割安なケース（PER/PBR低）、割高ケース、データ欠損時のハンドリング、スコア正規化
+
+### 6.16. Feature Engine (Fundamental - Financial Health)
+- **テストファイル:** `tests/unit/feature_engine/fundamental/test_financial_health_score.py`
+- **主要テストケース:** 特徴量プロパティ、健全な自己資本蓄積と黒字安定ケース（BPS>EPS & 営業/純利益黒字）、脆弱ケース、データ欠損時のハンドリング、スコア正規化
+
+### 6.17. Feature Engine (Fundamental - Earnings Quality)
+- **テストファイル:** `tests/unit/feature_engine/fundamental/test_earnings_quality_score.py`
+- **主要テストケース:** 特徴量プロパティ、本業と最終利益の整合、健全な財務レバレッジ（ROE/ROA比）、一時利益依存ケース、データ欠損時のハンドリング、スコア正規化

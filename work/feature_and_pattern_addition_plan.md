@@ -62,9 +62,44 @@
 
 - [x] **R001: VolatilityScore (ボラティリティ評価)**
     - 完了条件:
-        - `src/feature_engine/features/risc/volatility_score.py` を新規作成し、`IFeature` インターフェースを実装する。
+        - `src/feature_engine/features/risc/volatility_score.py` を新規作成し,`IFeature` インターフェースを実装する。
         - 過去の平均値動き(ATR)に対する現在の値動き(True Range)の比率をスコア化する。
         - `tests/unit/feature_engine/risc/test_volatility_score.py` に単体テストを実装・実行し、成功することを確認する。
+        - `docs/_plan.md` と本計画書を更新する。
+
+- [x] **F001: ProfitabilityScore (収益性評価)**
+    - 完了条件:
+        - `src/feature_engine/features/fundamental/profitability_score.py` を新規作成し、`IFeature` を実装。
+        - ROE, ROA, 営業利益率をスコア化する。
+        - `tests/unit/feature_engine/fundamental/test_profitability_score.py` にて単体テストを実行・成功を確認。
+        - `docs/_plan.md` と本計画書を更新する。
+
+- [x] **F002: GrowthScore (成長性評価)**
+    - 完了条件:
+        - `src/feature_engine/features/fundamental/growth_score.py` を新規作成し、`IFeature` を実装。
+        - 3年/5年平均売上高・純利益成長率をスコア化する。
+        - `tests/unit/feature_engine/fundamental/test_growth_score.py` にて単体テストを実行・成功を確認。
+        - `docs/_plan.md` と本計画書を更新する。
+
+- [x] **F003: ValuationScore (割安性評価)**
+    - 完了条件:
+        - `src/feature_engine/features/fundamental/valuation_score.py` を新規作成し、`IFeature` を実装。
+        - PER, PBRをスコア化する。
+        - `tests/unit/feature_engine/fundamental/test_valuation_score.py` にて単体テストを実行・成功を確認。
+        - `docs/_plan.md` と本計画書を更新する。
+
+- [x] **F004: FinancialHealthScore (財務健全性評価)**
+    - 完了条件:
+        - `src/feature_engine/features/fundamental/financial_health_score.py` を新規作成し、`IFeature` を実装。
+        - BPS/EPSおよび営業利益・純利益の安定性をスコア化する。
+        - `tests/unit/feature_engine/fundamental/test_financial_health_score.py` にて単体テストを実行・成功を確認。
+        - `docs/_plan.md` と本計画書を更新する。
+
+- [x] **F005: EarningsQualityScore (利益の質評価)**
+    - 完了条件:
+        - `src/feature_engine/features/fundamental/earnings_quality_score.py` を新規作成し、`IFeature` を実装。
+        - 営業利益と純利益の整合性およびレバレッジの健全性をスコア化する。
+        - `tests/unit/feature_engine/fundamental/test_earnings_quality_score.py` にて単体テストを実行・成功を確認。
         - `docs/_plan.md` と本計画書を更新する。
 
 ### 3.2. パターン (`Pattern`) の追加
@@ -89,11 +124,12 @@
 ## 4. 実行ログ
 - 2026/08/23: `M001: MAAlignmentScore` の実装と対応する単体テストの調整・作成が完了しました。
 - 2026/08/23: `P001: PullbackScore` の実装、および対応する単体テストの作成が完了しました。すべてのテストケースがパスすることを確認。
-- 2026/08/23: 新規ブランチ `feat/P002-breakout-score` にて `P002: BreakoutScore` の実装、および対応する単体テストの作成が完了しました。すべてのテストケースがパスすることを確認。
+- 2026/08/23: 新規ブランチ `feat/P002-breakout-score` にて `P002: BreakoutScore` の実装、および対応する単体テスト of 作成が完了しました。すべてのテストケースがパスすることを確認。
 - 2026/08/23: まとめブランチ `feat/technical-features-pack` にて `T001: TrendStrengthScore` の実装、および対応する単体テストの作成が完了しました。
-- 2026/08/23: まとめブランチ `feat/technical-features-pack` にて `V001: VolumeScore` の実装、および対応する単体テストの作成が完了しました。
-- 2026/08/23: まとめブランチ `feat/technical-features-pack` にて `O001: MomentumScore` の実装、および対応する単体テストの作成が完了しました。
-- 2026/08/23: まとめブランチ `feat/technical-features-pack` にて `R001: VolatilityScore` の実装、および対応する単体テストの作成が完了しました。これでテクニカル特徴量一括パックの実装がすべて完了。
+- 2026/08/23: まとめブランチ `feat/technical-features-pack` にて `V001: VolumeScore` の実装、および対応する単体テスト of 作成が完了しました。
+- 2026/08/23: まとめブランチ `feat/technical-features-pack` にて `O001: MomentumScore` の実装、および対応する単体テスト of 作成が完了しました。
+- 2026/08/23: まとめブランチ `feat/technical-features-pack` にて `R001: VolatilityScore` の実装、および対応する単体テスト of 作成が完了しました。これでテクニカル特徴量一括パックの実装がすべて完了。
+- 2026/08/23: まとめブランチ `feat/fundamental-features-pack` にて、F001（収益性）、F002（成長性）、F003（割安性）、F004（財務健全性）、F005（利益の質）の5つのファンダメンタルズ特徴量と対応する単体テストをすべて実装完了しました。
 
 ## 5. 改善点・課題 (work/reflection.mdに詳細を記載)
 - (ここに実装中に見つかった改善点や課題の概要を記載します。詳細は `work/reflection.md` を参照してください)
