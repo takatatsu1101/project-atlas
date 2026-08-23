@@ -109,7 +109,7 @@ Project Atlas は、スイングトレード向けの株式分析支援システ
     - [x] 例外処理の一元化とカスタム例外クラスの定義 (`src/common/exceptions.py`)
     - [x] 共通ロギングモジュールの実装 (`src/common/logger.py`)
     - [x] 共通モジュール・例外の単体テスト作成 (`tests/unit/common/test_common.py`)
-    - [ ] 各モジュール（Data Collector, Feature Engine等）へのエラーハンドリング・ロギングの本格適用
+    - [x] 各モジュール（Data Collector, Feature Engine等）へのエラーハンドリング・ロギングの本格適用 (Data Collector完了)
     - [ ] メイン実行フロー (`src/main.py`) のエンドツーエンド実動作テストと検証
 - [ ] **パフォーマンス最適化**
     - [ ] 大量データ処理におけるボトルネックの特定と改善
@@ -131,8 +131,8 @@ Project Atlas は、スイングトレード向けの株式分析支援システ
 - [ ] 2026/12/31: フェーズ3の「バックテスト機能の実装」完了
 
 ## 5. 実行ログ (最新の作業のみ記載)
+- 2026/08/23: `DataCollector` モジュールに共通ロガー (`src/common/logger.py`) およびカスタム例外 (`src/common/exceptions.py`) を適用し、関連する単体テストの正常通過を確認。`docs/_plan.md` を更新。
 - 2026/08/23: エラーハンドリングとロギングの強化として、共通例外クラス (`src/common/exceptions.py`) および共通ロギングモジュール (`src/common/logger.py`) を実装。対応する単体テスト (`tests/unit/common/test_common.py`) を追加し、正常にパスすることを確認。`docs/_plan.md` を更新。
-- 2026/08/23: スクリーニング (`Screener`) およびランキング・プレゼンテーション層 (`RankingGenerator`, `Presenter`) の単体テスト (`tests/unit/screener/test_screener.py`, `tests/unit/presentation/test_presenter.py`) を実装・実行し、すべてのテストが正常にパスすることを確認。`docs/_plan.md` を更新。
 - 2026/08/23: チャートパターン転換一括パック（`R001: DoubleBottom`、`R002: DoubleTop`）の実装、および対応するすべての単体テスト（計10件）の作成を実施。すべてのテストが正常にパスすることを確認。
 - 2026/08/23: ファンダメンタルズ評価一括パック（`F001`〜`F005`）の実装、および対応するすべての単体テスト（計21件）の作成を実施。すべてのテストが正常にパスすることを確認。
 - 2026/08/23: ボラティリティ評価 (`R001_VolatilityScore`) の実装、および対応する単体テストの作成を実施。全てのテストが正常にパスすることを確認。
