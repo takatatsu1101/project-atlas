@@ -24,6 +24,12 @@ class FinancialModel(BaseModel):
     revenue: Optional[float] = None
     operating_profit: Optional[float] = None
     net_profit: Optional[float] = None
+    revenue_growth: Optional[float] = None
+    net_profit_growth: Optional[float] = None
+    revenue_growth_3y_avg: Optional[float] = None
+    revenue_growth_5y_avg: Optional[float] = None
+    net_profit_growth_3y_avg: Optional[float] = None
+    net_profit_growth_5y_avg: Optional[float] = None
 
 class IndicatorSetModel(BaseModel):
     symbol: str
