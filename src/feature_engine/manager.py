@@ -5,10 +5,15 @@ from datetime import date
 from src.model.data_models import OhlcvModel, IndicatorSetModel, FinancialModel, FeatureSetModel, FeatureResultModel
 from src.feature_engine.registry import feature_registry
 from src.feature_engine.interfaces import IFeature
+from src.common.storage import StorageManager
+from src.common.logger import get_logger
+
+logger = get_logger("FeatureManager")
 
 class FeatureManager:
     def __init__(self):
         self.registry = feature_registry
+        self.storage = StorageManager()
 
     def calculate_features(
         self,
@@ -18,12 +23,22 @@ class FeatureManager:
         feature_ids: Optional[List[str]] = None
     ) -> List[FeatureSetModel]:
         """
-        指定された入力データに基づいて特徴量を計算し、結果のリストを返す。
+        指定された入力データに基づいて特徴量を計算し、結果のリストを返す（キャッシュ対応）。
         feature_idsが指定された場合は、その特徴量のみを計算する。
         """
         if not ohlcv_data or not indicator_data:
-            print("警告: OHLCVデータまたは指標データが不足しているため、特徴量を計算できません。")
+            logger.warning("OHLCVデータまたは指標データが不足しているため、特徴量を計算できません。")
             return []
+
+        symbol = ohlcv_data[0].symbol
+        f_suffix = "_".join(sorted(feature_ids)) if feature_ids else "all"
+        cache_path = f"cache/features_{symbol}_{f_suffix}.json"
+
+        # キャッシュチェック
+        cached_data = self.storage.load_json(cache_path)
+        if cached_data is not None and isinstance(cached_data, list) and len(cached_data) == len(ohlcv_data):
+            logger.info(f"{symbol} の特徴量をキャッシュからロードしました。")
+            return [FeatureSetModel(**item) for item in cached_data]
 
         all_feature_sets: Dict[date, List[FeatureResultModel]] = {}
 
@@ -33,13 +48,11 @@ class FeatureManager:
             for f_id in feature_ids:
                 features_to_calculate.append(self.registry.get_feature(f_id))
         else:
-            # 全ての特徴量を取得 (registry.pyのlist_featuresをIFeatureインスタンスで返すように修正が必要かも)
-            # 登録されている全ての特徴量を取得して追加
             for feature_info in self.registry.list_features():
                 features_to_calculate.append(self.registry.get_feature(feature_info["feature_id"]))
 
         for feature_instance in features_to_calculate:
-            print(f"特徴量 {feature_instance.feature_name} を計算中...")
+            logger.info(f"特徴量 {feature_instance.feature_name} を計算中...")
             feature_results = feature_instance.calculate(ohlcv_data, indicator_data, financial_data)
             for result in feature_results:
                 if result.date not in all_feature_sets:
@@ -50,12 +63,18 @@ class FeatureManager:
         final_feature_sets: List[FeatureSetModel] = []
         for date_key in sorted(all_feature_sets.keys()):
             final_feature_sets.append(FeatureSetModel(
-                symbol=ohlcv_data[0].symbol, # 全てのOHLCVデータが同じsymbolを持つと仮定
+                symbol=symbol,
                 date=date_key,
                 results=all_feature_sets[date_key]
             ))
 
-        print(f"{ohlcv_data[0].symbol} の特徴量計算が完了しました。")
+        # キャッシュとして保存
+        try:
+            self.storage.save_json([model.model_dump(mode="json") for model in final_feature_sets], cache_path)
+        except Exception as e:
+            logger.warning(f"特徴量キャッシュの保存に失敗しました: {e}")
+
+        logger.info(f"{symbol} の特徴量計算・キャッシュが完了しました。")
         return final_feature_sets
 
 # モジュールレベルでインスタンス化
