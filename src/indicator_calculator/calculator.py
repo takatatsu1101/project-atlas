@@ -3,8 +3,14 @@ from typing import List, Dict
 import pandas as pd
 
 from src.model.data_models import OhlcvModel, IndicatorSetModel
+from src.common.storage import StorageManager
+from src.common.logger import get_logger
+
+logger = get_logger("IndicatorCalculator")
 
 class IndicatorCalculator:
+    def __init__(self):
+        self.storage = StorageManager()
     def calculate_sma(self, ohlcv_data: List[OhlcvModel], period: int) -> List[float]:
         """
         単純移動平均 (SMA) を計算する。
@@ -57,10 +63,19 @@ class IndicatorCalculator:
 
     def calculate_indicators(self, ohlcv_data: List[OhlcvModel]) -> List[IndicatorSetModel]:
         """
-        OHLCVデータリストからテクニカル指標のセットを計算して返す。
+        OHLCVデータリストからテクニカル指標のセットを計算して返す（キャッシュ対応）。
         """
         if not ohlcv_data:
             return []
+
+        symbol = ohlcv_data[0].symbol
+        cache_path = f"cache/indicators_{symbol}.json"
+
+        # キャッシュのチェック (同じデータ件数や最新日付が一致していればロード可能だが、シンプルにキャッシュファイルが存在すればロードする例)
+        cached_data = self.storage.load_json(cache_path)
+        if cached_data is not None and isinstance(cached_data, list) and len(cached_data) == len(ohlcv_data):
+            logger.info(f"{symbol} のテクニカル指標をキャッシュからロードしました。")
+            return [IndicatorSetModel(**item) for item in cached_data]
 
         # 例として、SMA(5, 25, 75)、RSI(14)、MACDを計算
         sma_5 = self.calculate_sma(ohlcv_data, 5)
@@ -83,7 +98,14 @@ class IndicatorCalculator:
                 date=ohlcv.date,
                 indicators={k: v for k, v in indicators.items() if v is not None}
             ))
-        print(f"{ohlcv_data[0].symbol} のテクニカル指標を計算しました。")
+        
+        # 結果をJSONキャッシュとして保存
+        try:
+            self.storage.save_json([model.model_dump(mode="json") for model in indicator_sets], cache_path)
+        except Exception as e:
+            logger.warning(f"指標キャッシュの保存に失敗しました: {e}")
+
+        logger.info(f"{symbol} のテクニカル指標を計算・キャッシュしました。")
         return indicator_sets
 
 # モジュールレベルでインスタンス化
