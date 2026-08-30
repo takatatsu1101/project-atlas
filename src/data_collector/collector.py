@@ -177,7 +177,7 @@ class DataCollector:
 
     def _load_irbank_json(self, year: int, fy_type: str) -> Optional[Dict]:
         """
-        指定年度のIR BANKの財務JSONデータをロードする
+        指定年度のIR BANKの財務JSONデータをStorageManagerを利用してロードする
         """
         # 2010年以降の場合にサフィックス生成
         if year >= 2010:
@@ -195,14 +195,15 @@ class DataCollector:
                 print(f"エラー: IR BANKファイル({year_suffix}-{fy_type})取得失敗: {e}")
                 return None
                 
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except Exception as e:
-            print(f"エラー: JSON読込失敗({file_path}): {e}")
-            if os.path.exists(file_path):
-                os.remove(file_path) # 壊れたファイルを削除
-            return None
+        # StorageManagerのload_jsonを利用してロード
+        data = self.storage.load_json(file_path)
+        if data is None and os.path.exists(file_path):
+            # 読込失敗時は破損ファイルとして削除
+            try:
+                os.remove(file_path)
+            except Exception:
+                pass
+        return data
 
     def collect_financial_data(self, symbol: str, fiscal_year: int) -> Optional[FinancialModel]:
         """
