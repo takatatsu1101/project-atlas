@@ -68,9 +68,60 @@ def run_analysis(
     print(f"{symbol} の分析が完了しました。")
 
 if __name__ == "__main__":
-    # 例として、特定の銘柄と期間で分析を実行
-    target_symbol = "9984.T"  # ソフトバンクグループの銘柄コード（例）
+    # 対象銘柄リスト（10〜20銘柄程度）
+    target_symbols = [
+        "7203.T",  # トヨタ自動車
+        "9984.T",  # ソフトバンクグループ
+        "6758.T",  # ソニーグループ
+        "6861.T",  # キーエンス
+        "9432.T",  # 日本電信電話 (NTT)
+        "8306.T",  # 三菱UFJフィナンシャル・グループ
+        "7974.T",  # 任天堂
+        "6501.T",  # 日立製作所
+        "4063.T",  # 信越化学工業
+        "6098.T",  # リクルートホールディングス
+    ]
+    
     start_date_obj = date(2025, 1, 1)
     end_date_obj = date(2025, 12, 31)
 
-    run_analysis(target_symbol, start_date_obj, end_date_obj)
+    print(f"=== 複数銘柄 ({len(target_symbols)}銘柄) の一括分析・スクリーニングを開始します ===")
+    
+    all_results = []
+    for symbol in target_symbols:
+        try:
+            print(f"\n--- [{symbol}] 分析開始 ---")
+            # 1. データ収集
+            ohlcv_data = collect_ohlcv_data(symbol, start_date_obj, end_date_obj)
+            if not ohlcv_data:
+                print(f"{symbol}: OHLCVデータが取得できませんでした。スキップします。")
+                continue
+            
+            financial_data = collect_financial_data(symbol, end_date_obj.year)
+            
+            # 2. 指標計算
+            indicator_data = calculate_indicators(ohlcv_data)
+            
+            # 3. 特徴量計算
+            feature_sets = calculate_features(ohlcv_data, indicator_data, financial_data)
+            
+            # 4. パターン検出
+            pattern_sets = detect_patterns(ohlcv_data, indicator_data)
+            
+            # 5. スコアリング
+            score_results = calculate_scores(feature_sets, pattern_sets)
+            if score_results:
+                # 最新日のスコア結果を採用
+                latest_score = score_results[-1]
+                all_results.append(latest_score)
+                print(f"{symbol}: 総合スコア算出完了 ({latest_score.overall_score:.2f})")
+        except Exception as e:
+            print(f"{symbol} の分析中にエラーが発生しました: {e}")
+
+    if all_results:
+        # ランキング生成 & 表示
+        print(f"\n=== 総合ランキング生成 ({len(all_results)}銘柄) ===")
+        analysis_results = generate_ranking(all_results)
+        display_results(analysis_results, output_type="cli")
+    else:
+        print("有効な分析結果がありませんでした。")
