@@ -13,6 +13,7 @@ from src.model.data_models import OhlcvModel, FinancialModel
 from src.config.settings import load_settings
 from src.common.logger import get_logger
 from src.common.exceptions import DataCollectionError
+from src.common.storage import StorageManager
 
 logger = get_logger("DataCollector")
 
@@ -21,6 +22,7 @@ settings = load_settings()
 
 class DataCollector:
     def __init__(self):
+        self.storage = StorageManager()
         self.cache_dir = settings.DATA_CACHE_DIR
         os.makedirs(self.cache_dir, exist_ok=True)
         
@@ -70,51 +72,58 @@ class DataCollector:
 
     def collect_ohlcv_data(self, symbol: str, start_date: date, end_date: date) -> List[OhlcvModel]:
         """
-        指定期間のOHLCVデータを収集し、キャッシュ保存後、データを返す。
+        指定期間のOHLCVデータを収集し、Parquet永続化・差分更新を行い、データを返す。
         """
-        cache_path = os.path.join(self.cache_dir, f"ohlcv_{symbol}.csv")
+        parquet_path = f"price/{symbol}.parquet"
         
-        # 1. ローカルキャッシュから読込
-        cached_df = pd.DataFrame()
-        if os.path.exists(cache_path):
-            try:
-                cached_df = pd.read_csv(cache_path)
-                cached_df['date'] = pd.to_datetime(cached_df['date']).dt.date
-            except Exception as e:
-                print(f"キャッシュOHLCVの読み込み失敗、再取得します: {e}")
-
-        # 期間の充足チェック
+        # 1. 既存のParquetデータをロード
+        cached_df = self.storage.load_parquet(parquet_path)
+        
         need_fetch = True
-        if not cached_df.empty:
-            min_date = cached_df['date'].min()
-            max_date = cached_df['date'].max()
-            # キャッシュが必要な期間を完全にカバーしていれば、ネット取得をスキップ
-            if min_date <= start_date and max_date >= end_date:
-                need_fetch = False
-                df_filtered = cached_df[(cached_df['date'] >= start_date) & (cached_df['date'] <= end_date)]
-                print(f"{symbol} のOHLCVデータをローカルキャッシュから最速ロードしました。")
-            else:
-                # キャッシュ対象外の期間があれば、カバーする広めの期間で再取得
-                start_date = min(start_date, min_date)
-                end_date = max(end_date, max_date)
+        if cached_df is not None and not cached_df.empty:
+            if 'date' in cached_df.columns:
+                if not pd.api.types.is_datetime64_any_dtype(cached_df["date"]):
+                    cached_df["date"] = pd.to_datetime(cached_df["date"])
+                cached_df["date"] = cached_df["date"].dt.tz_localize(None) if cached_df["date"].dt.tz is not None else cached_df["date"]
+                cached_df["date"] = cached_df["date"].dt.date
+                
+                min_date = cached_df['date'].min()
+                max_date = cached_df['date'].max()
+                
+                # キャッシュが要求期間を完全にカバーしていれば再取得不要
+                if min_date <= start_date and max_date >= end_date:
+                    need_fetch = False
+                    logger.info(f"{symbol} のOHLCVデータをParquetストレージからロードしました。")
+                else:
+                    # 不足分がある場合は期間を拡張して再取得しマージ
+                    start_date = min(start_date, min_date)
+                    end_date = max(end_date, max_date)
 
         if need_fetch:
-            df = self._get_ohlcv_from_yfinance(symbol, start_date, end_date)
-            if df.empty:
-                # 取得失敗時はキャッシュから返せるだけ返す
-                if not cached_df.empty:
+            new_df = self._get_ohlcv_from_yfinance(symbol, start_date, end_date)
+            if new_df.empty:
+                if cached_df is not None and not cached_df.empty:
                     df_filtered = cached_df[(cached_df['date'] >= start_date) & (cached_df['date'] <= end_date)]
                 else:
                     return []
             else:
-                # キャッシュを保存
-                df.to_csv(cache_path, index=False)
-                df_filtered = df[(df['date'] >= start_date) & (df['date'] <= end_date)]
+                if cached_df is not None and not cached_df.empty:
+                    # 既存データと新着データを結合し、日付で重複排除（新着優先）
+                    combined_df = pd.concat([cached_df, new_df]).drop_duplicates(subset=['date'], keep='last')
+                    combined_df = combined_df.sort_values('date').reset_index(drop=True)
+                else:
+                    combined_df = new_df.sort_values('date').reset_index(drop=True)
+                
+                # Parquetとして保存
+                self.storage.save_parquet(combined_df, parquet_path)
+                cached_df = combined_df
+
+            df_filtered = cached_df[(cached_df['date'] >= start_date) & (cached_df['date'] <= end_date)]
         else:
-            df = df_filtered
+            df_filtered = cached_df[(cached_df['date'] >= start_date) & (cached_df['date'] <= end_date)]
 
         ohlcv_data = []
-        for _, row in df.iterrows():
+        for _, row in df_filtered.iterrows():
             ohlcv_data.append(OhlcvModel(
                 symbol=symbol,
                 date=row['date'],
