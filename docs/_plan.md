@@ -130,7 +130,7 @@ Project Atlas は、スイングトレード向けの株式分析支援システ
             - [x] 4-1: 特徴量マネージャー（`FeatureManager`）および各特徴量クラスの単体テスト確認
             - [x] 4-2: 代表的な1つの特徴量（例: `M001: MAAlignmentScore`）を `main.py` に組み込んで検証
             - [ ] 4-3: テクニカル系特徴量を順次追加
-                - [ ] 4-3-1: `P001_PullbackScore`（押し目スコア）の結合と検証
+                - [x] 4-3-1: `P001_PullbackScore`（押し目スコア）の結合と検証
                 - [ ] 4-3-2: `P002_BreakoutScore`（ブレイクアウトスコア）の結合と検証
                 - [ ] 4-3-3: `T001_TrendStrengthScore`（トレンド強度スコア）の結合と検証
                 - [ ] 4-3-4: `V001_VolumeScore`（出来高スコア）の結合と検証
@@ -159,6 +159,7 @@ Project Atlas は、スイングトレード向けの株式分析支援システ
 - [ ] 2026/12/31: フェーズ3の「バックテスト機能の実装」完了
 
 ## 5. 実行ログ (最新の作業のみ記載)
+- 2026/08/31: ステップ4-3-1 として `P001_PullbackScore`（押し目スコア）を全10銘柄で結合・検証完了。`docs/_plan.md` を更新。
 - 2026/08/31: ステップ4のサブタスク 4-1・4-2 として、特徴量単体テストの全パス確認および代表的な `M001_MAAlignmentScore` を全10銘柄で `main.py` に結合・検証完了。また不要なJSON読み込みINFOログをDEBUGに修正。`docs/_plan.md` を更新。
 - 2026/08/31: `src/main.py` に `Indicator Calculator` を結合し、テクニカル指標（SMA, RSI, MACD等）の計算・キャッシュ読み込みが正常に行われることを検証（ステップ3完了）。`docs/_plan.md` を更新。
 - 2026/08/23: エラーハンドリングとロギングの強化として、共通例外クラス (`src/common/exceptions.py`) および共通ロギングモジュール (`src/common/logger.py`) を実装。対応する単体テスト (`tests/unit/common/test_common.py`) を追加し、正常にパスすることを確認。`docs/_plan.md` を更新。
