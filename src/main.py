@@ -42,15 +42,15 @@ def run_pipeline_step4(
             indicator_sets = calculator.calculate_indicators(ohlcv_data)
             print(f"  テクニカル指標計算成功: {len(indicator_sets)} 件")
 
-            # 4. 特徴量計算 (P001_PullbackScore のテスト)
-            print(f"  特徴量 (P001_PullbackScore) 計算開始...")
-            feature_sets = calculate_features(ohlcv_data, indicator_sets, financial_data, feature_ids=["P001_PullbackScore"])
+            # 4. 全特徴量計算 (feature_ids=None で全特徴量を一括計算)
+            print(f"  全特徴量の計算開始...")
+            feature_sets = calculate_features(ohlcv_data, indicator_sets, financial_data, feature_ids=None)
             print(f"  特徴量計算成功: {len(feature_sets)} 件")
             if feature_sets:
                 latest_f = feature_sets[-1]
-                print(f"    最新日付 ({latest_f.date}) の特徴量結果一覧:")
+                print(f"    最新日付 ({latest_f.date}) の特徴量結果一覧 ({len(latest_f.results)}件):")
                 for res in latest_f.results:
-                    print(f"      - [{res.feature_id}] スコア: {res.score}, 生値: {res.raw_value}")
+                    print(f"      - [{res.feature_id}] スコア: {res.score:.2f}, 生値: {res.raw_value:.2f}")
 
         except Exception as e:
             print(f"  エラー [{symbol}]: {e}")
