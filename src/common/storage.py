@@ -84,7 +84,7 @@ class StorageManager:
                 return None
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            logger.info(f"JSONファイルを読み込みました: {path}")
+            logger.debug(f"JSONファイルを読み込みました: {path}")
             return data
         except Exception as e:
             logger.error(f"JSONファイルの読み込みに失敗しました ({file_path}): {e}")
