@@ -70,7 +70,8 @@ class FinancialHealthScore(IFeature):
                 feature_name=self.feature_name,
                 score=normalized_score,
                 raw_value=raw_score,
-                metadata=metadata
+                metadata=metadata,
+                date=ind_set.date
             ))
         return results
 

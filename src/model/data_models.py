@@ -42,6 +42,7 @@ class FeatureResultModel(BaseModel):
     score: float # 正規化後スコア (0-100)
     raw_value: float # 元の計算値
     metadata: Dict[str, Any] = {}
+    date: date
 
 class FeatureSetModel(BaseModel):
     symbol: str

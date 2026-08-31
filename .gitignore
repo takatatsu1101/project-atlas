@@ -67,8 +67,9 @@ docs/_build/
 .pybuilder/
 target/
 
-# Jupyter Notebook
-.ipynb_checkpoints
+# Project Atlas data storage and cache
+data/
+
 
 # IPython
 profile_default/

@@ -135,19 +135,20 @@ class DataCollector:
             ))
         return ohlcv_data
 
-    def _get_irbank_file_path(self, year_suffix: str, fy_type: str) -> str:
+    def _get_irbank_file_path(self, year_suffix: str, file_name: str) -> str:
         """
-        IR BANKのJSONキャッシュパスを取得する（ユーザー共有フォルダを優先、なければローカル）
+        IR BANKのJSONキャッシュパスを取得する（ローカルプロジェクトフォルダを優先、なければユーザー共有）
         """
-        file_name = f"{year_suffix}-{fy_type}.json"
-        
-        # 1. ユーザーフォルダを探索
+        # 1. ローカルプロジェクトフォルダを最優先で探索
+        local_path = os.path.join(self.local_irbank_dir, file_name)
+        if os.path.exists(local_path):
+            return local_path
+            
+        # 2. ユーザーフォルダを探索
         user_path = os.path.join(self.user_irbank_dir, file_name)
         if os.path.exists(user_path):
             return user_path
             
-        # 2. ローカルプロジェクトフォルダを探索
-        local_path = os.path.join(self.local_irbank_dir, file_name)
         return local_path
 
     def _download_irbank_file(self, year_suffix: str, fy_type: str, save_path: str):
@@ -185,7 +186,8 @@ class DataCollector:
         else:
             year_suffix = "0000" # 最新
             
-        file_path = self._get_irbank_file_path(year_suffix, fy_type)
+        file_name = f"{year_suffix}-{fy_type}"
+        file_path = self._get_irbank_file_path(year_suffix, file_name)
         
         # キャッシュがなければ自動ダウンロード
         if not os.path.exists(file_path):
