@@ -55,11 +55,4 @@ if __name__ == "__main__":
     fiscal_year = 2025  # 2025年度のローカルキャッシュを使用
 
     run_data_collection_test(target_symbols, start_date_obj, end_date_obj, fiscal_year)
-
-    if all_results:
-        # ランキング生成 & 表示
-        print(f"\n=== 総合ランキング生成 ({len(all_results)}銘柄) ===")
-        analysis_results = generate_ranking(all_results)
-        display_results(analysis_results, output_type="cli")
-    else:
-        print("有効な分析結果がありませんでした。")
+    print("\n=== データ収集テスト完了 ===")
