@@ -8,7 +8,7 @@ import pandas as pd
 import pytest
 
 from src.common.storage import StorageManager
-from src.common.exceptions import DataCollectorError
+from src.common.exceptions import DataCollectionError
 
 @pytest.fixture
 def temp_storage():

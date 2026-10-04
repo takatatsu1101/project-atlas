@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Union
 import pandas as pd
 
-from src.common.exceptions import DataCollectorError
+from src.common.exceptions import DataCollectionError
 from src.common.logger import get_logger
 
 logger = get_logger(__name__)
@@ -41,7 +41,7 @@ class StorageManager:
             logger.info(f"Parquetファイルを保存しました: {path}")
         except Exception as e:
             logger.error(f"Parquetファイルの保存に失敗しました ({file_path}): {e}")
-            raise DataCollectorError(f"Failed to save parquet: {e}")
+            raise DataCollectionError(f"Failed to save parquet: {e}")
 
     def load_parquet(self, file_path: Union[str, Path]) -> Optional[pd.DataFrame]:
         """ParquetファイルからDataFrameを読み込む"""
@@ -57,7 +57,7 @@ class StorageManager:
             return df
         except Exception as e:
             logger.error(f"Parquetファイルの読み込みに失敗しました ({file_path}): {e}")
-            raise DataCollectorError(f"Failed to load parquet: {e}")
+            raise DataCollectionError(f"Failed to load parquet: {e}")
 
     def save_json(self, data: Any, file_path: Union[str, Path]) -> None:
         """データをJSON形式で保存する"""
@@ -71,7 +71,7 @@ class StorageManager:
             logger.info(f"JSONファイルを保存しました: {path}")
         except Exception as e:
             logger.error(f"JSONファイルの保存に失敗しました ({file_path}): {e}")
-            raise DataCollectorError(f"Failed to save json: {e}")
+            raise DataCollectionError(f"Failed to save json: {e}")
 
     def load_json(self, file_path: Union[str, Path]) -> Optional[Any]:
         """JSONファイルからデータを読み込む"""
@@ -84,8 +84,8 @@ class StorageManager:
                 return None
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            logger.info(f"JSONファイルを読み込みました: {path}")
+            logger.debug(f"JSONファイルを読み込みました: {path}")
             return data
         except Exception as e:
             logger.error(f"JSONファイルの読み込みに失敗しました ({file_path}): {e}")
-            raise DataCollectorError(f"Failed to load json: {e}")
+            raise DataCollectionError(f"Failed to load json: {e}")

@@ -42,6 +42,7 @@ class FeatureResultModel(BaseModel):
     score: float # 正規化後スコア (0-100)
     raw_value: float # 元の計算値
     metadata: Dict[str, Any] = {}
+    date: date
 
 class FeatureSetModel(BaseModel):
     symbol: str
@@ -62,6 +63,7 @@ class PatternSetModel(BaseModel):
 class ScoreResultModel(BaseModel):
     symbol: str
     date: date
+    score_id: str = "S001_OverallScore"  # スコア識別子を追加
     sub_scores: Dict[str, float]
     total_score: float
     metadata: Dict[str, Any] = {}
