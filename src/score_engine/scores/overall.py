@@ -68,6 +68,7 @@ class OverallScoreCalculator(IScoreCalculator):
             score_results.append(ScoreResultModel(
                 symbol=symbol,
                 date=date_key,
+                score_id=self.score_id,  # score_idを設定
                 sub_scores=sub_scores,
                 total_score=total_normalized_score,
                 metadata={

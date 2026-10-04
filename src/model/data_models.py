@@ -63,6 +63,7 @@ class PatternSetModel(BaseModel):
 class ScoreResultModel(BaseModel):
     symbol: str
     date: date
+    score_id: str = "S001_OverallScore"  # スコア識別子を追加
     sub_scores: Dict[str, float]
     total_score: float
     metadata: Dict[str, Any] = {}

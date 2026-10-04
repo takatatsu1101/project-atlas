@@ -33,6 +33,7 @@ Project Atlas は、スイングトレード向けの株式分析支援システ
 ### ③ 設計（Design）
 「どのように」システムを構築し、各モジュールを実装するかを定義しています。
 - [設計の全体概要](design/README.md)
+- [開発環境・実行ガイド](development_guide.md)
 - [アーキテクチャ設計](design/architecture.md)
 - [データモデル設計](design/data_model.md)
 - [特徴量エンジン設計](design/feature_engine.md)

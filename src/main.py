@@ -10,6 +10,7 @@ from src.feature_engine.manager import calculate_features
 import src.pattern_detector
 from src.pattern_detector.manager import detect_patterns
 import src.score_engine
+import src.score_engine.scores.overall  # スコアクラスをインポートしてレジストリに登録させる
 from src.score_engine.manager import calculate_scores
 from src.presentation.presenter import display_results
 from src.model.data_models import AnalysisResultModel, ScoreResultModel
@@ -99,16 +100,18 @@ def run_full_pipeline(
 
 if __name__ == "__main__":
     target_symbols = [
-        "7203.T",  # トヨタ自動車
-        "9984.T",  # ソフトバンクグループ
-        "6758.T",  # ソニーグループ
-        "6861.T",  # キーエンス
-        "9432.T",  # 日本電信電話 (NTT)
-        "8306.T",  # 三菱UFJフィナンシャル・グループ
-        "7974.T",  # 任天堂
-        "6501.T",  # 日立製作所
-        "4063.T",  # 信越化学工業
-        "6098.T",  # リクルートホールディングス
+        # "7203.T",  # トヨタ自動車
+        # "9984.T",  # ソフトバンクグループ
+        # "6758.T",  # ソニーグループ
+        # "6861.T",  # キーエンス
+        # "9432.T",  # 日本電信電話 (NTT)
+        # "8306.T",  # 三菱UFJフィナンシャル・グループ
+        # "7974.T",  # 任天堂
+        # "6501.T",  # 日立製作所
+        # "4063.T",  # 信越化学工業
+        # "6098.T",  # リクルートホールディングス
+        "5803.T",  # フジクラ
+        "5801.T",  # 古河電気工業
     ]
     
     start_date_obj = date(2025, 1, 1)
