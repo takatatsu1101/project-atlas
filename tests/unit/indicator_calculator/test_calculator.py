@@ -1,16 +1,20 @@
 
+import tempfile
 import unittest
 from datetime import date
 import pandas as pd
 import numpy as np
 
+from src.common.storage import StorageManager
 from src.indicator_calculator.calculator import IndicatorCalculator, calculate_indicators
 from src.model.data_models import OhlcvModel, IndicatorSetModel
 
 class TestIndicatorCalculator(unittest.TestCase):
 
     def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
         self.calculator = IndicatorCalculator()
+        self.calculator.storage = StorageManager(base_dir=self.temp_dir.name)
         self.symbol = "TEST"
         self.ohlcv_data = [
             OhlcvModel(symbol=self.symbol, date=date(2025, 1, 1), open=100.0, high=105.0, low=98.0, close=103.0, volume=1000),
@@ -65,9 +69,66 @@ class TestIndicatorCalculator(unittest.TestCase):
         self.assertIn("RSI14", indicator_sets[-1].indicators)
         self.assertIn("MACD", indicator_sets[-1].indicators)
 
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
     def test_calculate_indicators_empty_data(self):
         indicator_sets = self.calculator.calculate_indicators([])
         self.assertEqual(len(indicator_sets), 0)
+
+    def test_calculate_highest_high_and_lowest_low(self):
+        highest = self.calculator.calculate_highest_high(self.ohlcv_data, 20)
+        lowest = self.calculator.calculate_lowest_low(self.ohlcv_data, 20)
+        self.assertEqual(len(highest), len(self.ohlcv_data))
+        self.assertEqual(len(lowest), len(self.ohlcv_data))
+        self.assertAlmostEqual(highest[0], 105.0)
+        self.assertAlmostEqual(highest[-1], 139.0)
+        self.assertAlmostEqual(lowest[0], 98.0)
+        self.assertAlmostEqual(lowest[-1], 98.0)
+
+    def test_calculate_atr_and_volume_ratio(self):
+        atr = self.calculator.calculate_atr(self.ohlcv_data, 14)
+        vol_ratio = self.calculator.calculate_volume_ratio(self.ohlcv_data, 20)
+        self.assertEqual(len(atr), len(self.ohlcv_data))
+        self.assertEqual(len(vol_ratio), len(self.ohlcv_data))
+        # 初日のTRは high - low = 105 - 98 = 7.0
+        self.assertAlmostEqual(atr[0], 7.0)
+        self.assertGreater(atr[-1], 0.0)
+        # 初日の出来高倍率は 1000 / 1000 = 1.0
+        self.assertAlmostEqual(vol_ratio[0], 1.0)
+        # 最終日の出来高倍率は 2500 / mean(1000..2500=1750)
+        self.assertAlmostEqual(vol_ratio[-1], 2500.0 / 1750.0)
+
+    def test_volume_ratio_zero_division(self):
+        zero_vol_data = [
+            OhlcvModel(symbol="ZERO", date=date(2025, 1, 1), open=100.0, high=105.0, low=95.0, close=100.0, volume=0),
+            OhlcvModel(symbol="ZERO", date=date(2025, 1, 2), open=100.0, high=105.0, low=95.0, close=100.0, volume=0),
+        ]
+        indicator_sets = self.calculator.calculate_indicators(zero_vol_data)
+        self.assertEqual(len(indicator_sets), 2)
+        self.assertIn("HIGHEST_HIGH_20", indicator_sets[-1].indicators)
+        self.assertIn("LOWEST_LOW_20", indicator_sets[-1].indicators)
+        self.assertIn("ATR14", indicator_sets[-1].indicators)
+        self.assertNotIn("VOLUME_RATIO", indicator_sets[-1].indicators)
+
+    def test_stale_cache_without_lowest_low_recalculates(self):
+        # LOWEST_LOW_20 を含まない旧形式キャッシュを作成
+        stale_cache = [
+            {
+                "symbol": self.symbol,
+                "date": o.date.isoformat(),
+                "indicators": {"SMA5": 100.0},
+            }
+            for o in self.ohlcv_data
+        ]
+        self.calculator.storage.save_json(stale_cache, f"cache/indicators_{self.symbol}.json")
+
+        indicator_sets = self.calculator.calculate_indicators(self.ohlcv_data)
+        self.assertEqual(len(indicator_sets), len(self.ohlcv_data))
+        self.assertIn("HIGHEST_HIGH_20", indicator_sets[-1].indicators)
+        self.assertIn("LOWEST_LOW_20", indicator_sets[-1].indicators)
+        self.assertIn("ATR14", indicator_sets[-1].indicators)
+        self.assertIn("VOLUME_RATIO", indicator_sets[-1].indicators)
 
 if __name__ == '__main__':
     unittest.main()
