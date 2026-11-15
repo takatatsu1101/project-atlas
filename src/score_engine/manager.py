@@ -1,7 +1,14 @@
 
-from typing import List, Optional
+import inspect
+from typing import Any, Dict, List, Optional
 
-from src.model.data_models import FeatureSetModel, PatternSetModel, ScoreResultModel
+from src.model.data_models import (
+    FeatureSetModel,
+    IndicatorSetModel,
+    OhlcvModel,
+    PatternSetModel,
+    ScoreResultModel,
+)
 from src.score_engine.registry import score_registry
 from src.score_engine.interfaces import IScoreCalculator
 
@@ -13,11 +20,14 @@ class ScoreManager:
         self,
         feature_sets: List[FeatureSetModel],
         pattern_sets: List[PatternSetModel],
-        score_ids: Optional[List[str]] = None
+        score_ids: Optional[List[str]] = None,
+        ohlcv_data: Optional[List[OhlcvModel]] = None,
+        indicator_sets: Optional[List[IndicatorSetModel]] = None,
     ) -> List[ScoreResultModel]:
         """
         特徴量セットとパターンセットから評価スコアを計算し、結果のリストを返す。
         score_idsが指定された場合は、そのスコアのみを計算する。
+        ohlcv_data / indicator_sets は計算機が受け取れる場合のみ渡す。
         """
         if not feature_sets and not pattern_sets:
             print("警告: 特徴量データまたはパターンデータが不足しているため、スコアを計算できません。")
@@ -28,7 +38,6 @@ class ScoreManager:
             for s_id in score_ids:
                 scores_to_calculate.append(self.registry.get_score_calculator(s_id))
         else:
-            # 全てのスコア計算機を取得
             # 登録されている全てのスコア計算機を取得して追加
             for score_info in self.registry.list_score_calculators():
                 scores_to_calculate.append(self.registry.get_score_calculator(score_info["score_id"]))
@@ -36,11 +45,38 @@ class ScoreManager:
         all_score_results: List[ScoreResultModel] = []
         for score_calculator_instance in scores_to_calculate:
             print(f"スコア {score_calculator_instance.score_name} を計算中...")
-            results = score_calculator_instance.calculate(feature_sets, pattern_sets)
+            results = self._invoke_calculator(
+                score_calculator_instance,
+                feature_sets,
+                pattern_sets,
+                ohlcv_data=ohlcv_data,
+                indicator_sets=indicator_sets,
+            )
             all_score_results.extend(results)
 
         print(f"{feature_sets[0].symbol if feature_sets else pattern_sets[0].symbol} のスコア計算が完了しました。")
         return all_score_results
+
+    @staticmethod
+    def _invoke_calculator(
+        calculator: IScoreCalculator,
+        feature_sets: List[FeatureSetModel],
+        pattern_sets: List[PatternSetModel],
+        ohlcv_data: Optional[List[OhlcvModel]] = None,
+        indicator_sets: Optional[List[IndicatorSetModel]] = None,
+    ) -> List[ScoreResultModel]:
+        """計算機の calculate シグネチャを確認し、対応する引数のみを渡して呼び出す。"""
+        sig = inspect.signature(calculator.calculate)
+        params = sig.parameters
+        accepts_kwargs = any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+        )
+        kwargs: Dict[str, Any] = {}
+        if accepts_kwargs or "ohlcv_data" in params:
+            kwargs["ohlcv_data"] = ohlcv_data
+        if accepts_kwargs or "indicator_sets" in params:
+            kwargs["indicator_sets"] = indicator_sets
+        return calculator.calculate(feature_sets, pattern_sets, **kwargs)
 
 # モジュールレベルでインスタンス化
 score_manager = ScoreManager()
@@ -48,6 +84,14 @@ score_manager = ScoreManager()
 def calculate_scores(
     feature_sets: List[FeatureSetModel],
     pattern_sets: List[PatternSetModel],
-    score_ids: Optional[List[str]] = None
+    score_ids: Optional[List[str]] = None,
+    ohlcv_data: Optional[List[OhlcvModel]] = None,
+    indicator_sets: Optional[List[IndicatorSetModel]] = None,
 ) -> List[ScoreResultModel]:
-    return score_manager.calculate_scores(feature_sets, pattern_sets, score_ids)
+    return score_manager.calculate_scores(
+        feature_sets,
+        pattern_sets,
+        score_ids,
+        ohlcv_data=ohlcv_data,
+        indicator_sets=indicator_sets,
+    )

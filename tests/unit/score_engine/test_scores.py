@@ -17,15 +17,15 @@ class TestOverallScoreCalculator(unittest.TestCase):
             FeatureSetModel(
                 symbol=self.symbol, date=date(2025, 1, 1),
                 results=[
-                    FeatureResultModel(feature_id="F1", feature_name="Feature1", score=80.0, raw_value=80.0),
-                    FeatureResultModel(feature_id="F2", feature_name="Feature2", score=70.0, raw_value=70.0),
+                    FeatureResultModel(feature_id="F1", feature_name="Feature1", score=80.0, raw_value=80.0, date=date(2025, 1, 1)),
+                    FeatureResultModel(feature_id="F2", feature_name="Feature2", score=70.0, raw_value=70.0, date=date(2025, 1, 1)),
                 ]
             ),
             FeatureSetModel(
                 symbol=self.symbol, date=date(2025, 1, 2),
                 results=[
-                    FeatureResultModel(feature_id="F1", feature_name="Feature1", score=90.0, raw_value=90.0),
-                    FeatureResultModel(feature_id="F2", feature_name="Feature2", score=85.0, raw_value=85.0),
+                    FeatureResultModel(feature_id="F1", feature_name="Feature1", score=90.0, raw_value=90.0, date=date(2025, 1, 2)),
+                    FeatureResultModel(feature_id="F2", feature_name="Feature2", score=85.0, raw_value=85.0, date=date(2025, 1, 2)),
                 ]
             ),
         ]

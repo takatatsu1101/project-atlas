@@ -1,11 +1,11 @@
 
-from datetime import date
+from datetime import date as DateType
 from typing import Dict, List, Any, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 class OhlcvModel(BaseModel):
     symbol: str
-    date: date
+    date: DateType
     open: float
     high: float
     low: float
@@ -14,7 +14,7 @@ class OhlcvModel(BaseModel):
 
 class FinancialModel(BaseModel):
     symbol: str
-    fiscal_date: date
+    fiscal_date: DateType
     eps: Optional[float] = None
     bps: Optional[float] = None
     roe: Optional[float] = None
@@ -46,7 +46,7 @@ class StockMasterModel(BaseModel):
 
 class IndicatorSetModel(BaseModel):
     symbol: str
-    date: date
+    date: DateType
     indicators: Dict[str, Any] # 例: {"MA5": 123.45, "MACD": {"macd": 1.2, "signal": 1.0}}
 
 class FeatureResultModel(BaseModel):
@@ -55,11 +55,11 @@ class FeatureResultModel(BaseModel):
     score: float # 正規化後スコア (0-100)
     raw_value: float # 元の計算値
     metadata: Dict[str, Any] = {}
-    date: date
+    date: Optional[DateType] = None
 
 class FeatureSetModel(BaseModel):
     symbol: str
-    date: date
+    date: DateType
     results: List[FeatureResultModel]
 
 class PatternResultModel(BaseModel):
@@ -70,16 +70,20 @@ class PatternResultModel(BaseModel):
 
 class PatternSetModel(BaseModel):
     symbol: str
-    date: date
+    date: DateType
     results: List[PatternResultModel]
 
 class ScoreResultModel(BaseModel):
     symbol: str
-    date: date
+    date: DateType
     score_id: str = "S001_OverallScore"  # スコア識別子を追加
     sub_scores: Dict[str, float]
     total_score: float
     metadata: Dict[str, Any] = {}
+    strategy_type: str = "watch"  # 推奨戦略タイプ（"pullback" / "breakout" / "watch"）
+    reasons: List[str] = Field(default_factory=list)  # 評価根拠の日本語メッセージリスト
+    key_levels: Dict[str, Optional[float]] = Field(default_factory=dict)  # 主要価格水準・乖離率
+    risk_metrics: Dict[str, Optional[float]] = Field(default_factory=dict)  # ボラティリティ・出来高等のリスク指標
 
 class AnalysisResultModel(BaseModel):
     symbol: str
@@ -89,3 +93,12 @@ class AnalysisResultModel(BaseModel):
     pattern_results: List[PatternResultModel] = []
     rank: Optional[int] = None
     summary: Optional[str] = None
+    date: Optional[DateType] = None  # 分析基準日
+    market: str = ""  # 市場区分
+    sector: str = ""  # 業種
+    strategy_type: str = "watch"  # 推奨戦略タイプ（"pullback" / "breakout" / "watch"）
+    sub_scores: Dict[str, float] = Field(default_factory=dict)  # サブスコア内訳
+    reasons: List[str] = Field(default_factory=list)  # 評価根拠リスト
+    key_levels: Dict[str, Optional[float]] = Field(default_factory=dict)  # 主要価格水準・乖離率
+    risk_metrics: Dict[str, Optional[float]] = Field(default_factory=dict)  # リスク指標
+    financial_summary: Dict[str, Optional[float]] = Field(default_factory=dict)  # 財務サマリー
