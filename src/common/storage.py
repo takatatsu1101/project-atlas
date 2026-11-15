@@ -25,9 +25,10 @@ class StorageManager:
         self.price_dir = self.base_dir / "price"
         self.financial_dir = self.base_dir / "financial"
         self.cache_dir = self.base_dir / "cache"
+        self.master_dir = self.base_dir / "master"
 
         # 必要なディレクトリの作成
-        for d in [self.price_dir, self.financial_dir, self.cache_dir]:
+        for d in [self.price_dir, self.financial_dir, self.cache_dir, self.master_dir]:
             d.mkdir(parents=True, exist_ok=True)
 
     def save_parquet(self, df: pd.DataFrame, file_path: Union[str, Path]) -> None:
