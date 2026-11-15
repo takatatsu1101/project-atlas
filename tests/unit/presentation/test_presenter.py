@@ -5,8 +5,16 @@ from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
-from src.model.data_models import AnalysisResultModel, FeatureResultModel, PatternResultModel
-from src.presentation.presenter import Presenter
+from src.model.data_models import (
+    AnalysisResultModel,
+    EvaluationSummaryModel,
+    FeatureResultModel,
+    ForwardEvaluationItemModel,
+    HorizonMetricsModel,
+    HorizonSummaryModel,
+    PatternResultModel,
+)
+from src.presentation.presenter import Presenter, display_results
 
 
 class TestPresenter(unittest.TestCase):
@@ -238,6 +246,150 @@ class TestPresenter(unittest.TestCase):
 
         # 元の AnalysisResultModel の総合順位は変更されていないこと
         self.assertEqual([r.rank for r in results], [1, 2, 3])
+
+    @staticmethod
+    def _sample_evaluation_summary() -> EvaluationSummaryModel:
+        return EvaluationSummaryModel(
+            as_of_date=date(2026, 2, 15),
+            horizons=[5, 20],
+            entry_price_mode="signal_close",
+            total_candidates=1,
+            overall_summary={
+                5: HorizonSummaryModel(
+                    horizon_days=5,
+                    total_candidates=1,
+                    evaluated_count=1,
+                    win_count=1,
+                    win_rate_pct=100.0,
+                    avg_return_pct=4.5,
+                    median_return_pct=4.5,
+                    avg_mfe_pct=6.2,
+                    avg_mae_pct=-1.1,
+                    best_symbol="7203.T",
+                    best_return_pct=4.5,
+                    worst_symbol="7203.T",
+                    worst_return_pct=4.5,
+                ),
+                20: HorizonSummaryModel(
+                    horizon_days=20,
+                    total_candidates=1,
+                    evaluated_count=0,
+                    win_count=0,
+                ),
+            },
+            strategy_summary={
+                "pullback": {
+                    5: HorizonSummaryModel(
+                        horizon_days=5,
+                        total_candidates=1,
+                        evaluated_count=1,
+                        win_count=1,
+                        win_rate_pct=100.0,
+                        avg_return_pct=4.5,
+                        median_return_pct=4.5,
+                        avg_mfe_pct=6.2,
+                        avg_mae_pct=-1.1,
+                        best_symbol="7203.T",
+                        best_return_pct=4.5,
+                        worst_symbol="7203.T",
+                        worst_return_pct=4.5,
+                    ),
+                    20: HorizonSummaryModel(
+                        horizon_days=20,
+                        total_candidates=1,
+                        evaluated_count=0,
+                        win_count=0,
+                    ),
+                }
+            },
+            items=[
+                ForwardEvaluationItemModel(
+                    symbol="7203.T",
+                    company_name="トヨタ自動車",
+                    market="プライム",
+                    sector="輸送用機器",
+                    strategy_type="pullback",
+                    rank=1,
+                    total_score=85.0,
+                    signal_date=date(2026, 2, 15),
+                    entry_price=3100.0,
+                    horizons={
+                        5: HorizonMetricsModel(
+                            horizon_days=5,
+                            available=True,
+                            target_date=date(2026, 2, 20),
+                            exit_close=3239.5,
+                            return_pct=4.5,
+                            mfe_pct=6.2,
+                            mae_pct=-1.1,
+                            is_win=True,
+                        ),
+                        20: HorizonMetricsModel(horizon_days=20, available=False),
+                    },
+                    status="evaluated",
+                )
+            ],
+        )
+
+    @patch("builtins.print")
+    def test_display_cli_with_evaluation_summary_even_when_results_empty(self, mock_print):
+        """evaluation_summary 指定時は結果あり・空のどちらでもCLIに検証サマリーを出力する"""
+        presenter = Presenter()
+        eval_summary = self._sample_evaluation_summary()
+
+        # 分析結果空でもフォワードリターン検証サマリーは表示される
+        presenter.display_results([], output_type="cli", evaluation_summary=eval_summary)
+        printed_text = "\n".join(str(call.args[0]) for call in mock_print.call_args_list if call.args)
+        self.assertIn("表示する分析結果がありません。", printed_text)
+        self.assertIn("フォワードリターン検証サマリー", printed_text)
+        self.assertIn("+5営業日", printed_text)
+        self.assertIn("100.00%", printed_text)
+        self.assertIn("+4.50%", printed_text)
+        self.assertIn("7203.T", printed_text)
+
+    def test_export_reports_with_evaluation_summary_and_prefix(self):
+        """evaluation_summary 付きで evaluation_report プレフィックスの JSON / Markdown が出力される"""
+        presenter = Presenter()
+        results = self._sample_results()
+        eval_summary = self._sample_evaluation_summary()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # evaluation_summary=None のときは evaluation キーを含まない
+            plain_json = presenter.export_json(results, output_dir=tmpdir)
+            self.assertEqual(plain_json.name, "screening_report_2026-02-15.json")
+            plain_payload = json.loads(plain_json.read_text(encoding="utf-8"))
+            self.assertNotIn("evaluation", plain_payload)
+
+            # evaluation_summary 指定時は evaluation_report_* になり evaluation キーが含まれる
+            paths = display_results(
+                results,
+                output_type="all",
+                output_dir=tmpdir,
+                evaluation_summary=eval_summary,
+            )
+            self.assertEqual(paths["json"].name, "evaluation_report_2026-02-15.json")
+            self.assertEqual(paths["markdown"].name, "evaluation_report_2026-02-15.md")
+
+            eval_payload = json.loads(paths["json"].read_text(encoding="utf-8"))
+            self.assertIn("evaluation", eval_payload)
+            self.assertEqual(eval_payload["evaluation"]["total_candidates"], 1)
+            self.assertEqual(eval_payload["evaluation"]["overall_summary"]["5"]["win_count"], 1)
+
+            md_text = paths["markdown"].read_text(encoding="utf-8")
+            self.assertIn("## フォワードリターン検証サマリー（全体 / 戦略別）", md_text)
+            self.assertIn("## 銘柄別フォワードリターン詳細", md_text)
+            self.assertIn("+4.50%", md_text)
+
+            # report_prefix 明示指定でファイル名プレフィックスを上書きできる
+            custom_paths = presenter.export_reports(
+                results,
+                output_dir=tmpdir,
+                formats=("json", "markdown"),
+                evaluation_summary=eval_summary,
+                report_prefix="custom_eval",
+            )
+            self.assertEqual(custom_paths["json"].name, "custom_eval_2026-02-15.json")
+            self.assertEqual(custom_paths["markdown"].name, "custom_eval_2026-02-15.md")
 
 
 if __name__ == "__main__":

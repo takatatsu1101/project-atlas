@@ -108,3 +108,13 @@ output:
   formats:
     - "json"
     - "markdown"
+
+# 6. フォワードリターン検証設定
+evaluation:
+  # 検証ホライズン（営業日数）
+  horizons:
+    - 5
+    - 20
+    - 60
+  # エントリー価格基準（"signal_close" または "next_open"）
+  entry_price_mode: "signal_close"

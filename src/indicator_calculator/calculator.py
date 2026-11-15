@@ -123,29 +123,43 @@ class IndicatorCalculator:
                 ratios.append(float(vol / avg_vol))
         return ratios
 
-    def calculate_indicators(self, ohlcv_data: List[OhlcvModel]) -> List[IndicatorSetModel]:
+    def calculate_indicators(
+        self,
+        ohlcv_data: List[OhlcvModel],
+        use_cache: bool = True,
+        cache_key_suffix: Optional[str] = None,
+    ) -> List[IndicatorSetModel]:
         """
         OHLCVデータリストからテクニカル指標のセットを計算して返す（キャッシュ対応）。
+        use_cache=False の場合はキャッシュの読み込み・保存をスキップする。
+        cache_key_suffix を指定した場合はサフィックス付きのキャッシュキーを使用する。
         """
         if not ohlcv_data:
             return []
 
         symbol = ohlcv_data[0].symbol
-        cache_path = f"cache/indicators_{symbol}.json"
+        cache_path = (
+            f"cache/indicators_{symbol}_{cache_key_suffix}.json"
+            if cache_key_suffix
+            else f"cache/indicators_{symbol}.json"
+        )
+        expected_dates = [o.date.isoformat()[:10] for o in ohlcv_data]
 
-        # キャッシュのチェック（件数・最終日付一致かつ最新要素に LOWEST_LOW_20 が含まれている場合のみ利用）
-        cached_data = self.storage.load_json(cache_path)
-        if (
-            cached_data is not None
-            and isinstance(cached_data, list)
-            and len(cached_data) == len(ohlcv_data)
-            and len(cached_data) > 0
-            and isinstance(cached_data[-1], dict)
-            and str(cached_data[-1].get("date", ""))[:10] == ohlcv_data[-1].date.isoformat()[:10]
-            and "LOWEST_LOW_20" in cached_data[-1].get("indicators", {})
-        ):
-            logger.info(f"{symbol} のテクニカル指標をキャッシュからロードしました。")
-            return [IndicatorSetModel(**item) for item in cached_data]
+        # キャッシュのチェック（空でないリスト・長さ一致・全日付列完全一致・最新要素に LOWEST_LOW_20 が含まれる場合のみ利用）
+        if use_cache:
+            cached_data = self.storage.load_json(cache_path)
+            if (
+                cached_data is not None
+                and isinstance(cached_data, list)
+                and len(cached_data) > 0
+                and len(cached_data) == len(ohlcv_data)
+                and all(isinstance(item, dict) for item in cached_data)
+                and [str(item.get("date", ""))[:10] for item in cached_data] == expected_dates
+                and isinstance(cached_data[-1].get("indicators"), dict)
+                and "LOWEST_LOW_20" in cached_data[-1].get("indicators", {})
+            ):
+                logger.info(f"{symbol} のテクニカル指標をキャッシュからロードしました。")
+                return [IndicatorSetModel(**item) for item in cached_data]
 
         # SMA(5, 25, 75)、RSI(14)、MACD、および高値/安値・ATR14・出来高倍率を計算
         sma_5 = self.calculate_sma(ohlcv_data, 5)
@@ -178,16 +192,27 @@ class IndicatorCalculator:
             ))
         
         # 結果をJSONキャッシュとして保存
-        try:
-            self.storage.save_json([model.model_dump(mode="json") for model in indicator_sets], cache_path)
-        except Exception as e:
-            logger.warning(f"指標キャッシュの保存に失敗しました: {e}")
+        if use_cache:
+            try:
+                self.storage.save_json([model.model_dump(mode="json") for model in indicator_sets], cache_path)
+            except Exception as e:
+                logger.warning(f"指標キャッシュの保存に失敗しました: {e}")
 
-        logger.info(f"{symbol} のテクニカル指標を計算・キャッシュしました。")
+            logger.info(f"{symbol} のテクニカル指標を計算・キャッシュしました。")
+        else:
+            logger.info(f"{symbol} のテクニカル指標を計算しました（キャッシュ無効）。")
         return indicator_sets
 
 # モジュールレベルでインスタンス化
 indicator_calculator = IndicatorCalculator()
 
-def calculate_indicators(ohlcv_data: List[OhlcvModel]) -> List[IndicatorSetModel]:
-    return indicator_calculator.calculate_indicators(ohlcv_data)
+def calculate_indicators(
+    ohlcv_data: List[OhlcvModel],
+    use_cache: bool = True,
+    cache_key_suffix: Optional[str] = None,
+) -> List[IndicatorSetModel]:
+    return indicator_calculator.calculate_indicators(
+        ohlcv_data,
+        use_cache=use_cache,
+        cache_key_suffix=cache_key_suffix,
+    )

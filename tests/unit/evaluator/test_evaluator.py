@@ -1,0 +1,360 @@
+import unittest
+from datetime import date, datetime, timedelta
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
+from src.evaluator import Evaluator, ForwardReturnEvaluator
+from src.model.data_models import AnalysisResultModel, OhlcvModel
+
+
+def _build_candidate(
+    symbol: str,
+    signal_date: date,
+    strategy_type: str = "pullback",
+    close_price: float | None = 1000.0,
+    rank: int = 1,
+    total_score: float = 80.0,
+) -> AnalysisResultModel:
+    key_levels = {"close": close_price} if close_price is not None else {}
+    return AnalysisResultModel(
+        symbol=symbol,
+        company_name=f"{symbol}社",
+        market="プライム",
+        sector="電気機器",
+        date=signal_date,
+        strategy_type=strategy_type,
+        rank=rank,
+        total_score=total_score,
+        key_levels=key_levels,
+    )
+
+
+def _build_bars(
+    symbol: str,
+    start_date: date,
+    closes: list[float],
+    opens: list[float] | None = None,
+    highs: list[float] | None = None,
+    lows: list[float] | None = None,
+) -> list[OhlcvModel]:
+    bars: list[OhlcvModel] = []
+    for idx, c in enumerate(closes):
+        o = opens[idx] if opens is not None else c
+        h = highs[idx] if highs is not None else c + 10.0
+        l = lows[idx] if lows is not None else c - 10.0
+        bars.append(
+            OhlcvModel(
+                symbol=symbol,
+                date=start_date + timedelta(days=idx),
+                open=o,
+                high=h,
+                low=l,
+                close=c,
+                volume=100_000,
+            )
+        )
+    return bars
+
+
+class TestForwardReturnEvaluator(unittest.TestCase):
+    def test_alias_exists(self):
+        self.assertIs(Evaluator, ForwardReturnEvaluator)
+
+    def test_evaluate_horizons_5_20_60_mfe_mae_and_strategy_summary(self):
+        """5/20/60営業日後リターン・MFE/MAE・勝率・中央値・戦略別集計を正確に計算する"""
+        as_of = date(2025, 1, 10)
+        cand1 = _build_candidate(
+            "7203.T", as_of, strategy_type="pullback", close_price=1000.0, rank=1, total_score=88.0
+        )
+        cand2 = _build_candidate(
+            "6758.T", as_of, strategy_type="pullback", close_price=2000.0, rank=2, total_score=84.0
+        )
+        cand3 = _build_candidate(
+            "9984.T", as_of, strategy_type="breakout", close_price=500.0, rank=3, total_score=80.0
+        )
+
+        # cand1: +5日=1050 (+5%), +20日=1100 (+10%), +60日=1200 (+20%), 最高値1250 (+25%), 最安値950 (-5%)
+        closes1 = [1000.0] + [1010.0] * 60
+        highs1 = [1005.0] + [1020.0] * 60
+        lows1 = [995.0] + [990.0] * 60
+        closes1[5] = 1050.0
+        closes1[20] = 1100.0
+        closes1[60] = 1200.0
+        highs1[3] = 1120.0  # 5日窓内最高値 -> MFE +12%
+        lows1[2] = 950.0    # 全窓内最安値 -> MAE -5%
+        highs1[30] = 1250.0 # 60日窓内最高値 -> MFE +25%
+        bars1 = _build_bars("7203.T", as_of, closes1, highs=highs1, lows=lows1)
+
+        # cand2: +5日=1900 (-5%), +20日=1800 (-10%), +60日=2100 (+5%)
+        closes2 = [2000.0] + [1980.0] * 60
+        highs2 = [2010.0] + [2020.0] * 60
+        lows2 = [1990.0] + [1960.0] * 60
+        closes2[5] = 1900.0
+        lows2[5] = 1880.0
+        closes2[20] = 1800.0
+        lows2[20] = 1760.0
+        closes2[60] = 2100.0
+        highs2[60] = 2160.0
+        bars2 = _build_bars("6758.T", as_of, closes2, highs=highs2, lows=lows2)
+
+        # cand3: +5日=550 (+10%), +20日=600 (+20%), +60日=450 (-10%)
+        closes3 = [500.0] + [510.0] * 60
+        highs3 = [505.0] + [520.0] * 60
+        lows3 = [495.0] + [490.0] * 60
+        closes3[5] = 550.0
+        highs3[5] = 560.0
+        closes3[20] = 600.0
+        highs3[20] = 620.0
+        closes3[60] = 450.0
+        lows3[60] = 440.0
+        bars3 = _build_bars("9984.T", as_of, closes3, highs=highs3, lows=lows3)
+
+        evaluator = ForwardReturnEvaluator(collector=MagicMock())
+        summary = evaluator.evaluate(
+            [cand1, cand2, cand3],
+            as_of_date=as_of,
+            ohlcv_map={"7203.T": bars1, "6758.T": bars2, "9984.T": bars3},
+            horizons=[5, 20, 60],
+            entry_price_mode="signal_close",
+        )
+
+        self.assertEqual(summary.total_candidates, 3)
+        self.assertEqual(summary.horizons, [5, 20, 60])
+
+        # +5日全体: returns = [+5%, -5%, +10%] -> avg=10/3, median=+5%, win=2/3 (66.67%), best=9984.T, worst=6758.T
+        h5 = summary.overall_summary[5]
+        self.assertEqual(h5.evaluated_count, 3)
+        self.assertEqual(h5.win_count, 2)
+        self.assertAlmostEqual(h5.win_rate_pct, 200.0 / 3.0)
+        self.assertAlmostEqual(h5.avg_return_pct, 10.0 / 3.0)
+        self.assertAlmostEqual(h5.median_return_pct, 5.0)
+        self.assertEqual(h5.best_symbol, "9984.T")
+        self.assertAlmostEqual(h5.best_return_pct, 10.0)
+        self.assertEqual(h5.worst_symbol, "6758.T")
+        self.assertAlmostEqual(h5.worst_return_pct, -5.0)
+
+        # +5日 MFE/MAE: cand1 MFE=+12%, MAE=-5%
+        item1 = summary.items[0]
+        self.assertAlmostEqual(item1.horizons[5].mfe_pct, 12.0)
+        self.assertAlmostEqual(item1.horizons[5].mae_pct, -5.0)
+        self.assertTrue(item1.horizons[5].is_win)
+        self.assertAlmostEqual(item1.horizons[60].mfe_pct, 25.0)
+
+        # +60日全体: returns = [+20%, +5%, -10%] -> avg=5%, median=+5%, win=2/3
+        h60 = summary.overall_summary[60]
+        self.assertAlmostEqual(h60.avg_return_pct, 5.0)
+        self.assertAlmostEqual(h60.median_return_pct, 5.0)
+        self.assertEqual(h60.best_symbol, "7203.T")
+        self.assertEqual(h60.worst_symbol, "9984.T")
+
+        # 戦略別集計
+        self.assertIn("pullback", summary.strategy_summary)
+        self.assertIn("breakout", summary.strategy_summary)
+        pb_5 = summary.strategy_summary["pullback"][5]
+        self.assertEqual(pb_5.total_candidates, 2)
+        self.assertEqual(pb_5.evaluated_count, 2)
+        self.assertAlmostEqual(pb_5.win_rate_pct, 50.0)
+        self.assertAlmostEqual(pb_5.avg_return_pct, 0.0)
+        bo_20 = summary.strategy_summary["breakout"][20]
+        self.assertEqual(bo_20.evaluated_count, 1)
+        self.assertAlmostEqual(bo_20.avg_return_pct, 20.0)
+
+    def test_partial_horizon_unreached_and_next_open_mode(self):
+        """一部ホライズン未到達と next_open モード・重複日付後勝ち整列を検証する"""
+        as_of = date(2025, 3, 1)
+        cand = _build_candidate("7203.T", as_of, close_price=1000.0)
+
+        # シグナル翌日(3/2)から7営業日分のバーを生成（逆順＆重複入り）
+        bars = [
+            OhlcvModel(symbol="7203.T", date=date(2025, 3, 2), open=1010.0, high=1020.0, low=990.0, close=1015.0, volume=100),
+            # 同一日付3/2の重複（後勝ちで open=1020.0 が使われること）
+            OhlcvModel(symbol="7203.T", date=date(2025, 3, 2), open=1020.0, high=1030.0, low=1000.0, close=1025.0, volume=100),
+        ]
+        # 3/3 .. 3/8 の6日分を追加（合計7フォワードバー）
+        for offset in range(2, 8):
+            dt = date(2025, 3, 1) + timedelta(days=offset)
+            bars.append(
+                OhlcvModel(
+                    symbol="7203.T",
+                    date=dt,
+                    open=1050.0,
+                    high=1122.0 if offset == 5 else 1080.0,
+                    low=969.0 if offset == 4 else 1010.0,
+                    close=1122.0 if offset == 5 else 1060.0,
+                    volume=100,
+                )
+            )
+        # あえて逆順で渡す
+        reversed_bars = list(reversed(bars))
+        # 後勝ちテストのため 3/2 の正しい方を後ろに配置
+        reversed_bars = [b for b in reversed_bars if b.date != date(2025, 3, 2)] + bars[:2]
+
+        evaluator = ForwardReturnEvaluator(collector=MagicMock())
+        item = evaluator.evaluate_candidate(
+            cand,
+            reversed_bars,
+            as_of_date=as_of,
+            horizons=[5, 20],
+            entry_price_mode="next_open",
+        )
+        self.assertEqual(item.status, "evaluated")
+        self.assertAlmostEqual(item.entry_price, 1020.0)
+        # 5営業日目は 3/6 (3/2, 3/3, 3/4, 3/5, 3/6)
+        h5 = item.horizons[5]
+        self.assertTrue(h5.available)
+        self.assertEqual(h5.target_date, date(2025, 3, 6))
+        self.assertAlmostEqual(h5.return_pct, (1122.0 - 1020.0) / 1020.0 * 100.0)
+        self.assertAlmostEqual(h5.mfe_pct, (1122.0 - 1020.0) / 1020.0 * 100.0)
+        self.assertAlmostEqual(h5.mae_pct, (969.0 - 1020.0) / 1020.0 * 100.0)
+        # 20営業日は未到達
+        self.assertFalse(item.horizons[20].available)
+
+    def test_signal_close_fallback_and_missing_or_no_forward_data(self):
+        """key_levels欠損時のOHLCV直近終値フォールバックとデータ欠損時のステータスを検証"""
+        as_of = date(2025, 4, 1)
+        # key_levels なし -> signal_date(4/1) 以下の直近バー close=1500.0 を利用
+        cand_fb = _build_candidate("1111.T", as_of, close_price=None)
+        bars_fb = _build_bars("1111.T", date(2025, 3, 31), [1480.0, 1500.0, 1530.0, 1560.0])
+
+        # フォワードバーなし
+        cand_no_fwd = _build_candidate("2222.T", as_of, close_price=1000.0)
+        bars_no_fwd = _build_bars("2222.T", date(2025, 3, 30), [990.0, 1000.0])
+
+        # エントリー価格欠損 (key_levelsも直近バーもなし、または<=0)
+        cand_missing = _build_candidate("3333.T", as_of, close_price=None)
+        bars_missing = _build_bars("3333.T", date(2025, 4, 2), [1000.0, 1010.0])
+
+        # next_open で forward_bars 空 -> no_forward_data
+        cand_next_empty = _build_candidate("4444.T", as_of, close_price=1000.0)
+
+        evaluator = ForwardReturnEvaluator(collector=MagicMock())
+        item_fb = evaluator.evaluate_candidate(cand_fb, bars_fb, as_of, horizons=[2])
+        self.assertEqual(item_fb.status, "evaluated")
+        self.assertAlmostEqual(item_fb.entry_price, 1500.0)
+        self.assertAlmostEqual(item_fb.horizons[2].return_pct, 4.0)
+
+        item_no_fwd = evaluator.evaluate_candidate(cand_no_fwd, bars_no_fwd, as_of, horizons=[5])
+        self.assertEqual(item_no_fwd.status, "no_forward_data")
+        self.assertFalse(item_no_fwd.horizons[5].available)
+
+        item_missing = evaluator.evaluate_candidate(cand_missing, bars_missing, as_of, horizons=[5])
+        self.assertEqual(item_missing.status, "missing_entry_price")
+        self.assertIsNone(item_missing.entry_price)
+        self.assertFalse(item_missing.horizons[5].available)
+
+        item_next_empty = evaluator.evaluate_candidate(
+            cand_next_empty, bars_no_fwd, as_of, horizons=[5], entry_price_mode="next_open"
+        )
+        self.assertEqual(item_next_empty.status, "no_forward_data")
+
+        # 評価対象0件のサマリーでは統計値が None になること
+        summary = evaluator.evaluate(
+            [cand_no_fwd, cand_missing],
+            as_of_date=as_of,
+            ohlcv_map={"2222.T": bars_no_fwd, "3333.T": bars_missing},
+            horizons=[5],
+        )
+        h5_sum = summary.overall_summary[5]
+        self.assertEqual(h5_sum.total_candidates, 2)
+        self.assertEqual(h5_sum.evaluated_count, 0)
+        self.assertIsNone(h5_sum.win_rate_pct)
+        self.assertIsNone(h5_sum.avg_return_pct)
+        self.assertIsNone(h5_sum.median_return_pct)
+        self.assertIsNone(h5_sum.best_symbol)
+
+    def test_collector_integration_and_error_resilience(self):
+        """ohlcv_map 未指定時に DataCollector から取得し、取得例外時も継続することを検証"""
+        as_of = date(2025, 5, 1)
+        cand_ok = _build_candidate("7203.T", as_of, close_price=1000.0)
+        cand_err = _build_candidate("9999.T", as_of, close_price=1000.0)
+
+        bars_ok = _build_bars("7203.T", as_of, [1000.0, 1020.0, 1040.0, 1060.0, 1080.0, 1100.0])
+
+        mock_collector = MagicMock()
+        mock_collector.collect_ohlcv_data.side_effect = [
+            bars_ok,
+            RuntimeError("yfinance timeout"),
+        ]
+
+        evaluator = ForwardReturnEvaluator(collector=mock_collector)
+        summary = evaluator.evaluate(
+            [cand_ok, cand_err],
+            as_of_date=as_of,
+            ohlcv_map=None,
+            horizons=[5],
+            eval_end_date=date(2025, 5, 20),
+        )
+
+        self.assertEqual(mock_collector.collect_ohlcv_data.call_count, 2)
+        first_call = mock_collector.collect_ohlcv_data.call_args_list[0]
+        self.assertEqual(
+            first_call.args,
+            ("7203.T", as_of - timedelta(days=7), date(2025, 5, 20)),
+        )
+        self.assertEqual(first_call.kwargs, {"as_of_date": date(2025, 5, 20)})
+
+        self.assertEqual(summary.items[0].status, "evaluated")
+        self.assertAlmostEqual(summary.items[0].horizons[5].return_pct, 10.0)
+        self.assertEqual(summary.items[1].status, "no_forward_data")
+        self.assertEqual(summary.overall_summary[5].evaluated_count, 1)
+
+    def test_holiday_signal_date_fallback_uses_lookback_margin(self):
+        """signal_date が休場日かつ key_levels 欠損時、7日前からの取得データで直前営業日終値にフォールバックする"""
+        # 2025-05-03(土・休場日) を基準日とする
+        as_of = date(2025, 5, 3)
+        cand = _build_candidate("7203.T", as_of, close_price=None)
+
+        # 直前営業日 2025-05-02(金) の終値 1000.0 + 翌営業日以降のフォワードバー
+        bars = [
+            OhlcvModel(symbol="7203.T", date=date(2025, 5, 2), open=990.0, high=1010.0, low=985.0, close=1000.0, volume=1000),
+            OhlcvModel(symbol="7203.T", date=date(2025, 5, 7), open=1010.0, high=1030.0, low=1005.0, close=1020.0, volume=1000),
+            OhlcvModel(symbol="7203.T", date=date(2025, 5, 8), open=1020.0, high=1060.0, low=1015.0, close=1050.0, volume=1000),
+        ]
+
+        mock_collector = MagicMock()
+        mock_collector.collect_ohlcv_data.return_value = bars
+
+        evaluator = ForwardReturnEvaluator(collector=mock_collector)
+        summary = evaluator.evaluate(
+            [cand],
+            as_of_date=as_of,
+            ohlcv_map=None,
+            horizons=[2],
+            eval_end_date=date(2025, 5, 15),
+        )
+
+        call_args = mock_collector.collect_ohlcv_data.call_args
+        self.assertEqual(
+            call_args.args,
+            ("7203.T", as_of - timedelta(days=7), date(2025, 5, 15)),
+        )
+        item = summary.items[0]
+        self.assertEqual(item.status, "evaluated")
+        self.assertAlmostEqual(item.entry_price, 1000.0)
+        self.assertAlmostEqual(item.horizons[2].return_pct, 5.0)
+
+    def test_datetime_and_date_mixed_bars_do_not_raise_type_error(self):
+        """date 型と datetime 型のバーが混在してもソート・重複排除・比較で TypeError が起きない"""
+        as_of = date(2025, 6, 1)
+        cand = _build_candidate("7203.T", as_of, close_price=None)
+
+        mixed_bars = [
+            SimpleNamespace(symbol="7203.T", date=datetime(2025, 6, 3, 15, 0), open=1020.0, high=1040.0, low=1010.0, close=1030.0, volume=100),
+            SimpleNamespace(symbol="7203.T", date=date(2025, 6, 1), open=990.0, high=1010.0, low=980.0, close=1000.0, volume=100),
+            # 同日重複（datetime のほうが後なので後勝ち close=1050.0）
+            SimpleNamespace(symbol="7203.T", date=date(2025, 6, 2), open=1000.0, high=1020.0, low=995.0, close=1010.0, volume=100),
+            SimpleNamespace(symbol="7203.T", date=datetime(2025, 6, 2, 9, 0), open=1005.0, high=1060.0, low=1000.0, close=1050.0, volume=100),
+        ]
+
+        evaluator = ForwardReturnEvaluator(collector=MagicMock())
+        item = evaluator.evaluate_candidate(cand, mixed_bars, as_of_date=as_of, horizons=[2])
+        self.assertEqual(item.status, "evaluated")
+        self.assertAlmostEqual(item.entry_price, 1000.0)
+        self.assertEqual(item.horizons[2].target_date, date(2025, 6, 3))
+        self.assertNotIsInstance(item.horizons[2].target_date, datetime)
+        self.assertAlmostEqual(item.horizons[2].return_pct, 3.0)
+        self.assertAlmostEqual(item.horizons[2].mfe_pct, 6.0)
+
+
+if __name__ == "__main__":
+    unittest.main()

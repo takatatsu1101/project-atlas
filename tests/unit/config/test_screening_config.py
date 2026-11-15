@@ -4,8 +4,11 @@ import unittest
 from datetime import date
 from unittest.mock import patch
 
+from pydantic import ValidationError
+
 from src.config.screening_config import (
     AtlasScreeningConfig,
+    EvaluationConfig,
     OutputConfig,
     RankingConfig,
     load_screening_config,
@@ -36,6 +39,8 @@ class TestScreeningConfig(unittest.TestCase):
         self.assertEqual(config.ranking.strategy_top_n, 10)
         self.assertEqual(config.output.output_dir, "./output")
         self.assertEqual(config.output.formats, ["json", "markdown"])
+        self.assertEqual(config.evaluation.horizons, [5, 20, 60])
+        self.assertEqual(config.evaluation.entry_price_mode, "signal_close")
 
     def test_load_default_when_config_file_missing(self):
         """config_path=None で参照先ファイルが存在しない場合はデフォルト AtlasScreeningConfig を返す"""
@@ -118,6 +123,23 @@ ranking:
         )[0]
         self.assertEqual(strict_res.strategy_type, "watch")
         self.assertFalse(strict_res.metadata["gate1_passed"])
+
+    def test_evaluation_config_validation_and_normalization(self):
+        """EvaluationConfig が horizons の重複排除・昇順化および不正値拒否を行う"""
+        cfg = EvaluationConfig(horizons=[60, 5, 20, 5], entry_price_mode="next_open")
+        self.assertEqual(cfg.horizons, [5, 20, 60])
+        self.assertEqual(cfg.entry_price_mode, "next_open")
+
+        with self.assertRaises(ValidationError):
+            EvaluationConfig(horizons=[])
+        with self.assertRaises(ValidationError):
+            EvaluationConfig(horizons=[5, 0])
+        with self.assertRaises(ValidationError):
+            EvaluationConfig(horizons=[5, -10])
+        with self.assertRaises(ValidationError):
+            EvaluationConfig(horizons=[True, 5])
+        with self.assertRaises(ValidationError):
+            EvaluationConfig(entry_price_mode="invalid_mode")
 
 
 if __name__ == "__main__":
