@@ -16,6 +16,10 @@ class Settings(BaseSettings):
     # データベース設定
     DATABASE_URL: str = "sqlite:///./data/app.db"
 
+    # スクリーニング設定・出力設定
+    SCREENING_CONFIG_PATH: str = "./config/screening.yaml"
+    OUTPUT_DIR: str = "./output"
+
     # その他の設定（必要に応じて追加）
     # 例えば、特徴量計算の並列処理設定など
     FEATURE_ENGINE_PARALLEL_PROCESSES: int = 4

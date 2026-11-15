@@ -119,10 +119,10 @@ Project Atlas は、スイングトレード（数週間〜3ヶ月保有）向�
     - [x] 第1関門（中長期上昇トレンド条件、`DoubleTop` 等の弱気シグナル減点・除外）の実装
     - [x] 「押し目買い戦略スコア (`PullbackStrategyScore`)」と「ブレイクアウト戦略スコア (`BreakoutStrategyScore`)」の重み付け算出および代表スコア決定ロジックの実装と単体テスト
 
-- [ ] **PR #4: 本スクリーニング・ランキングおよび後段AI連携レポート出力（JSON / Markdown）の実装 (`feat/ai-report-and-screener`)**
-    - [ ] 設定ファイル（YAML等）による事前フィルタ条件・戦略スコア重み・抽出閾値の外部化
-    - [ ] `Screener`（トレンド条件＋戦略スコア閾値による買い候補抽出）および `RankingGenerator`（銘柄名・業種・価格水準・推奨理由の完全引き継ぎ、総合/戦略別ランキング）の改修
-    - [ ] `Presenter` による CLI 表示の改善と、`output/` ディレクトリへの後段AI連携用レポート（JSON形式・Markdown形式）出力機能の実装と単体・結合テスト
+- [x] **PR #4: 本スクリーニング・ランキングおよび後段AI連携レポート出力（JSON / Markdown）の実装 (`feat/ai-report-and-screener`)**
+    - [x] 設定ファイル（YAML等）による事前フィルタ条件・戦略スコア重み・抽出閾値の外部化
+    - [x] `Screener`（トレンド条件＋戦略スコア閾値による買い候補抽出）および `RankingGenerator`（銘柄名・業種・価格水準・推奨理由の完全引き継ぎ、総合/戦略別ランキング）の改修
+    - [x] `Presenter` による CLI 表示の改善と、`output/` ディレクトリへの後段AI連携用レポート（JSON形式・Markdown形式）出力機能の実装と単体・結合テスト
 
 - [ ] **PR #5: 過去基準日指定およびスクリーニング精度検証（フォワードリターン評価）機能の実装 (`feat/forward-return-evaluator`)**
     - [ ] 任意の過去基準日（`as_of_date`）を指定したスクリーニング実行と、基準日以降のN営業日後（例：5日・20日・60日後）の騰落率・勝率・最大上昇率（MFE）/最大下落率（MAE）を算出・集計する `Evaluator` モジュールの実装
@@ -134,6 +134,7 @@ Project Atlas は、スイングトレード（数週間〜3ヶ月保有）向�
 - [ ] フェーズ3 PR #2〜#5 の順次実装・検証完了
 
 ## 5. 実行ログ (最新の作業のみ記載)
+- 2026/11/15: PR #4（`feat/ai-report-and-screener`）を実施。`config/screening.yaml` による設定外部化（`src/config/screening_config.py`）と `ScoreManager`/`ScoreRegistry` への設定注入、`src/pattern_detector` の自動登録修正、`Screener`（3段階ゲート・戦略別閾値対応）・`RankingGenerator`（全フィールド引き継ぎ・総合/戦略別ランキング）・`Presenter`（CLI改善・`output/` への JSON/Markdown 出力）の改修、および `src/main.py` への全パイプライン統合を実装し、全テスト170件のパスおよび2段階レビュー（1次 `atlas-reviewer`・2次 `gemini-4-argon-high` 双方 Approve）を完了。
 - 2026/11/15: PR #3（`feat/strategy-score-engine`）を実施。`ScoreResultModel`/`AnalysisResultModel` の拡張、`IndicatorCalculator` への20日高安・ATR14・出来高倍率の追加、3段階ゲート＆戦略別スコアリング（`S002_StrategyScore`：`Pullback` / `Breakout` / `Watch` 判定、`DoubleTop`・過熱ボラ減点、`key_levels`/`risk_metrics`/`reasons` 生成）を実装し、全テスト150件のパスおよび2段階レビュー（Argon Approve）を完了。
 - 2026/11/15: PR #2（`feat/pre-screener-and-master`）を実施。`DataCollector` の `data/financial/` 優先参照・`as_of_date` 対応・`load_financial_snapshot` 実装、東証銘柄マスタ管理（`MasterManager`）、事前スクリーニング（`PreScreener`）を実装し、単体テスト32件が全パスすることを確認。
 - 2026/11/15: 要件見直しを実施し、`docs/requirements/requirements.md` (v0.2.0)、`docs/specifications/scoreing.md`、`docs/specifications/features/feature_list.md`、`docs/_plan.md` を改訂。後段AI連携を見据えた1次スクリーニング特化、3段階ゲート＋戦略別スコア（押し目買い型／ブレイクアウト型）、構造化レポート出力（JSON/Markdown）、フォワードリターン検証機能を定義し、以降の実装を PR #1〜#5 の「1要件1PR」構成に整理。
