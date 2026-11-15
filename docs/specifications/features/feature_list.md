@@ -42,22 +42,22 @@ related:
 
 ## 3. 特徴量一覧
 
-| ID | カテゴリ | 特徴量名 | 説明 |
-|----|----------|----------|------|
-| M001 | Moving Average | MAAlignmentScore | 移動平均線の並び評価 |
-| P001 | Price Action | PullbackScore | 押し目の理想度 |
-| P002 | Price Action | BreakoutScore | ブレイクアウトの強さ |
-| T001 | Trend | TrendStrengthScore | トレンドの強さ |
-| V001 | Volume | VolumeScore | 出来高評価 |
-| O001 | Oscillator | MomentumScore | モメンタム評価 |
-| R001 | Risk | VolatilityScore | ボラティリティ評価 |
-| R002 | Risk | RiskScore | エントリーリスク評価*ここについてはScoreingに移譲を検討 |
-| S001 | Support/Resistance | SupportResistanceScore | サポート・レジスタンスとの位置関係評価 |
-| F001 | Fundamental | ProfitabilityScore | 収益性（ROE・営業利益率など） |
-| F002 | Fundamental | GrowthScore | 成長性（EPS・売上・利益率など） |
-| F003 | Fundamental | ValuationScore | 割安性（PER・PBR・EV/EBITDA |
-| F004 | Fundamental | FinancialHealthScore | 財務健全性（自己資本比率・D/Eレシオなど） |
-| F005 | Fundamental | EarningsQualityScore | 利益の質（営業CF、利益とCFの整合性など） |
+| ID | カテゴリ | 特徴量名 | 説明 | ステータス |
+|----|----------|----------|------|------------|
+| M001 | Moving Average | MAAlignmentScore | 移動平均線の並び評価 | 実装済 |
+| P001 | Price Action | PullbackScore | 押し目の理想度（SMA25/75サポート距離を含む） | 実装済 |
+| P002 | Price Action | BreakoutScore | ブレイクアウトの強さ（過去20日高値レジスタンス距離を含む） | 実装済 |
+| T001 | Trend | TrendStrengthScore | トレンドの強さ | 実装済 |
+| V001 | Volume | VolumeScore | 出来高評価 | 実装済 |
+| O001 | Oscillator | MomentumScore | モメンタム評価 | 実装済 |
+| R001 | Risk | VolatilityScore | ボラティリティ評価 | 実装済 |
+| F001 | Fundamental | ProfitabilityScore | 収益性（ROE・営業利益率など） | 実装済 |
+| F002 | Fundamental | GrowthScore | 成長性（EPS・売上・利益CAGRなど） | 実装済 |
+| F003 | Fundamental | ValuationScore | 割安性（PER・PBR） | 実装済 |
+| F004 | Fundamental | FinancialHealthScore | 財務健全性（自己資本・黒字安定性など） | 実装済 |
+| F005 | Fundamental | EarningsQualityScore | 利益の質（本業利益と純利益の整合性など） | 実装済 |
+
+> Note: 旧一覧にあった `R002: RiskScore` および `S001: SupportResistanceScore` は、v0.2.0 要件見直しにより独立した特徴量クラスからは廃止し、`P001` / `P002` / `R001` のメタデータおよび Score Engine・出力層の「後段AI連携用・具体的サポレジ価格水準＆リスク情報」へ統合。
 
 ---
 
