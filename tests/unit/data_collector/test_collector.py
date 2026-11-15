@@ -1,16 +1,21 @@
+import tempfile
 import unittest
 from datetime import date
+from pathlib import Path
 from unittest.mock import patch, MagicMock
 import pandas as pd
 import os
 
+from src.common.storage import StorageManager
 from src.data_collector.collector import DataCollector, collect_ohlcv_data, collect_financial_data
 from src.model.data_models import OhlcvModel, FinancialModel
 
 class TestDataCollector(unittest.TestCase):
 
     def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
         self.collector = DataCollector()
+        self.collector.storage = StorageManager(base_dir=self.temp_dir.name)
         self.symbol = "1301.T" # テスト用実コード例
         self.start_date = date(2025, 1, 1)
         self.end_date = date(2025, 1, 5)
@@ -22,6 +27,9 @@ class TestDataCollector(unittest.TestCase):
             "close": [104.0, 105.0, 106.0, 107.0, 108.0],
             "volume": [1000, 1100, 1200, 1300, 1400]
         }
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
 
     @patch("yfinance.Ticker")
     def test_collect_ohlcv_data_success_and_cached(self, mock_ticker):
@@ -175,6 +183,219 @@ class TestDataCollector(unittest.TestCase):
         result = collect_financial_data(self.symbol, 2025)
         mock_data_collector.collect_financial_data.assert_called_once_with(self.symbol, 2025)
         self.assertIsNotNone(result)
+
+    def test_get_irbank_file_path_priority(self):
+        """data/financial/ が最優先で参照され、未存在時も data/financial/ が返る"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            collector = DataCollector()
+            collector.storage = StorageManager(base_dir=tmp_path / "data")
+            collector.local_irbank_dir = str(tmp_path / "cache_irbank")
+            collector.user_irbank_dir = str(tmp_path / "user_irbank")
+            os.makedirs(collector.local_irbank_dir, exist_ok=True)
+            os.makedirs(collector.user_irbank_dir, exist_ok=True)
+
+            file_name = "0025-fy-balance-sheet.json"
+            fin_file = collector.storage.financial_dir / file_name
+            local_file = Path(collector.local_irbank_dir) / file_name
+            user_file = Path(collector.user_irbank_dir) / file_name
+
+            # どこにもない場合は data/financial/ のパスを返す（ダウンロード保存先）
+            self.assertEqual(collector._get_irbank_file_path("0025", file_name), str(fin_file))
+
+            # user のみ存在
+            user_file.write_text("{}", encoding="utf-8")
+            self.assertEqual(collector._get_irbank_file_path("0025", file_name), str(user_file))
+
+            # local が追加されれば local 優先
+            local_file.write_text("{}", encoding="utf-8")
+            self.assertEqual(collector._get_irbank_file_path("0025", file_name), str(local_file))
+
+            # data/financial/ が追加されれば最優先
+            fin_file.write_text("{}", encoding="utf-8")
+            self.assertEqual(collector._get_irbank_file_path("0025", file_name), str(fin_file))
+
+    def test_collect_ohlcv_data_as_of_date_prevents_leakage(self):
+        """as_of_date を超える OHLCV データが返却されないことを検証"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            collector = DataCollector()
+            collector.storage = StorageManager(base_dir=Path(tmpdir))
+
+            full_df = pd.DataFrame({
+                "date": [date(2025, 1, 1), date(2025, 1, 2), date(2025, 1, 3), date(2025, 1, 6)],
+                "open": [100.0, 101.0, 102.0, 105.0],
+                "high": [105.0, 106.0, 107.0, 110.0],
+                "low": [99.0, 100.0, 101.0, 104.0],
+                "close": [104.0, 105.0, 106.0, 109.0],
+                "volume": [1000, 1100, 1200, 1500],
+            })
+            collector.storage.save_parquet(full_df, f"price/{self.symbol}.parquet")
+
+            # end_date が未来でも as_of_date=2025-01-03 までしか返らない
+            res = collector.collect_ohlcv_data(
+                self.symbol,
+                date(2025, 1, 1),
+                date(2025, 1, 10),
+                as_of_date=date(2025, 1, 3),
+            )
+            self.assertEqual([r.date for r in res], [date(2025, 1, 1), date(2025, 1, 2), date(2025, 1, 3)])
+
+            # start_date > as_of_date なら空リスト
+            res_empty = collector.collect_ohlcv_data(
+                self.symbol,
+                date(2025, 1, 5),
+                date(2025, 1, 10),
+                as_of_date=date(2025, 1, 3),
+            )
+            self.assertEqual(res_empty, [])
+
+    @patch("src.data_collector.collector.DataCollector._load_irbank_json")
+    def test_collect_financial_data_as_of_date_disclosure_lag(self, mock_load_json):
+        """as_of_date と開示ラグ（60日）により未開示決算が前年度へフォールバックされる"""
+        bs_2025 = {"item": {"7203": ["2025/03", "90000", "0", "0", "0", "0", "0", "3000.0", "45.0"]}}
+        pl_2025 = {"item": {"7203": ["2025/03", "50000", "5000", "5200", "3500", "250.0", "12.0", "6.0"]}}
+        bs_2024 = {"item": {"7203": ["2024/03", "80000", "0", "0", "0", "0", "0", "2700.0", "42.0"]}}
+        pl_2024 = {"item": {"7203": ["2024/03", "45000", "4200", "4300", "3000", "210.0", "11.0", "5.5"]}}
+
+        def side_effect(year, fy_type, allow_download=True):
+            if year == 2025:
+                return bs_2025 if "balance-sheet" in fy_type else pl_2025
+            if year == 2024:
+                return bs_2024 if "balance-sheet" in fy_type else pl_2024
+            return None
+
+        mock_load_json.side_effect = side_effect
+
+        with patch.object(self.collector, "collect_ohlcv_data") as mock_ohlcv:
+            mock_ohlcv.return_value = [
+                OhlcvModel(symbol="7203.T", date=date(2025, 5, 1), open=2500, high=2550, low=2480, close=2520.0, volume=10000)
+            ]
+            # 2025/03/31 + 60日 = 2025/05/30 -> 2025/05/15 時点では未開示のため 2024/03 期を採用
+            fin_before = self.collector.collect_financial_data(
+                "7203.T",
+                fiscal_year=2025,
+                as_of_date=date(2025, 5, 15),
+                disclosure_lag_days=60,
+            )
+            self.assertIsNotNone(fin_before)
+            self.assertEqual(fin_before.fiscal_date, date(2024, 3, 31))
+            self.assertEqual(fin_before.revenue, 45000.0)
+            self.assertEqual(fin_before.total_assets, 80000.0)
+            self.assertEqual(fin_before.equity_ratio, 42.0)
+            mock_ohlcv.assert_called_with("7203.T", date(2024, 1, 1), date(2025, 5, 15), as_of_date=date(2025, 5, 15))
+
+            # 2025/06/01 時点では 2025/03 期が開示済み
+            fin_after = self.collector.collect_financial_data(
+                "7203.T",
+                fiscal_year=2025,
+                as_of_date=date(2025, 6, 1),
+                disclosure_lag_days=60,
+            )
+            self.assertIsNotNone(fin_after)
+            self.assertEqual(fin_after.fiscal_date, date(2025, 3, 31))
+            self.assertEqual(fin_after.revenue, 50000.0)
+            self.assertEqual(fin_after.total_assets, 90000.0)
+            self.assertEqual(fin_after.equity_ratio, 45.0)
+
+    @patch("src.data_collector.collector.DataCollector._load_irbank_json")
+    def test_load_financial_snapshot(self, mock_load_json):
+        """load_financial_snapshot が通信なしで一括ロードし、開示ラグを反映する"""
+        bs_2025 = {
+            "item": {
+                "7203": ["2025/03", "90000", "0", "0", "0", "0", "0", "3000.0", "45.0"],
+                "9984": ["2025/02", "50000", "0", "0", "0", "0", "0", "2000.0", "30.0"],
+            }
+        }
+        pl_2025 = {
+            "item": {
+                "7203": ["2025/03", "50000", "5000", "5200", "3500", "250.0", "12.0", "6.0"],
+                "9984": ["2025/02", "30000", "2000", "2100", "1200", "100.0", "8.0", "4.0"],
+            }
+        }
+        bs_2024 = {
+            "item": {
+                "7203": ["2024/03", "80000", "0", "0", "0", "0", "0", "2700.0", "42.0"],
+            }
+        }
+        pl_2024 = {
+            "item": {
+                "7203": ["2024/03", "45000", "4200", "4300", "3000", "210.0", "11.0", "5.5"],
+            }
+        }
+
+        def side_effect(year, fy_type, allow_download=True):
+            if year == 2025:
+                return bs_2025 if "balance-sheet" in fy_type else pl_2025
+            if year == 2024:
+                return bs_2024 if "balance-sheet" in fy_type else pl_2024
+            return None
+
+        mock_load_json.side_effect = side_effect
+
+        with patch.object(self.collector, "collect_ohlcv_data") as mock_ohlcv:
+            # 2025/05/15 時点: 2025/02 (2/28+60日=4/29) は開示済み、2025/03 (3/31+60日=5/30) は未開示
+            snapshot = self.collector.load_financial_snapshot(
+                fiscal_year=2025,
+                as_of_date=date(2025, 5, 15),
+                disclosure_lag_days=60,
+            )
+            mock_ohlcv.assert_not_called()
+            self.assertIn("7203", snapshot)
+            self.assertIn("9984", snapshot)
+            self.assertEqual(snapshot["7203"].fiscal_date, date(2024, 3, 31))
+            self.assertEqual(snapshot["7203"].revenue, 45000.0)
+            self.assertEqual(snapshot["9984"].fiscal_date, date(2025, 2, 28))
+            self.assertEqual(snapshot["9984"].revenue, 30000.0)
+
+    def test_parse_symbol_lowercase_alpha(self):
+        """小文字英字を含む銘柄コードも大文字4桁として抽出される"""
+        self.assertEqual(self.collector._parse_symbol("130a.T"), "130A")
+        self.assertEqual(self.collector._parse_symbol("130a"), "130A")
+
+    def test_load_financial_snapshot_no_download_when_missing(self):
+        """未存在の年度に対して _download_irbank_file が呼ばれないことを検証"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            collector = DataCollector()
+            collector.storage = StorageManager(base_dir=tmp_path / "data")
+            collector.local_irbank_dir = str(tmp_path / "cache_irbank")
+            collector.user_irbank_dir = str(tmp_path / "user_irbank")
+            os.makedirs(collector.local_irbank_dir, exist_ok=True)
+            os.makedirs(collector.user_irbank_dir, exist_ok=True)
+
+            with patch.object(collector, "_download_irbank_file") as mock_download:
+                snapshot = collector.load_financial_snapshot(
+                    fiscal_year=2099,
+                    as_of_date=date(2099, 6, 1),
+                    disclosure_lag_days=60,
+                )
+                mock_download.assert_not_called()
+                self.assertEqual(snapshot, {})
+
+    def test_collect_ohlcv_data_as_of_date_does_not_truncate_fetch_range(self):
+        """as_of_date 指定時でもフェッチ範囲は as_of_date で切り詰められずキャッシュ中抜けを防ぐ"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            collector = DataCollector()
+            collector.storage = StorageManager(base_dir=Path(tmpdir))
+
+            fetched_df = pd.DataFrame({
+                "date": [date(2025, 1, 1), date(2025, 1, 2), date(2025, 1, 6), date(2025, 1, 10)],
+                "open": [100.0, 101.0, 105.0, 108.0],
+                "high": [105.0, 106.0, 110.0, 112.0],
+                "low": [99.0, 100.0, 104.0, 107.0],
+                "close": [104.0, 105.0, 109.0, 111.0],
+                "volume": [1000, 1100, 1500, 1600],
+            })
+
+            with patch.object(collector, "_get_ohlcv_from_yfinance", return_value=fetched_df) as mock_yf:
+                res = collector.collect_ohlcv_data(
+                    self.symbol,
+                    date(2025, 1, 1),
+                    date(2025, 1, 10),
+                    as_of_date=date(2025, 1, 3),
+                )
+                mock_yf.assert_called_once_with(self.symbol, date(2025, 1, 1), date(2025, 1, 10))
+                self.assertEqual([r.date for r in res], [date(2025, 1, 1), date(2025, 1, 2)])
 
 if __name__ == '__main__':
     unittest.main()

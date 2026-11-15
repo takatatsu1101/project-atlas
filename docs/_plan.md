@@ -109,10 +109,10 @@ Project Atlas は、スイングトレード（数週間〜3ヶ月保有）向�
     - [x] `docs/specifications/scoreing.md` および `docs/specifications/features/feature_list.md` の更新
     - [x] `docs/_plan.md` のフェーズ・PR計画の再編成
 
-- [ ] **PR #2: 銘柄マスタ管理と事前スクリーニング（Universe Pre-Screener）の実装 (`feat/pre-screener-and-master`)**
-    - [ ] `DataCollector` の財務データ参照パス修正（`data/financial/` を優先参照）および基準日（`as_of_date`）指定によるデータ切り出し対応（先読みバイアス防止）
-    - [ ] 東証銘柄マスタ（銘柄コード、銘柄名、市場区分、業種、規模区分）の保持・ロード機構の実装
-    - [ ] 事前スクリーニング（`PreScreener`）：①市場区分（プライム・スタンダード）× ②財務・規模条件（黒字・ROE・自己資本比率等）で対象コードを高速抽出し、③OHLCV取得後に売買代金（流動性）で絞り込む機能の実装と単体テスト
+- [x] **PR #2: 銘柄マスタ管理と事前スクリーニング（Universe Pre-Screener）の実装 (`feat/pre-screener-and-master`)**
+    - [x] `DataCollector` の財務データ参照パス修正（`data/financial/` を優先参照）および基準日（`as_of_date`）指定によるデータ切り出し対応（先読みバイアス防止）
+    - [x] 東証銘柄マスタ（銘柄コード、銘柄名、市場区分、業種、規模区分）の保持・ロード機構の実装
+    - [x] 事前スクリーニング（`PreScreener`）：①市場区分（プライム・スタンダード）× ②財務・規模条件（黒字・ROE・自己資本比率等）で対象コードを高速抽出し、③OHLCV取得後に売買代金（流動性）で絞り込む機能の実装と単体テスト
 
 - [ ] **PR #3: 3段階ゲート＆戦略別スコアリング（押し目買い型／ブレイクアウト型）の実装 (`feat/strategy-score-engine`)**
     - [ ] `ScoreResultModel` / `AnalysisResultModel` のデータモデル拡張（推奨戦略タイプ `strategy_type`、戦略別サブスコア、判定根拠リスト `reasons`、AI連携用の具体的価格水準 `key_levels`［現在値、SMA5/25/75、直近20日高安、ボラティリティ、出来高倍率］）
@@ -134,6 +134,7 @@ Project Atlas は、スイングトレード（数週間〜3ヶ月保有）向�
 - [ ] フェーズ3 PR #2〜#5 の順次実装・検証完了
 
 ## 5. 実行ログ (最新の作業のみ記載)
+- 2026/11/15: PR #2（`feat/pre-screener-and-master`）を実施。`DataCollector` の `data/financial/` 優先参照・`as_of_date` 対応・`load_financial_snapshot` 実装、東証銘柄マスタ管理（`MasterManager`）、事前スクリーニング（`PreScreener`）を実装し、単体テスト32件が全パスすることを確認。
 - 2026/11/15: 要件見直しを実施し、`docs/requirements/requirements.md` (v0.2.0)、`docs/specifications/scoreing.md`、`docs/specifications/features/feature_list.md`、`docs/_plan.md` を改訂。後段AI連携を見据えた1次スクリーニング特化、3段階ゲート＋戦略別スコア（押し目買い型／ブレイクアウト型）、構造化レポート出力（JSON/Markdown）、フォワードリターン検証機能を定義し、以降の実装を PR #1〜#5 の「1要件1PR」構成に整理。
 - 2026/08/31: ステップ5（パターン検出・スコアリングの結合）およびステップ6（ランキング・プレゼンテーション出力までの全パイプライン結合テスト）を完了。全10銘柄を用いた一連の分析パイプライン（OHLCV・財務データ取得、指標計算、特徴量計算、パターン検出、スコアリング、ランキング順位付け、CLI出力）を正常に実行・検証。`docs/_plan.md` を更新。
 - 2026/08/31: 全13種類の特徴量（テクニカル系・ファンダメンタルズ系すべて）を `main.py` のパイプラインに一括統合し、全10銘柄での計算およびキャッシュ保存が正常に完了することを確認（ステップ4完了）。`docs/_plan.md` を更新。

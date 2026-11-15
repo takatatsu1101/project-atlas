@@ -9,6 +9,9 @@ class Settings(BaseSettings):
     # データ収集設定
     DATA_SOURCE_API_KEY: str = "your_api_key"
     DATA_CACHE_DIR: str = "./data/cache"
+    DATA_FINANCIAL_DIR: str = "./data/financial"
+    DATA_MASTER_DIR: str = "./data/master"
+    FINANCIAL_DISCLOSURE_LAG_DAYS: int = 60
 
     # データベース設定
     DATABASE_URL: str = "sqlite:///./data/app.db"

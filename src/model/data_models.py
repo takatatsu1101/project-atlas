@@ -30,6 +30,19 @@ class FinancialModel(BaseModel):
     revenue_growth_5y_avg: Optional[float] = None
     net_profit_growth_3y_avg: Optional[float] = None
     net_profit_growth_5y_avg: Optional[float] = None
+    total_assets: Optional[float] = None  # 総資産
+    equity_ratio: Optional[float] = None  # 自己資本比率
+
+
+class StockMasterModel(BaseModel):
+    """東証上場銘柄マスタモデル"""
+    code: str  # 4桁銘柄コード（例: "7203", "130A"）
+    symbol: str  # ティッカー（例: "7203.T"）
+    name: str  # 銘柄名
+    market: str  # 市場区分（"プライム", "スタンダード", "グロース" 等）
+    sector_33: Optional[str] = None  # 33業種区分
+    sector_17: Optional[str] = None  # 17業種区分
+    scale: Optional[str] = None  # 規模区分
 
 class IndicatorSetModel(BaseModel):
     symbol: str
