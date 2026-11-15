@@ -102,3 +102,62 @@ class AnalysisResultModel(BaseModel):
     key_levels: Dict[str, Optional[float]] = Field(default_factory=dict)  # 主要価格水準・乖離率
     risk_metrics: Dict[str, Optional[float]] = Field(default_factory=dict)  # リスク指標
     financial_summary: Dict[str, Optional[float]] = Field(default_factory=dict)  # 財務サマリー
+
+
+class HorizonMetricsModel(BaseModel):
+    """個別ホライズン（営業日ベース）のフォワードリターン評価指標モデル"""
+
+    horizon_days: int
+    available: bool = False
+    target_date: Optional[DateType] = None
+    exit_close: Optional[float] = None
+    return_pct: Optional[float] = None
+    mfe_pct: Optional[float] = None
+    mae_pct: Optional[float] = None
+    is_win: Optional[bool] = None
+
+
+class ForwardEvaluationItemModel(BaseModel):
+    """銘柄単位のフォワードリターン検証結果モデル"""
+
+    symbol: str
+    company_name: str = ""
+    market: str = ""
+    sector: str = ""
+    strategy_type: str = "watch"
+    rank: Optional[int] = None
+    total_score: float = 0.0
+    signal_date: Optional[DateType] = None
+    entry_price: Optional[float] = None
+    horizons: Dict[int, HorizonMetricsModel] = Field(default_factory=dict)
+    status: str = "evaluated"  # "evaluated" / "no_forward_data" / "missing_entry_price"
+
+
+class HorizonSummaryModel(BaseModel):
+    """ホライズン別の検証サマリー統計モデル"""
+
+    horizon_days: int
+    total_candidates: int = 0
+    evaluated_count: int = 0
+    win_count: int = 0
+    win_rate_pct: Optional[float] = None
+    avg_return_pct: Optional[float] = None
+    median_return_pct: Optional[float] = None
+    avg_mfe_pct: Optional[float] = None
+    avg_mae_pct: Optional[float] = None
+    best_symbol: Optional[str] = None
+    best_return_pct: Optional[float] = None
+    worst_symbol: Optional[str] = None
+    worst_return_pct: Optional[float] = None
+
+
+class EvaluationSummaryModel(BaseModel):
+    """フォワードリターン検証全体のサマリーモデル"""
+
+    as_of_date: DateType
+    horizons: List[int]
+    entry_price_mode: str = "signal_close"
+    total_candidates: int = 0
+    overall_summary: Dict[int, HorizonSummaryModel] = Field(default_factory=dict)
+    strategy_summary: Dict[str, Dict[int, HorizonSummaryModel]] = Field(default_factory=dict)
+    items: List[ForwardEvaluationItemModel] = Field(default_factory=list)

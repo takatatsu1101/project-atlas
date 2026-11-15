@@ -130,5 +130,85 @@ class TestIndicatorCalculator(unittest.TestCase):
         self.assertIn("ATR14", indicator_sets[-1].indicators)
         self.assertIn("VOLUME_RATIO", indicator_sets[-1].indicators)
 
+    def test_cache_miss_when_intermediate_date_differs(self):
+        """長さ・最終日が同じでも途中の日付列が異なる場合は誤ってキャッシュヒットしない"""
+        self.calculator.calculate_indicators(self.ohlcv_data)
+
+        # 2番目の日付だけ別日に差し替え（長さ・最終日は同一）
+        shifted = list(self.ohlcv_data)
+        shifted[1] = OhlcvModel(
+            symbol=self.symbol,
+            date=date(2024, 12, 31),
+            open=103.0,
+            high=107.0,
+            low=102.0,
+            close=500.0,
+            volume=1100,
+        )
+        recalculated = self.calculator.calculate_indicators(shifted)
+        self.assertEqual(recalculated[1].date, date(2024, 12, 31))
+        self.assertNotAlmostEqual(
+            recalculated[4].indicators["SMA5"],
+            (103.0 + 106.0 + 109.0 + 111.0 + 114.0) / 5.0,
+        )
+
+    def test_cache_key_suffix_isolates_cache_files(self):
+        """cache_key_suffix 指定時は通常キャッシュと別ファイルに保存・参照される"""
+        self.calculator.calculate_indicators(self.ohlcv_data, cache_key_suffix="asof_2025-01-16")
+
+        suffix_path = self.calculator.storage.base_dir / f"cache/indicators_{self.symbol}_asof_2025-01-16.json"
+        default_path = self.calculator.storage.base_dir / f"cache/indicators_{self.symbol}.json"
+        self.assertTrue(suffix_path.exists())
+        self.assertFalse(default_path.exists())
+
+    def test_use_cache_false_skips_read_and_write(self):
+        """use_cache=False の場合は既存キャッシュを読まず、新規保存もしない"""
+        # 偽キャッシュ（close=9999 で作ったようなダミー値）を配置
+        fake_cache = [
+            {
+                "symbol": self.symbol,
+                "date": o.date.isoformat(),
+                "indicators": {"SMA5": 9999.0, "LOWEST_LOW_20": 9999.0},
+            }
+            for o in self.ohlcv_data
+        ]
+        self.calculator.storage.save_json(fake_cache, f"cache/indicators_{self.symbol}.json")
+
+        # use_cache=False なら偽キャッシュを使わずに再計算する
+        res = self.calculator.calculate_indicators(self.ohlcv_data, use_cache=False)
+        self.assertAlmostEqual(
+            res[4].indicators["SMA5"],
+            (103.0 + 106.0 + 109.0 + 111.0 + 114.0) / 5.0,
+        )
+
+        # suffix 付きで use_cache=False ならキャッシュファイルを作成しない
+        self.calculator.calculate_indicators(
+            self.ohlcv_data, use_cache=False, cache_key_suffix="nocache_test"
+        )
+        nocache_path = (
+            self.calculator.storage.base_dir
+            / f"cache/indicators_{self.symbol}_nocache_test.json"
+        )
+        self.assertFalse(nocache_path.exists())
+
+    def test_module_level_calculate_indicators_forwards_cache_args(self):
+        """モジュールレベル calculate_indicators が use_cache / cache_key_suffix を引き継ぐ"""
+        from src.indicator_calculator import calculator as calc_mod
+
+        orig_storage = calc_mod.indicator_calculator.storage
+        try:
+            calc_mod.indicator_calculator.storage = StorageManager(base_dir=self.temp_dir.name)
+            res = calculate_indicators(
+                self.ohlcv_data, use_cache=True, cache_key_suffix="mod_test"
+            )
+            self.assertEqual(len(res), len(self.ohlcv_data))
+            expected_path = (
+                calc_mod.indicator_calculator.storage.base_dir
+                / f"cache/indicators_{self.symbol}_mod_test.json"
+            )
+            self.assertTrue(expected_path.exists())
+        finally:
+            calc_mod.indicator_calculator.storage = orig_storage
+
 if __name__ == '__main__':
     unittest.main()

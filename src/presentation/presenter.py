@@ -4,7 +4,11 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Union
 
 from src.common.logger import get_logger
-from src.model.data_models import AnalysisResultModel
+from src.model.data_models import (
+    AnalysisResultModel,
+    EvaluationSummaryModel,
+    HorizonSummaryModel,
+)
 
 logger = get_logger(__name__)
 
@@ -39,13 +43,28 @@ class Presenter:
         return value
 
     @classmethod
+    def _resolve_report_prefix(
+        cls,
+        evaluation_summary: Optional[EvaluationSummaryModel] = None,
+        report_prefix: Optional[str] = None,
+    ) -> str:
+        if report_prefix is not None:
+            return report_prefix
+        return "evaluation_report" if evaluation_summary is not None else "screening_report"
+
+    @classmethod
     def _resolve_as_of_date(
         cls,
         analysis_results: Sequence[AnalysisResultModel],
         as_of_date: Optional[date] = None,
+        evaluation_summary: Optional[EvaluationSummaryModel] = None,
     ) -> date:
         if as_of_date is not None:
             return cls._normalize_date(as_of_date) or date.today()
+        if evaluation_summary is not None and evaluation_summary.as_of_date is not None:
+            norm = cls._normalize_date(evaluation_summary.as_of_date)
+            if norm is not None:
+                return norm
         for res in analysis_results:
             if res.date is not None:
                 norm = cls._normalize_date(res.date)
@@ -189,6 +208,8 @@ class Presenter:
         as_of_date: Optional[date] = None,
         strategy_rankings: Optional[Dict[str, List[AnalysisResultModel]]] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        evaluation_summary: Optional[EvaluationSummaryModel] = None,
+        report_prefix: Optional[str] = None,
     ) -> Optional[Dict[str, Path]]:
         """
         分析結果をCLIまたは構造化レポート（json / markdown / all）で出力する。
@@ -198,8 +219,10 @@ class Presenter:
         if norm_type == "cli":
             if not analysis_results:
                 print("表示する分析結果がありません。")
-                return None
-            self._display_cli(analysis_results)
+            else:
+                self._display_cli(analysis_results)
+            if evaluation_summary is not None:
+                self._display_evaluation_cli(evaluation_summary)
             return None
 
         if norm_type == "json":
@@ -210,6 +233,8 @@ class Presenter:
                 as_of_date=as_of_date,
                 strategy_rankings=strategy_rankings,
                 metadata=metadata,
+                evaluation_summary=evaluation_summary,
+                report_prefix=report_prefix,
             )
             return {"json": path}
 
@@ -221,6 +246,8 @@ class Presenter:
                 as_of_date=as_of_date,
                 strategy_rankings=strategy_rankings,
                 metadata=metadata,
+                evaluation_summary=evaluation_summary,
+                report_prefix=report_prefix,
             )
             return {"markdown": path}
 
@@ -229,6 +256,8 @@ class Presenter:
                 print("表示する分析結果がありません。")
             else:
                 self._display_cli(analysis_results)
+            if evaluation_summary is not None:
+                self._display_evaluation_cli(evaluation_summary)
             return self.export_reports(
                 analysis_results,
                 output_dir=output_dir,
@@ -236,6 +265,8 @@ class Presenter:
                 as_of_date=as_of_date,
                 strategy_rankings=strategy_rankings,
                 metadata=metadata,
+                evaluation_summary=evaluation_summary,
+                report_prefix=report_prefix,
             )
 
         if norm_type == "gui":
@@ -245,8 +276,10 @@ class Presenter:
 
         if not analysis_results:
             print("表示する分析結果がありません。")
-            return None
-        self._display_cli(analysis_results)
+        else:
+            self._display_cli(analysis_results)
+        if evaluation_summary is not None:
+            self._display_evaluation_cli(evaluation_summary)
         return None
 
     def _display_cli(self, analysis_results: List[AnalysisResultModel]) -> None:
@@ -335,6 +368,90 @@ class Presenter:
                     )
         print("==============================")
 
+    def _display_evaluation_cli(self, evaluation_summary: EvaluationSummaryModel) -> None:
+        """フォワードリターン検証サマリーおよび銘柄別リターンをCLI出力する。"""
+        print("\n=== フォワードリターン検証サマリー ===")
+        print(
+            f"基準日: {evaluation_summary.as_of_date.isoformat()} | "
+            f"エントリー基準: {evaluation_summary.entry_price_mode} | "
+            f"検証対象: {evaluation_summary.total_candidates} 件 | "
+            f"ホライズン: {evaluation_summary.horizons}"
+        )
+
+        def _format_best_worst(summary: HorizonSummaryModel) -> str:
+            best_str = (
+                f"{summary.best_symbol} ({self._fmt_pct(summary.best_return_pct, signed=True)})"
+                if summary.best_symbol is not None
+                else "-"
+            )
+            worst_str = (
+                f"{summary.worst_symbol} ({self._fmt_pct(summary.worst_return_pct, signed=True)})"
+                if summary.worst_symbol is not None
+                else "-"
+            )
+            return f"最高={best_str}, 最低={worst_str}"
+
+        print("\n[全体集計]")
+        for h in evaluation_summary.horizons:
+            hs = evaluation_summary.overall_summary.get(h)
+            if hs is None:
+                continue
+            print(
+                f"  +{h}営業日: 評価={hs.evaluated_count}/{hs.total_candidates}件 "
+                f"| 勝率={self._fmt_pct(hs.win_rate_pct)} ({hs.win_count}/{hs.evaluated_count}) "
+                f"| 平均={self._fmt_pct(hs.avg_return_pct, signed=True)} "
+                f"| 中央値={self._fmt_pct(hs.median_return_pct, signed=True)} "
+                f"| 平均MFE={self._fmt_pct(hs.avg_mfe_pct, signed=True)} "
+                f"| 平均MAE={self._fmt_pct(hs.avg_mae_pct, signed=True)} "
+                f"| {_format_best_worst(hs)}"
+            )
+
+        if evaluation_summary.strategy_summary:
+            print("\n[戦略別集計]")
+            for strat, h_map in evaluation_summary.strategy_summary.items():
+                strat_label = self._strategy_label(strat)
+                print(f"  戦略: {strat_label} ({strat})")
+                for h in evaluation_summary.horizons:
+                    hs = h_map.get(h)
+                    if hs is None:
+                        continue
+                    print(
+                        f"    +{h}営業日: 評価={hs.evaluated_count}/{hs.total_candidates}件 "
+                        f"| 勝率={self._fmt_pct(hs.win_rate_pct)} "
+                        f"| 平均={self._fmt_pct(hs.avg_return_pct, signed=True)} "
+                        f"| 中央値={self._fmt_pct(hs.median_return_pct, signed=True)} "
+                        f"| 平均MFE={self._fmt_pct(hs.avg_mfe_pct, signed=True)} "
+                        f"| 平均MAE={self._fmt_pct(hs.avg_mae_pct, signed=True)}"
+                    )
+
+        print("\n[銘柄別フォワードリターン]")
+        if not evaluation_summary.items:
+            print("  検証対象銘柄はありません。")
+        else:
+            for item in evaluation_summary.items:
+                rank_str = f"{item.rank}位" if item.rank is not None else "-"
+                sig_str = item.signal_date.isoformat() if item.signal_date else "-"
+                print(
+                    f"  [{rank_str}] {item.symbol} {item.company_name} "
+                    f"({self._strategy_label(item.strategy_type)}) "
+                    f"| シグナル日={sig_str} | エントリー価格={self._fmt_num(item.entry_price)} "
+                    f"| 状態={item.status}"
+                )
+                for h in evaluation_summary.horizons:
+                    hm = item.horizons.get(h)
+                    if hm is None or not hm.available:
+                        print(f"    +{h}営業日: 未到達/評価不可")
+                    else:
+                        t_date = hm.target_date.isoformat() if hm.target_date else "-"
+                        win_str = "勝" if hm.is_win else "負"
+                        print(
+                            f"    +{h}営業日 ({t_date}): 終値={self._fmt_num(hm.exit_close)} "
+                            f"| リターン={self._fmt_pct(hm.return_pct, signed=True)} ({win_str}) "
+                            f"| MFE={self._fmt_pct(hm.mfe_pct, signed=True)} "
+                            f"| MAE={self._fmt_pct(hm.mae_pct, signed=True)}"
+                        )
+        print("====================================")
+
     def export_json(
         self,
         analysis_results: List[AnalysisResultModel],
@@ -343,20 +460,27 @@ class Presenter:
         as_of_date: Optional[date] = None,
         strategy_rankings: Optional[Dict[str, List[AnalysisResultModel]]] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        evaluation_summary: Optional[EvaluationSummaryModel] = None,
+        report_prefix: Optional[str] = None,
     ) -> Path:
         """
         後段AI連携用の構造化JSONレポートを出力し、保存先 Path を返す。
         """
-        resolved_date = self._resolve_as_of_date(analysis_results, as_of_date)
+        resolved_date = self._resolve_as_of_date(
+            analysis_results, as_of_date, evaluation_summary=evaluation_summary
+        )
+        prefix = self._resolve_report_prefix(
+            evaluation_summary=evaluation_summary, report_prefix=report_prefix
+        )
         if output_path is not None:
             target_path = Path(output_path)
         else:
             target_path = (
-                Path(output_dir) / f"screening_report_{resolved_date.isoformat()}.json"
+                Path(output_dir) / f"{prefix}_{resolved_date.isoformat()}.json"
             )
         target_path.parent.mkdir(parents=True, exist_ok=True)
 
-        payload = {
+        payload: Dict[str, Any] = {
             "generated_at": datetime.now().isoformat(timespec="seconds"),
             "as_of_date": resolved_date.isoformat(),
             "summary": self._build_summary_stats(analysis_results),
@@ -366,6 +490,8 @@ class Presenter:
                 analysis_results, strategy_rankings
             ),
         }
+        if evaluation_summary is not None:
+            payload["evaluation"] = evaluation_summary.model_dump(mode="json")
 
         with open(target_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2, default=str)
@@ -381,23 +507,35 @@ class Presenter:
         as_of_date: Optional[date] = None,
         strategy_rankings: Optional[Dict[str, List[AnalysisResultModel]]] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        evaluation_summary: Optional[EvaluationSummaryModel] = None,
+        report_prefix: Optional[str] = None,
     ) -> Path:
         """
         AI連携・人間閲覧用の構造化Markdownレポートを出力し、保存先 Path を返す。
         """
-        resolved_date = self._resolve_as_of_date(analysis_results, as_of_date)
+        resolved_date = self._resolve_as_of_date(
+            analysis_results, as_of_date, evaluation_summary=evaluation_summary
+        )
+        prefix = self._resolve_report_prefix(
+            evaluation_summary=evaluation_summary, report_prefix=report_prefix
+        )
         if output_path is not None:
             target_path = Path(output_path)
         else:
             target_path = (
-                Path(output_dir) / f"screening_report_{resolved_date.isoformat()}.md"
+                Path(output_dir) / f"{prefix}_{resolved_date.isoformat()}.md"
             )
         target_path.parent.mkdir(parents=True, exist_ok=True)
 
         stats = self._build_summary_stats(analysis_results)
         strategy_counts = stats["strategy_counts"]
+        report_title = (
+            f"# Project Atlas フォワードリターン検証レポート ({resolved_date.isoformat()})"
+            if evaluation_summary is not None
+            else f"# Project Atlas スクリーニングレポート ({resolved_date.isoformat()})"
+        )
         lines: List[str] = [
-            f"# Project Atlas スクリーニングレポート ({resolved_date.isoformat()})",
+            report_title,
             "",
             f"- 基準日: `{resolved_date.isoformat()}`",
             f"- 生成日時: `{datetime.now().isoformat(timespec='seconds')}`",
@@ -617,9 +755,142 @@ class Presenter:
                     lines.append("- **主要特徴量**: なし")
                 lines.append("")
 
+        if evaluation_summary is not None:
+            lines.extend(self._build_evaluation_markdown_lines(evaluation_summary))
+
         target_path.write_text("\n".join(lines), encoding="utf-8")
         logger.info(f"Markdownレポートを出力しました: {target_path}")
         return target_path
+
+    def _build_evaluation_markdown_lines(
+        self, evaluation_summary: EvaluationSummaryModel
+    ) -> List[str]:
+        """フォワードリターン検証結果の Markdown セクション行を生成する。"""
+        lines: List[str] = [
+            "## フォワードリターン検証サマリー（全体 / 戦略別）",
+            "",
+            f"- 検証基準日: `{evaluation_summary.as_of_date.isoformat()}`",
+            f"- エントリー価格基準: `{evaluation_summary.entry_price_mode}`",
+            f"- 検証対象銘柄数: **{evaluation_summary.total_candidates} 件**",
+            f"- 検証ホライズン: `{evaluation_summary.horizons}`",
+            "",
+            "### 全体集計",
+            "",
+            "| ホライズン | 評価数 / 対象数 | 勝数 | 勝率 | 平均リターン | 中央値リターン | 平均MFE | 平均MAE | 最高銘柄 | 最低銘柄 |",
+            "|:---|---:|---:|---:|---:|---:|---:|---:|:---|:---|",
+        ]
+
+        for h in evaluation_summary.horizons:
+            hs = evaluation_summary.overall_summary.get(h)
+            if hs is None:
+                continue
+            best_str = (
+                f"{hs.best_symbol} ({self._fmt_pct(hs.best_return_pct, signed=True)})"
+                if hs.best_symbol is not None
+                else "-"
+            )
+            worst_str = (
+                f"{hs.worst_symbol} ({self._fmt_pct(hs.worst_return_pct, signed=True)})"
+                if hs.worst_symbol is not None
+                else "-"
+            )
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        f"+{h}営業日",
+                        f"{hs.evaluated_count} / {hs.total_candidates}",
+                        str(hs.win_count),
+                        self._fmt_pct(hs.win_rate_pct),
+                        self._fmt_pct(hs.avg_return_pct, signed=True),
+                        self._fmt_pct(hs.median_return_pct, signed=True),
+                        self._fmt_pct(hs.avg_mfe_pct, signed=True),
+                        self._fmt_pct(hs.avg_mae_pct, signed=True),
+                        best_str,
+                        worst_str,
+                    ]
+                )
+                + " |"
+            )
+        lines.append("")
+
+        lines.append("### 戦略別集計")
+        lines.append("")
+        if not evaluation_summary.strategy_summary:
+            lines.append("戦略別の検証対象はありません。")
+            lines.append("")
+        else:
+            lines.extend(
+                [
+                    "| 戦略 | ホライズン | 評価数 / 対象数 | 勝数 | 勝率 | 平均リターン | 中央値リターン | 平均MFE | 平均MAE |",
+                    "|:---|:---|---:|---:|---:|---:|---:|---:|---:|",
+                ]
+            )
+            for strat, h_map in evaluation_summary.strategy_summary.items():
+                strat_label = f"{self._strategy_label(strat)} ({strat})"
+                for h in evaluation_summary.horizons:
+                    hs = h_map.get(h)
+                    if hs is None:
+                        continue
+                    lines.append(
+                        "| "
+                        + " | ".join(
+                            [
+                                strat_label,
+                                f"+{h}営業日",
+                                f"{hs.evaluated_count} / {hs.total_candidates}",
+                                str(hs.win_count),
+                                self._fmt_pct(hs.win_rate_pct),
+                                self._fmt_pct(hs.avg_return_pct, signed=True),
+                                self._fmt_pct(hs.median_return_pct, signed=True),
+                                self._fmt_pct(hs.avg_mfe_pct, signed=True),
+                                self._fmt_pct(hs.avg_mae_pct, signed=True),
+                            ]
+                        )
+                        + " |"
+                    )
+            lines.append("")
+
+        lines.append("## 銘柄別フォワードリターン詳細")
+        lines.append("")
+        if not evaluation_summary.items:
+            lines.append("検証対象の銘柄はありません。")
+            lines.append("")
+        else:
+            horizon_headers = [f"+{h}日リターン (MFE / MAE)" for h in evaluation_summary.horizons]
+            header_row = "| 順位 | 銘柄コード | 銘柄名 | 戦略 | シグナル日 | エントリー価格 | ステータス | " + " | ".join(horizon_headers) + " |"
+            align_row = "|---:|:---|:---|:---|:---|---:|:---|" + "|".join(["---:" for _ in evaluation_summary.horizons]) + "|"
+            lines.extend([header_row, align_row])
+            for item in evaluation_summary.items:
+                h_cells: List[str] = []
+                for h in evaluation_summary.horizons:
+                    hm = item.horizons.get(h)
+                    if hm is None or not hm.available:
+                        h_cells.append("-")
+                    else:
+                        h_cells.append(
+                            f"{self._fmt_pct(hm.return_pct, signed=True)} "
+                            f"({self._fmt_pct(hm.mfe_pct, signed=True)} / {self._fmt_pct(hm.mae_pct, signed=True)})"
+                        )
+                lines.append(
+                    "| "
+                    + " | ".join(
+                        [
+                            str(item.rank if item.rank is not None else "-"),
+                            item.symbol,
+                            item.company_name or "-",
+                            self._strategy_label(item.strategy_type),
+                            item.signal_date.isoformat() if item.signal_date else "-",
+                            self._fmt_num(item.entry_price),
+                            item.status,
+                            *h_cells,
+                        ]
+                    )
+                    + " |"
+                )
+            lines.append("")
+
+        return lines
 
     def export_reports(
         self,
@@ -629,6 +900,8 @@ class Presenter:
         as_of_date: Optional[date] = None,
         strategy_rankings: Optional[Dict[str, List[AnalysisResultModel]]] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        evaluation_summary: Optional[EvaluationSummaryModel] = None,
+        report_prefix: Optional[str] = None,
     ) -> Dict[str, Path]:
         """
         指定された複数フォーマット（json, markdown）のレポートをまとめて出力する。
@@ -643,6 +916,8 @@ class Presenter:
                     as_of_date=as_of_date,
                     strategy_rankings=strategy_rankings,
                     metadata=metadata,
+                    evaluation_summary=evaluation_summary,
+                    report_prefix=report_prefix,
                 )
             elif norm_fmt in ("markdown", "md"):
                 exported["markdown"] = self.export_markdown(
@@ -651,6 +926,8 @@ class Presenter:
                     as_of_date=as_of_date,
                     strategy_rankings=strategy_rankings,
                     metadata=metadata,
+                    evaluation_summary=evaluation_summary,
+                    report_prefix=report_prefix,
                 )
             else:
                 logger.warning(f"未対応のレポートフォーマットが指定されました: {fmt}")
@@ -669,6 +946,8 @@ def display_results(
     as_of_date: Optional[date] = None,
     strategy_rankings: Optional[Dict[str, List[AnalysisResultModel]]] = None,
     metadata: Optional[Dict[str, Any]] = None,
+    evaluation_summary: Optional[EvaluationSummaryModel] = None,
+    report_prefix: Optional[str] = None,
 ) -> Optional[Dict[str, Path]]:
     return presenter.display_results(
         analysis_results,
@@ -678,4 +957,6 @@ def display_results(
         as_of_date=as_of_date,
         strategy_rankings=strategy_rankings,
         metadata=metadata,
+        evaluation_summary=evaluation_summary,
+        report_prefix=report_prefix,
     )

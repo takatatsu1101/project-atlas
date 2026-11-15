@@ -5,7 +5,7 @@ YAMLベースのスクリーニング設定モデルおよびローダー
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from src.config.settings import Settings
 from src.score_engine.scores.strategy import StrategyScoreConfig
@@ -27,6 +27,38 @@ class OutputConfig(BaseModel):
     formats: List[str] = Field(default_factory=lambda: ["json", "markdown"])
 
 
+class EvaluationConfig(BaseModel):
+    """フォワードリターン検証設定"""
+
+    horizons: List[int] = Field(default_factory=lambda: [5, 20, 60])
+    entry_price_mode: str = "signal_close"
+
+    @field_validator("horizons", mode="before")
+    @classmethod
+    def _validate_horizons(cls, value: Any) -> List[int]:
+        if isinstance(value, (str, bytes)) or not isinstance(value, (list, tuple, set)):
+            raise ValueError("horizons は整数のリストで指定してください。")
+        items = list(value)
+        if not items:
+            raise ValueError("horizons は1つ以上の正の整数を指定してください。")
+        cleaned: List[int] = []
+        for item in items:
+            if isinstance(item, bool) or not isinstance(item, int) or item <= 0:
+                raise ValueError(f"horizons の各要素は正の整数である必要があります: {item}")
+            cleaned.append(item)
+        return sorted(set(cleaned))
+
+    @field_validator("entry_price_mode")
+    @classmethod
+    def _validate_entry_price_mode(cls, value: str) -> str:
+        allowed = ("signal_close", "next_open")
+        if value not in allowed:
+            raise ValueError(
+                f"entry_price_mode は {allowed} のいずれかを指定してください: {value}"
+            )
+        return value
+
+
 class AtlasScreeningConfig(BaseModel):
     """Project Atlas スクリーニング統合設定モデル"""
 
@@ -35,6 +67,7 @@ class AtlasScreeningConfig(BaseModel):
     screener: ScreeningCriteria = Field(default_factory=ScreeningCriteria)
     ranking: RankingConfig = Field(default_factory=RankingConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)
+    evaluation: EvaluationConfig = Field(default_factory=EvaluationConfig)
 
 
 def _normalize_partial_sections(raw_data: Dict[str, Any]) -> Dict[str, Any]:

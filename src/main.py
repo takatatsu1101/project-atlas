@@ -1,6 +1,8 @@
+import argparse
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+import sys
+from typing import Any, Dict, List, Optional, Sequence, Union
 
 from src.common.logger import get_logger
 from src.config.screening_config import AtlasScreeningConfig, load_screening_config
@@ -10,11 +12,13 @@ from src.data_collector.collector import (
     data_collector,
 )
 from src.data_collector.master import MasterManager
+from src.evaluator.evaluator import ForwardReturnEvaluator
 import src.feature_engine  # 特徴量クラスをインポートしてレジストリに登録させる
 from src.feature_engine.manager import calculate_features
 from src.indicator_calculator.calculator import IndicatorCalculator
 from src.model.data_models import (
     AnalysisResultModel,
+    EvaluationSummaryModel,
     FeatureSetModel,
     FinancialModel,
     PatternSetModel,
@@ -44,17 +48,33 @@ def run_full_pipeline(
     export_reports: bool = True,
     apply_liquidity_filter: Optional[bool] = None,
     use_pre_screening: bool = False,
+    mode: str = "screen",
+    horizons: Optional[List[int]] = None,
+    use_cache: bool = True,
 ) -> Dict[str, Any]:
     """
     Project Atlas 全パイプラインを実行する。
-    1. YAML設定ロード
+    1. 引数検証・YAML設定ロード
     2. マスタ・財務スナップショットに基づく事前スクリーニング（symbols 未指定時または use_pre_screening=True 時）
     3. OHLCV・財務データ収集、流動性チェック、テクニカル指標・特徴量・パターン検出
     4. 戦略スコア計算（S002_StrategyScore）
     5. スクリーニング・総合＆戦略別ランキング生成
-    6. CLI表示および JSON / Markdown レポート出力
+    6. evaluate モード時はフォワードリターン検証を実行
+    7. CLI表示および JSON / Markdown レポート出力
     """
+    if mode not in ("screen", "evaluate"):
+        raise ValueError(
+            f"不正な実行モードが指定されました: {mode} ('screen' または 'evaluate' を指定してください)"
+        )
+    if mode == "evaluate" and as_of_date is None:
+        raise ValueError("evaluate モードでは as_of_date の指定が必須です。")
+
     config: AtlasScreeningConfig = load_screening_config(config_path=config_path)
+    resolved_horizons = horizons if horizons is not None else list(config.evaluation.horizons)
+    if mode == "evaluate":
+        resolved_horizons = ForwardReturnEvaluator._normalize_horizons(resolved_horizons)
+
+    cache_key_suffix = f"asof_{as_of_date.isoformat()}" if as_of_date is not None else None
 
     effective_end = end_date or as_of_date or date.today()
     effective_start = start_date or (effective_end - timedelta(days=365))
@@ -159,12 +179,21 @@ def run_full_pipeline(
                 print(f"  警告: {symbol} の財務データが取得できませんでした。")
 
             # 3. テクニカル指標計算
-            indicator_sets = calculator.calculate_indicators(ohlcv_data)
+            indicator_sets = calculator.calculate_indicators(
+                ohlcv_data,
+                use_cache=use_cache,
+                cache_key_suffix=cache_key_suffix,
+            )
             print(f"  テクニカル指標計算成功: {len(indicator_sets)} 件")
 
             # 4. 全特徴量計算
             feature_sets = calculate_features(
-                ohlcv_data, indicator_sets, financial_data, feature_ids=None
+                ohlcv_data,
+                indicator_sets,
+                financial_data,
+                feature_ids=None,
+                use_cache=use_cache,
+                cache_key_suffix=cache_key_suffix,
             )
             print(f"  特徴量計算成功: {len(feature_sets)} 件の日付データ")
 
@@ -216,7 +245,19 @@ def run_full_pipeline(
         f"(対象 {len(processed_symbols)} 銘柄) ==="
     )
 
+    evaluation_summary: Optional[EvaluationSummaryModel] = None
+    if mode == "evaluate":
+        assert as_of_date is not None
+        evaluator = ForwardReturnEvaluator()
+        evaluation_summary = evaluator.evaluate(
+            overall_ranking,
+            as_of_date=as_of_date,
+            horizons=resolved_horizons,
+            entry_price_mode=config.evaluation.entry_price_mode,
+        )
+
     run_metadata: Dict[str, Any] = {
+        "mode": mode,
         "target_symbols_count": len(target_symbols),
         "processed_symbols_count": len(processed_symbols),
         "total_score_results": len(all_score_results),
@@ -226,7 +267,11 @@ def run_full_pipeline(
 
     # 9. プレゼンテーション出力（CLI表示 ＋ レポート出力）
     presenter_instance = Presenter()
-    presenter_instance.display_results(overall_ranking, output_type="cli")
+    presenter_instance.display_results(
+        overall_ranking,
+        output_type="cli",
+        evaluation_summary=evaluation_summary,
+    )
 
     report_paths: Dict[str, Path] = {}
     if export_reports:
@@ -240,6 +285,7 @@ def run_full_pipeline(
             as_of_date=as_of_date,
             strategy_rankings=strategy_rankings,
             metadata=run_metadata,
+            evaluation_summary=evaluation_summary,
         )
 
     return {
@@ -249,19 +295,124 @@ def run_full_pipeline(
         "filtered_scores": filtered_scores,
         "analysis_results": overall_ranking,
         "strategy_rankings": strategy_rankings,
+        "evaluation_summary": evaluation_summary,
         "report_paths": report_paths,
         "config": config,
     }
 
 
+def _parse_date(value: str) -> date:
+    """YYYY-MM-DD 形式の文字列を date 型へ変換する。"""
+    try:
+        return date.fromisoformat(value)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(
+            f"日付は YYYY-MM-DD 形式で指定してください: {value}"
+        ) from e
+
+
+def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
+    """コマンドライン引数をパースする。"""
+    parser = argparse.ArgumentParser(
+        description="Project Atlas 株式スクリーニング＆フォワードリターン検証パイプライン"
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["screen", "evaluate"],
+        default="screen",
+        help="実行モード（screen: スクリーニング / evaluate: フォワードリターン検証）",
+    )
+    parser.add_argument(
+        "--as-of-date",
+        type=_parse_date,
+        default=None,
+        help="分析基準日 (YYYY-MM-DD)。evaluate モードでは必須",
+    )
+    parser.add_argument(
+        "--symbols",
+        nargs="+",
+        default=None,
+        help="対象銘柄コード（例: 7203.T 6758.T）。未指定時はマスタから自動抽出",
+    )
+    parser.add_argument(
+        "--start-date",
+        type=_parse_date,
+        default=None,
+        help="OHLCV取得開始日 (YYYY-MM-DD)",
+    )
+    parser.add_argument(
+        "--end-date",
+        type=_parse_date,
+        default=None,
+        help="OHLCV取得終了日 (YYYY-MM-DD)",
+    )
+    parser.add_argument(
+        "--fiscal-year",
+        type=int,
+        default=None,
+        help="対象会計年度（例: 2025）",
+    )
+    parser.add_argument(
+        "--horizons",
+        nargs="+",
+        type=int,
+        default=None,
+        help="evaluate モード時の検証ホライズン（営業日数、例: 5 20 60）",
+    )
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="スクリーニング設定YAMLファイルのパス",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help="レポート出力先ディレクトリ",
+    )
+    parser.add_argument(
+        "--no-export",
+        action="store_true",
+        help="JSON / Markdown レポートのファイル出力を無効化する",
+    )
+    parser.add_argument(
+        "--use-pre-screening",
+        action="store_true",
+        help="--symbols 指定時にも事前スクリーニングフィルタを適用する",
+    )
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="指標・特徴量のファイルキャッシュを読み書きしない",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    """CLI エントリポイント"""
+    args = parse_args(argv)
+    try:
+        run_full_pipeline(
+            symbols=args.symbols,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            fiscal_year=args.fiscal_year,
+            as_of_date=args.as_of_date,
+            config_path=args.config,
+            output_dir=args.output_dir,
+            export_reports=not args.no_export,
+            use_pre_screening=args.use_pre_screening,
+            mode=args.mode,
+            horizons=args.horizons,
+            use_cache=not args.no_cache,
+        )
+        return 0
+    except Exception as e:
+        logger.error(f"パイプライン実行に失敗しました: {e}")
+        print(f"エラー: {e}", file=sys.stderr)
+        return 1
+
+
 if __name__ == "__main__":
-    target_symbols = [
-        "5803.T",  # フジクラ
-        "5801.T",  # 古河電気工業
-    ]
-
-    start_date_obj = date(2025, 1, 1)
-    end_date_obj = date(2025, 12, 31)
-    fiscal_year = 2025
-
-    run_full_pipeline(target_symbols, start_date_obj, end_date_obj, fiscal_year)
+    sys.exit(main())

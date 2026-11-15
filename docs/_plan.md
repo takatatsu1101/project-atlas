@@ -102,7 +102,7 @@ Project Atlas は、スイングトレード（数週間〜3ヶ月保有）向�
     - [x] 共通例外クラス (`src/common/exceptions.py`) と共通ロギング (`src/common/logger.py`) の実装
     - [x] メイン実行フロー (`src/main.py`) におけるステップ1〜6の全パイプライン結合検証完了
 
-### 3.3. フェーズ3: v0.2.0 新要件に基づく1次スクリーニング＆AI連携・検証機能の実装 (進行中・1要件1PR構成)
+### 3.3. フェーズ3: v0.2.0 新要件に基づく1次スクリーニング＆AI連携・検証機能の実装 (完了・1要件1PR構成)
 
 - [x] **PR #1: 要件定義・仕様書・開発計画の見直し (`docs/revise-requirements-and-plan`)**
     - [x] `docs/requirements/requirements.md` を v0.2.0（1次スクリーニング特化、3段階ゲート＋2大買い戦略スコア、AI連携出力、フォワードリターン検証、非機能・データ要件完備）へ改訂
@@ -124,16 +124,17 @@ Project Atlas は、スイングトレード（数週間〜3ヶ月保有）向�
     - [x] `Screener`（トレンド条件＋戦略スコア閾値による買い候補抽出）および `RankingGenerator`（銘柄名・業種・価格水準・推奨理由の完全引き継ぎ、総合/戦略別ランキング）の改修
     - [x] `Presenter` による CLI 表示の改善と、`output/` ディレクトリへの後段AI連携用レポート（JSON形式・Markdown形式）出力機能の実装と単体・結合テスト
 
-- [ ] **PR #5: 過去基準日指定およびスクリーニング精度検証（フォワードリターン評価）機能の実装 (`feat/forward-return-evaluator`)**
-    - [ ] 任意の過去基準日（`as_of_date`）を指定したスクリーニング実行と、基準日以降のN営業日後（例：5日・20日・60日後）の騰落率・勝率・最大上昇率（MFE）/最大下落率（MAE）を算出・集計する `Evaluator` モジュールの実装
-    - [ ] `src/main.py` への CLI 引数（`--as-of-date`, `--mode [screen|evaluate]` 等）の追加と、検証レポート出力のテスト
+- [x] **PR #5: 過去基準日指定およびスクリーニング精度検証（フォワードリターン評価）機能の実装 (`feat/forward-return-evaluator`)**
+    - [x] 任意の過去基準日（`as_of_date`）を指定したスクリーニング実行と、基準日以降のN営業日後（例：5日・20日・60日後）の騰落率・勝率・最大上昇率（MFE）/最大下落率（MAE）を算出・集計する `Evaluator` モジュールの実装
+    - [x] `src/main.py` への CLI 引数（`--as-of-date`, `--mode [screen|evaluate]` 等）の追加と、検証レポート出力のテスト
 
 ## 4. 今後のマイルストーン
 - [x] 2026/08/31: フェーズ2の「特徴量・パターン追加およびパイプライン結合」完了
 - [x] 2026/11/15: 要件見直し（v0.2.0）および1要件1PR計画の策定完了（PR #1）
-- [ ] フェーズ3 PR #2〜#5 の順次実装・検証完了
+- [x] 2026/11/16: フェーズ3 PR #2〜#5 の順次実装・検証完了
 
 ## 5. 実行ログ (最新の作業のみ記載)
+- 2026/11/16: PR #5（`feat/forward-return-evaluator`）を実施。`IndicatorCalculator` / `FeatureManager` のキャッシュ分離（`cache_key_suffix` / `use_cache`）と全日付・財務署名一致検証による先読みバイアス・汚染防止強化、フォワードリターン評価モデル（`HorizonMetricsModel` 等）と `EvaluationConfig`（`config/screening.yaml`）の追加、`ForwardReturnEvaluator`（`Evaluator`：N営業日後リターン・勝率・MFE/MAE・全体/戦略別集計・休場日7日ルックバック）の実装、`Presenter` の CLI/JSON/Markdown 検証レポート対応（`evaluation_report_*`）、および `src/main.py` への CLI パーサ（`--mode`, `--as-of-date`, `--horizons`, `--no-cache` 等）統合を実装し、全テスト191件のパスおよび2段階レビュー（1次 `atlas-reviewer`・2次 `gemini-4-argon-high` 双方 Approve）を完了。
 - 2026/11/15: PR #4（`feat/ai-report-and-screener`）を実施。`config/screening.yaml` による設定外部化（`src/config/screening_config.py`）と `ScoreManager`/`ScoreRegistry` への設定注入、`src/pattern_detector` の自動登録修正、`Screener`（3段階ゲート・戦略別閾値対応）・`RankingGenerator`（全フィールド引き継ぎ・総合/戦略別ランキング）・`Presenter`（CLI改善・`output/` への JSON/Markdown 出力）の改修、および `src/main.py` への全パイプライン統合を実装し、全テスト170件のパスおよび2段階レビュー（1次 `atlas-reviewer`・2次 `gemini-4-argon-high` 双方 Approve）を完了。
 - 2026/11/15: PR #3（`feat/strategy-score-engine`）を実施。`ScoreResultModel`/`AnalysisResultModel` の拡張、`IndicatorCalculator` への20日高安・ATR14・出来高倍率の追加、3段階ゲート＆戦略別スコアリング（`S002_StrategyScore`：`Pullback` / `Breakout` / `Watch` 判定、`DoubleTop`・過熱ボラ減点、`key_levels`/`risk_metrics`/`reasons` 生成）を実装し、全テスト150件のパスおよび2段階レビュー（Argon Approve）を完了。
 - 2026/11/15: PR #2（`feat/pre-screener-and-master`）を実施。`DataCollector` の `data/financial/` 優先参照・`as_of_date` 対応・`load_financial_snapshot` 実装、東証銘柄マスタ管理（`MasterManager`）、事前スクリーニング（`PreScreener`）を実装し、単体テスト32件が全パスすることを確認。
