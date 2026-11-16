@@ -22,7 +22,7 @@ from src.score_engine.scores.strategy import StrategyScoreConfig
 
 class TestScreeningConfig(unittest.TestCase):
     def test_load_project_default_yaml(self):
-        """プロジェクトルートの config/screening.yaml を読み込み、既定値と一致することを確認する"""
+        """プロジェクトルートの config/screening.yaml を読み込み、チューニング済み設定と一致することを確認する"""
         project_yaml = (
             Path(__file__).resolve().parents[3] / "config" / "screening.yaml"
         )
@@ -33,7 +33,11 @@ class TestScreeningConfig(unittest.TestCase):
         self.assertEqual(config.pre_screening.target_markets, ["プライム", "スタンダード"])
         self.assertEqual(config.pre_screening.min_revenue, 10_000_000_000.0)
         self.assertEqual(config.strategy_score.min_entry_score, 60.0)
-        self.assertEqual(config.screener.min_total_score, 60.0)
+        self.assertEqual(config.strategy_score.extreme_volatility_penalty, 20.0)
+        self.assertEqual(config.strategy_score.double_top_penalty_factor, 0.45)
+        self.assertEqual(config.strategy_score.breakout_weight_v001, 0.35)
+        self.assertEqual(config.screener.min_total_score, 65.0)
+        self.assertEqual(config.screener.max_double_top_confidence, 60.0)
         self.assertEqual(config.screener.score_id, "S002_StrategyScore")
         self.assertEqual(config.ranking.top_n, 20)
         self.assertEqual(config.ranking.strategy_top_n, 10)
