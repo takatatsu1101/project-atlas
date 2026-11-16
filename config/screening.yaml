@@ -36,10 +36,10 @@ strategy_score:
   # 弱気・過熱ペナルティ設定
   double_top_penalty_threshold: 40.0
   double_top_high_confidence_threshold: 70.0
-  double_top_penalty_factor: 0.35
+  double_top_penalty_factor: 0.45
   double_top_high_confidence_cap: 40.0
   extreme_volatility_threshold: 90.0
-  extreme_volatility_penalty: 10.0
+  extreme_volatility_penalty: 20.0
 
   # 第2関門・戦略判定設定
   min_pullback_setup_score: 55.0
@@ -59,9 +59,9 @@ strategy_score:
   hammer_bonus_max: 5.0
 
   # ブレイクアウト戦略（breakout）の重み
-  breakout_weight_p002: 0.40
-  breakout_weight_v001: 0.25
-  breakout_weight_o001: 0.15
+  breakout_weight_p002: 0.35
+  breakout_weight_v001: 0.35
+  breakout_weight_o001: 0.10
   breakout_weight_trend_env: 0.10
   breakout_weight_fundamental: 0.10
 
@@ -71,7 +71,7 @@ strategy_score:
 # 3. スクリーナー抽出設定（ScreeningCriteria）
 screener:
   # 最低総合スコア
-  min_total_score: 60.0
+  min_total_score: 65.0
   # 最低トレンド環境スコア
   min_trend_env_score: 50.0
   # 第1関門通過を必須とするか
@@ -87,7 +87,7 @@ screener:
   min_breakout_strategy_score: null
   min_fundamental_score: null
   # ダブルトップ警戒信頼度の上限（この値以上は除外）
-  max_double_top_confidence: 70.0
+  max_double_top_confidence: 60.0
   # 対象とするスコアID
   score_id: "S002_StrategyScore"
   # 銘柄ごとに最新日のレコードのみを対象とするか
