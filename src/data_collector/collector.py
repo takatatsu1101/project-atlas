@@ -37,6 +37,9 @@ class DataCollector:
         self.URL_IRBANK_FILES = "https://f.irbank.net/files/"
         self.BALANCE_SHEET_FILE_NAME = "fy-balance-sheet.json"
         self.PROFIT_AND_LOSS_FILE_NAME = "fy-profit-and-loss.json"
+        # IR BANK JSON のインメモリキャッシュとダウンロード失敗のネガティブキャッシュ
+        self._irbank_json_cache: Dict[str, Dict] = {}
+        self._irbank_failed_downloads: set[str] = set()
 
     def _parse_symbol(self, symbol: str) -> str:
         """
@@ -175,7 +178,7 @@ class DataCollector:
 
         return financial_path
 
-    def _download_irbank_file(self, year_suffix: str, fy_type: str, save_path: str):
+    def _download_irbank_file(self, year_suffix: str, fy_type: str, save_path: str, timeout: int = 15):
         """
         IR BANKから安全にJSONファイルをダウンロードする
         """
@@ -192,7 +195,7 @@ class DataCollector:
         # 負荷分散のためのランダムスリープ
         time.sleep(random.randint(1, 3))
         
-        response = session.get(url, headers=headers, allow_redirects=True)
+        response = session.get(url, headers=headers, allow_redirects=True, timeout=timeout)
         if response.status_code != 200:
             raise Exception(f"IR BANKダウンロード失敗: HTTP {response.status_code}")
 
@@ -212,26 +215,38 @@ class DataCollector:
             year_suffix = "0000" # 最新
             
         file_name = f"{year_suffix}-{fy_type}"
+        if file_name in self._irbank_json_cache:
+            return self._irbank_json_cache[file_name]
+
         file_path = self._get_irbank_file_path(year_suffix, file_name)
         
-        # キャッシュがなければ自動ダウンロード（allow_download=False の場合は抑制）
+        # キャッシュがなければ自動ダウンロード（allow_download=False または失敗記録済みの場合は抑制）
         if not os.path.exists(file_path):
-            if not allow_download:
+            if not allow_download or file_name in self._irbank_failed_downloads:
                 return None
             try:
                 self._download_irbank_file(year_suffix, fy_type, file_path)
             except Exception as e:
                 logger.error(f"エラー: IR BANKファイル({year_suffix}-{fy_type})取得失敗: {e}")
+                self._irbank_failed_downloads.add(file_name)
                 return None
                 
         # StorageManagerのload_jsonを利用してロード
-        data = self.storage.load_json(file_path)
-        if data is None and os.path.exists(file_path):
-            # 読込失敗時は破損ファイルとして削除
-            try:
-                os.remove(file_path)
-            except Exception:
-                pass
+        try:
+            data = self.storage.load_json(file_path)
+        except Exception as e:
+            logger.error(f"エラー: IR BANKファイル({year_suffix}-{fy_type})のJSON読込失敗: {e}")
+            data = None
+        if data is None:
+            # 破損JSON等でロード失敗した場合は削除し、同一プロセス内の無限再ダウンロードを防止
+            if os.path.exists(file_path):
+                try:
+                    os.remove(file_path)
+                except Exception:
+                    pass
+            self._irbank_failed_downloads.add(file_name)
+        elif isinstance(data, dict):
+            self._irbank_json_cache[file_name] = data
         return data
 
     @staticmethod
@@ -282,17 +297,22 @@ class DataCollector:
         disclosure_lag_days: int,
         bs_by_year: Dict[int, Optional[Dict]],
         pl_by_year: Dict[int, Optional[Dict]],
+        allow_download: bool = True,
     ) -> Optional[Tuple[int, List[Any], List[Any], date]]:
         """
-        指定年度（as_of_date 指定時は開示済みとなるまで最大2期遡る）の BS・PL エントリを解決する。
+        指定年度（データ未公開・欠損時や as_of_date 指定時は最大2期遡る）の BS・PL エントリを解決する。
         """
-        max_lookback = 3 if as_of_date is not None else 1
+        max_lookback = 3
         for offset in range(max_lookback):
             candidate_year = target_year - offset
             if candidate_year not in bs_by_year:
-                bs_by_year[candidate_year] = self._load_irbank_json(candidate_year, self.BALANCE_SHEET_FILE_NAME)
+                bs_by_year[candidate_year] = self._load_irbank_json(
+                    candidate_year, self.BALANCE_SHEET_FILE_NAME, allow_download=allow_download
+                )
             if candidate_year not in pl_by_year:
-                pl_by_year[candidate_year] = self._load_irbank_json(candidate_year, self.PROFIT_AND_LOSS_FILE_NAME)
+                pl_by_year[candidate_year] = self._load_irbank_json(
+                    candidate_year, self.PROFIT_AND_LOSS_FILE_NAME, allow_download=allow_download
+                )
 
             bs_data = bs_by_year[candidate_year]
             pl_data = pl_by_year[candidate_year]
@@ -324,11 +344,12 @@ class DataCollector:
         fiscal_year: Optional[int] = None,
         as_of_date: Optional[date] = None,
         disclosure_lag_days: int = settings.FINANCIAL_DISCLOSURE_LAG_DAYS,
+        allow_download: bool = True,
     ) -> Optional[FinancialModel]:
         """
         指定年度の財務データを収集し、FinancialModelを構築して返す。
         as_of_date 指定時は決算期末月末日 + disclosure_lag_days で開示判定を行い、
-        未開示の場合は最大2期分遡って開示済みの年度データを採用する。
+        未開示またはデータ欠損の場合は最大2期分遡って利用可能な年度データを採用する。
         """
         code = self._parse_symbol(symbol)
         target_year = fiscal_year if fiscal_year is not None else (as_of_date or date.today()).year
@@ -343,6 +364,7 @@ class DataCollector:
             disclosure_lag_days=disclosure_lag_days,
             bs_by_year=bs_cache,
             pl_by_year=pl_cache,
+            allow_download=allow_download,
         )
         if resolved is None:
             logger.warning(f"コード {code} の開示済み財務データが {target_year}年度（遡及含む）で見つかりませんでした。")
@@ -372,7 +394,11 @@ class DataCollector:
         history_years = [adopted_year - j for j in range(6)] # 0〜5年前
         history_pl = {}
         for y in history_years:
-            y_pl = pl_cache.get(y) if y in pl_cache else self._load_irbank_json(y, self.PROFIT_AND_LOSS_FILE_NAME)
+            y_pl = (
+                pl_cache.get(y)
+                if y in pl_cache
+                else self._load_irbank_json(y, self.PROFIT_AND_LOSS_FILE_NAME, allow_download=allow_download)
+            )
             if y_pl and code in y_pl.get("item", {}):
                 history_pl[y] = y_pl["item"][code]
 
@@ -470,12 +496,12 @@ class DataCollector:
         disclosure_lag_days: int = settings.FINANCIAL_DISCLOSURE_LAG_DAYS,
     ) -> Dict[str, FinancialModel]:
         """
-        指定年度（as_of_date 指定時は最大2期前まで）の BS・PL JSON を一度だけ読み込み、
+        指定年度（最大2期前まで遡及）の BS・PL JSON を一度だけ読み込み、
         全銘柄分の FinancialModel を 4桁コードキーの辞書として高速に返す。
         yfinance による株価取得や IR BANK からの新規ダウンロードは行わない。
         """
         target_year = fiscal_year if fiscal_year is not None else (as_of_date or date.today()).year
-        offsets = (0, 1, 2) if as_of_date is not None else (0,)
+        offsets = (0, 1, 2)
 
         bs_by_year: Dict[int, Optional[Dict]] = {}
         pl_by_year: Dict[int, Optional[Dict]] = {}
@@ -504,6 +530,7 @@ class DataCollector:
                 disclosure_lag_days=disclosure_lag_days,
                 bs_by_year=bs_by_year,
                 pl_by_year=pl_by_year,
+                allow_download=False,
             )
             if resolved is None:
                 continue
@@ -546,12 +573,14 @@ def collect_financial_data(
     fiscal_year: Optional[int] = None,
     as_of_date: Optional[date] = None,
     disclosure_lag_days: int = 60,
+    allow_download: bool = True,
 ) -> Optional[FinancialModel]:
-    if as_of_date is None and disclosure_lag_days == 60:
+    if as_of_date is None and disclosure_lag_days == 60 and allow_download:
         return data_collector.collect_financial_data(symbol, fiscal_year)
     return data_collector.collect_financial_data(
         symbol,
         fiscal_year=fiscal_year,
         as_of_date=as_of_date,
         disclosure_lag_days=disclosure_lag_days,
+        allow_download=allow_download,
     )

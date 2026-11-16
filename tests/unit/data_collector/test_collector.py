@@ -126,7 +126,7 @@ class TestDataCollector(unittest.TestCase):
         }
 
         # ロード処理の戻り値を年度・ファイルタイプごとにモックする
-        def side_effect(year, fy_type):
+        def side_effect(year, fy_type, allow_download=True):
             if "balance-sheet" in fy_type:
                 return mock_bs_data
             elif "profit-and-loss" in fy_type:
@@ -396,6 +396,130 @@ class TestDataCollector(unittest.TestCase):
                 )
                 mock_yf.assert_called_once_with(self.symbol, date(2025, 1, 1), date(2025, 1, 10))
                 self.assertEqual([r.date for r in res], [date(2025, 1, 1), date(2025, 1, 2)])
+
+    def test_load_irbank_json_negative_cache(self):
+        """ダウンロード失敗時はネガティブキャッシュに記録され、2回目以降 _download_irbank_file が再実行されない"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            collector = DataCollector()
+            collector.storage = StorageManager(base_dir=tmp_path / "data")
+            collector.local_irbank_dir = str(tmp_path / "cache_irbank")
+            collector.user_irbank_dir = str(tmp_path / "user_irbank")
+            os.makedirs(collector.local_irbank_dir, exist_ok=True)
+            os.makedirs(collector.user_irbank_dir, exist_ok=True)
+
+            with patch.object(collector, "_download_irbank_file", side_effect=Exception("HTTP 404")) as mock_dl:
+                res1 = collector._load_irbank_json(2098, collector.BALANCE_SHEET_FILE_NAME)
+                res2 = collector._load_irbank_json(2098, collector.BALANCE_SHEET_FILE_NAME)
+                self.assertIsNone(res1)
+                self.assertIsNone(res2)
+                mock_dl.assert_called_once()
+                self.assertIn("0098-fy-balance-sheet.json", collector._irbank_failed_downloads)
+
+    def test_load_irbank_json_corrupted_negative_cache(self):
+        """ダウンロードしたファイルが破損JSONだった場合、削除されてネガティブキャッシュに登録され2回目で再ダウンロードされない"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            collector = DataCollector()
+            collector.storage = StorageManager(base_dir=tmp_path / "data")
+            collector.local_irbank_dir = str(tmp_path / "cache_irbank")
+            collector.user_irbank_dir = str(tmp_path / "user_irbank")
+            os.makedirs(collector.local_irbank_dir, exist_ok=True)
+            os.makedirs(collector.user_irbank_dir, exist_ok=True)
+
+            def write_corrupted(_year_suffix: str, _fy_type: str, save_path: str):
+                Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+                Path(save_path).write_text("{corrupted json", encoding="utf-8")
+
+            with patch.object(collector, "_download_irbank_file", side_effect=write_corrupted) as mock_dl:
+                res1 = collector._load_irbank_json(2099, collector.BALANCE_SHEET_FILE_NAME)
+                res2 = collector._load_irbank_json(2099, collector.BALANCE_SHEET_FILE_NAME)
+                self.assertIsNone(res1)
+                self.assertIsNone(res2)
+                mock_dl.assert_called_once()
+                self.assertIn("0099-fy-balance-sheet.json", collector._irbank_failed_downloads)
+                expected_path = Path(collector._get_irbank_file_path("0099", "0099-fy-balance-sheet.json"))
+                self.assertFalse(expected_path.exists())
+
+    def test_load_irbank_json_in_memory_cache(self):
+        """一度ロードした JSON はインメモリキャッシュされ、2回目で storage.load_json が再実行されない"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            collector = DataCollector()
+            collector.storage = StorageManager(base_dir=tmp_path / "data")
+            collector.local_irbank_dir = str(tmp_path / "cache_irbank")
+            collector.user_irbank_dir = str(tmp_path / "user_irbank")
+            os.makedirs(collector.local_irbank_dir, exist_ok=True)
+            os.makedirs(collector.user_irbank_dir, exist_ok=True)
+
+            sample_data = {"item": {"7203": ["2025/03", "100"]}}
+            file_path = collector.storage.financial_dir / "0025-fy-balance-sheet.json"
+            collector.storage.save_json(sample_data, file_path)
+
+            with patch.object(collector.storage, "load_json", wraps=collector.storage.load_json) as mock_load:
+                res1 = collector._load_irbank_json(2025, collector.BALANCE_SHEET_FILE_NAME)
+                res2 = collector._load_irbank_json(2025, collector.BALANCE_SHEET_FILE_NAME)
+                self.assertEqual(res1, sample_data)
+                self.assertEqual(res2, sample_data)
+                mock_load.assert_called_once()
+
+    def test_collect_financial_data_allow_download_false(self):
+        """allow_download=False の場合、未存在ファイルのダウンロードを試みない"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            collector = DataCollector()
+            collector.storage = StorageManager(base_dir=tmp_path / "data")
+            collector.local_irbank_dir = str(tmp_path / "cache_irbank")
+            collector.user_irbank_dir = str(tmp_path / "user_irbank")
+            os.makedirs(collector.local_irbank_dir, exist_ok=True)
+            os.makedirs(collector.user_irbank_dir, exist_ok=True)
+
+            with patch.object(collector, "_download_irbank_file") as mock_dl:
+                res = collector.collect_financial_data("7203.T", fiscal_year=2097, allow_download=False)
+                self.assertIsNone(res)
+                mock_dl.assert_not_called()
+
+    @patch("src.data_collector.collector.DataCollector._load_irbank_json")
+    def test_collect_financial_data_fallback_without_as_of_date(self, mock_load_json):
+        """as_of_date=None でも最新年度データが欠損していれば最大2期前まで遡って取得できる"""
+        bs_2025 = {"item": {"7203": ["2025/03", "90000", "0", "0", "0", "0", "0", "3000.0", "45.0"]}}
+        pl_2025 = {"item": {"7203": ["2025/03", "50000", "5000", "5200", "3500", "250.0", "12.0", "6.0"]}}
+
+        def side_effect(year, fy_type, allow_download=True):
+            if year == 2025:
+                return bs_2025 if "balance-sheet" in fy_type else pl_2025
+            return None
+
+        mock_load_json.side_effect = side_effect
+
+        with patch.object(self.collector, "collect_ohlcv_data", return_value=[]):
+            fin = self.collector.collect_financial_data("7203.T", fiscal_year=2026, as_of_date=None)
+            self.assertIsNotNone(fin)
+            self.assertEqual(fin.fiscal_date, date(2025, 3, 31))
+            self.assertEqual(fin.revenue, 50000.0)
+
+    def test_load_financial_snapshot_fallback_when_as_of_date_is_none(self):
+        """as_of_date=None でも load_financial_snapshot が前年度データへフォールバックし、ダウンロードは行わない"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            collector = DataCollector()
+            collector.storage = StorageManager(base_dir=tmp_path / "data")
+            collector.local_irbank_dir = str(tmp_path / "cache_irbank")
+            collector.user_irbank_dir = str(tmp_path / "user_irbank")
+            os.makedirs(collector.local_irbank_dir, exist_ok=True)
+            os.makedirs(collector.user_irbank_dir, exist_ok=True)
+
+            bs_2025 = {"item": {"7203": ["2025/03", "90000", "0", "0", "0", "0", "0", "3000.0", "45.0"]}}
+            pl_2025 = {"item": {"7203": ["2025/03", "50000", "5000", "5200", "3500", "250.0", "12.0", "6.0"]}}
+            collector.storage.save_json(bs_2025, collector.storage.financial_dir / "0025-fy-balance-sheet.json")
+            collector.storage.save_json(pl_2025, collector.storage.financial_dir / "0025-fy-profit-and-loss.json")
+
+            with patch.object(collector, "_download_irbank_file") as mock_dl:
+                snap = collector.load_financial_snapshot(fiscal_year=2026, as_of_date=None)
+                mock_dl.assert_not_called()
+                self.assertIn("7203", snap)
+                self.assertEqual(snap["7203"].fiscal_date, date(2025, 3, 31))
+                self.assertEqual(snap["7203"].revenue, 50000.0)
 
 if __name__ == '__main__':
     unittest.main()
