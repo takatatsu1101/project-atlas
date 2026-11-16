@@ -51,6 +51,8 @@ def run_full_pipeline(
     mode: str = "screen",
     horizons: Optional[List[int]] = None,
     use_cache: bool = True,
+    update_master: bool = False,
+    allow_irbank_download: bool = True,
 ) -> Dict[str, Any]:
     """
     Project Atlas 全パイプラインを実行する。
@@ -85,7 +87,10 @@ def run_full_pipeline(
     )
 
     master_manager = MasterManager()
-    master_stocks = master_manager.load_master()
+    if update_master:
+        master_stocks = master_manager.update_from_jpx()
+    else:
+        master_stocks = master_manager.load_master()
     master_map: Dict[str, StockMasterModel] = {s.symbol: s for s in master_stocks}
 
     pre_screener = PreScreener()
@@ -166,9 +171,14 @@ def run_full_pipeline(
                     symbol,
                     fiscal_year=effective_fiscal_year,
                     as_of_date=as_of_date,
+                    allow_download=allow_irbank_download,
                 )
             else:
-                financial_data = collect_financial_data(symbol, effective_fiscal_year)
+                financial_data = collect_financial_data(
+                    symbol,
+                    effective_fiscal_year,
+                    allow_download=allow_irbank_download,
+                )
 
             if financial_data:
                 financial_map[symbol] = financial_data
@@ -386,6 +396,16 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="指標・特徴量のファイルキャッシュを読み書きしない",
     )
+    parser.add_argument(
+        "--update-master",
+        action="store_true",
+        help="JPXから最新の東証上場銘柄マスタを取得して更新する",
+    )
+    parser.add_argument(
+        "--no-irbank-download",
+        action="store_true",
+        help="IR BANKからの新規財務データダウンロードを抑止する",
+    )
     return parser.parse_args(argv)
 
 
@@ -406,6 +426,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             mode=args.mode,
             horizons=args.horizons,
             use_cache=not args.no_cache,
+            update_master=args.update_master,
+            allow_irbank_download=not args.no_irbank_download,
         )
         return 0
     except Exception as e:

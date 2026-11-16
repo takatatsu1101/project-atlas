@@ -419,18 +419,23 @@ class TestPipelineIntegration(unittest.TestCase):
                 "--horizons", "5", "20",
                 "--no-cache",
                 "--no-export",
+                "--update-master",
+                "--no-irbank-download",
             ])
             self.assertEqual(parsed.mode, "evaluate")
             self.assertEqual(parsed.as_of_date, as_of)
             self.assertEqual(parsed.horizons, [5, 20])
             self.assertTrue(parsed.no_cache)
             self.assertTrue(parsed.no_export)
+            self.assertTrue(parsed.update_master)
+            self.assertTrue(parsed.no_irbank_download)
 
             with patch("src.main.MasterManager") as mock_master_cls, \
                  patch("src.main.collect_ohlcv_data", return_value=ohlcv_screen), \
-                 patch("src.main.collect_financial_data", return_value=fin_7203), \
+                 patch("src.main.collect_financial_data", return_value=fin_7203) as mock_fin_fn, \
                  patch("src.evaluator.evaluator.data_collector.collect_ohlcv_data", return_value=forward_bars):
                 mock_master_cls.return_value.load_master.return_value = [master_7203]
+                mock_master_cls.return_value.update_from_jpx.return_value = [master_7203]
                 exit_code = main([
                     "--mode", "evaluate",
                     "--as-of-date", as_of.isoformat(),
@@ -438,7 +443,12 @@ class TestPipelineIntegration(unittest.TestCase):
                     "--horizons", "5",
                     "--output-dir", str(Path(tmpdir) / "cli_out"),
                     "--no-cache",
+                    "--update-master",
+                    "--no-irbank-download",
                 ])
+                mock_master_cls.return_value.update_from_jpx.assert_called_once()
+                mock_fin_fn.assert_called_once()
+                self.assertEqual(mock_fin_fn.call_args.kwargs.get("allow_download"), False)
             self.assertEqual(exit_code, 0)
             self.assertTrue(
                 (Path(tmpdir) / "cli_out" / f"evaluation_report_{as_of.isoformat()}.json").exists()
