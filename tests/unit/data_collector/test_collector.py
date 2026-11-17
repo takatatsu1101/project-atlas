@@ -521,5 +521,87 @@ class TestDataCollector(unittest.TestCase):
                 self.assertEqual(snap["7203"].fiscal_date, date(2025, 3, 31))
                 self.assertEqual(snap["7203"].revenue, 50000.0)
 
+    @patch("src.data_collector.collector.DataCollector._load_irbank_json")
+    def test_collect_financial_data_with_latest_close_skips_ohlcv(self, mock_load_json):
+        """latest_close 指定時は collect_ohlcv_data を呼ばず PER / PBR を算出する"""
+        bs_2025 = {"item": {"7203": ["2025/03", "90000", "0", "0", "0", "0", "0", "2000.0", "45.0"]}}
+        pl_2025 = {"item": {"7203": ["2025/03", "50000", "5000", "5200", "3500", "200.0", "12.0", "6.0"]}}
+
+        def side_effect(year, fy_type, allow_download=True):
+            if year == 2025:
+                return bs_2025 if "balance-sheet" in fy_type else pl_2025
+            return None
+
+        mock_load_json.side_effect = side_effect
+
+        with patch.object(self.collector, "collect_ohlcv_data") as mock_ohlcv:
+            fin = self.collector.collect_financial_data(
+                "7203.T",
+                fiscal_year=2025,
+                as_of_date=date(2025, 6, 1),
+                latest_close=3000.0,
+            )
+            mock_ohlcv.assert_not_called()
+            self.assertIsNotNone(fin)
+            self.assertAlmostEqual(fin.per, 15.0)  # 3000.0 / 200.0
+            self.assertAlmostEqual(fin.pbr, 1.5)   # 3000.0 / 2000.0
+
+            # latest_close <= 0 (0.0 および負値) の場合も collect_ohlcv_data を呼ばず 0.0 フォールバック
+            fin_zero = self.collector.collect_financial_data(
+                "7203.T",
+                fiscal_year=2025,
+                as_of_date=date(2025, 6, 1),
+                latest_close=0.0,
+            )
+            mock_ohlcv.assert_not_called()
+            self.assertIsNotNone(fin_zero)
+            self.assertEqual(fin_zero.per, 0.0)
+            self.assertEqual(fin_zero.pbr, 0.0)
+
+            fin_negative = self.collector.collect_financial_data(
+                "7203.T",
+                fiscal_year=2025,
+                as_of_date=date(2025, 6, 1),
+                latest_close=-100.0,
+            )
+            mock_ohlcv.assert_not_called()
+            self.assertIsNotNone(fin_negative)
+            self.assertEqual(fin_negative.per, 0.0)
+            self.assertEqual(fin_negative.pbr, 0.0)
+
+    @patch("src.data_collector.collector.data_collector")
+    def test_module_level_collect_financial_data_passes_latest_close(self, mock_data_collector):
+        """モジュールレベル collect_financial_data が latest_close を引き継ぐ"""
+        mock_data_collector.collect_financial_data.return_value = MagicMock(spec=FinancialModel)
+        result = collect_financial_data(self.symbol, 2025, latest_close=1500.0)
+        mock_data_collector.collect_financial_data.assert_called_once_with(
+            self.symbol,
+            fiscal_year=2025,
+            as_of_date=None,
+            disclosure_lag_days=60,
+            allow_download=True,
+            latest_close=1500.0,
+        )
+        self.assertIsNotNone(result)
+
+    @patch("src.data_collector.collector.data_collector._load_irbank_json")
+    def test_module_level_collect_financial_data_zero_latest_close_skips_ohlcv(self, mock_load_json):
+        """モジュールレベル collect_financial_data(..., latest_close=0.0) でも collect_ohlcv_data を呼ばない"""
+        bs_2025 = {"item": {"7203": ["2025/03", "90000", "0", "0", "0", "0", "0", "2000.0", "45.0"]}}
+        pl_2025 = {"item": {"7203": ["2025/03", "50000", "5000", "5200", "3500", "200.0", "12.0", "6.0"]}}
+        mock_load_json.side_effect = (
+            lambda year, fy_type, allow_download=True: (
+                (bs_2025 if "balance-sheet" in fy_type else pl_2025) if year == 2025 else None
+            )
+        )
+
+        with patch("src.data_collector.collector.data_collector.collect_ohlcv_data") as mock_ohlcv:
+            fin = collect_financial_data("7203.T", fiscal_year=2025, latest_close=0.0)
+
+        mock_ohlcv.assert_not_called()
+        self.assertIsNotNone(fin)
+        self.assertEqual(fin.per, 0.0)
+        self.assertEqual(fin.pbr, 0.0)
+
 if __name__ == '__main__':
     unittest.main()

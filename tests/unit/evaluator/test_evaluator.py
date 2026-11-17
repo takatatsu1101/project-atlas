@@ -60,6 +60,18 @@ class TestForwardReturnEvaluator(unittest.TestCase):
     def test_alias_exists(self):
         self.assertIs(Evaluator, ForwardReturnEvaluator)
 
+    def test_compute_default_fetch_end(self):
+        as_of = date(2025, 1, 10)
+        expected = min(date.today(), as_of + timedelta(days=20 * 2 + 30))
+        self.assertEqual(
+            ForwardReturnEvaluator.compute_default_fetch_end(as_of, [20, 5]),
+            expected,
+        )
+        self.assertEqual(
+            ForwardReturnEvaluator.compute_default_fetch_end(datetime(2025, 1, 10, 15, 0), [20]),
+            expected,
+        )
+
     def test_evaluate_horizons_5_20_60_mfe_mae_and_strategy_summary(self):
         """5/20/60営業日後リターン・MFE/MAE・勝率・中央値・戦略別集計を正確に計算する"""
         as_of = date(2025, 1, 10)

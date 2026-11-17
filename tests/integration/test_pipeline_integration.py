@@ -2,6 +2,8 @@ import json
 import tempfile
 import unittest
 from datetime import date, datetime, timedelta
+import io
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -9,6 +11,7 @@ import src.feature_engine
 import src.pattern_detector
 import src.score_engine
 from src.config.screening_config import AtlasScreeningConfig
+from src.evaluator.evaluator import ForwardReturnEvaluator
 from src.feature_engine.manager import calculate_features
 from src.feature_engine.registry import feature_registry
 from src.indicator_calculator.calculator import IndicatorCalculator
@@ -430,10 +433,11 @@ class TestPipelineIntegration(unittest.TestCase):
             self.assertTrue(parsed.update_master)
             self.assertTrue(parsed.no_irbank_download)
 
+            full_cli_ohlcv = ohlcv_screen + forward_bars[1:]
             with patch("src.main.MasterManager") as mock_master_cls, \
-                 patch("src.main.collect_ohlcv_data", return_value=ohlcv_screen), \
+                 patch("src.main.collect_ohlcv_data", return_value=full_cli_ohlcv), \
                  patch("src.main.collect_financial_data", return_value=fin_7203) as mock_fin_fn, \
-                 patch("src.evaluator.evaluator.data_collector.collect_ohlcv_data", return_value=forward_bars):
+                 patch("src.evaluator.evaluator.data_collector.collect_ohlcv_data") as mock_eval_ohlcv:
                 mock_master_cls.return_value.load_master.return_value = [master_7203]
                 mock_master_cls.return_value.update_from_jpx.return_value = [master_7203]
                 exit_code = main([
@@ -449,14 +453,331 @@ class TestPipelineIntegration(unittest.TestCase):
                 mock_master_cls.return_value.update_from_jpx.assert_called_once()
                 mock_fin_fn.assert_called_once()
                 self.assertEqual(mock_fin_fn.call_args.kwargs.get("allow_download"), False)
+                mock_eval_ohlcv.assert_not_called()
             self.assertEqual(exit_code, 0)
-            self.assertTrue(
-                (Path(tmpdir) / "cli_out" / f"evaluation_report_{as_of.isoformat()}.json").exists()
+            cli_json_path = Path(tmpdir) / "cli_out" / f"evaluation_report_{as_of.isoformat()}.json"
+            self.assertTrue(cli_json_path.exists())
+            cli_payload = json.loads(cli_json_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                cli_payload["evaluation"]["overall_summary"]["5"]["evaluated_count"],
+                1,
             )
 
             # evaluate モードで --as-of-date 未指定時は終了コード 1
             err_code = main(["--mode", "evaluate", "--symbols", "7203.T"])
             self.assertEqual(err_code, 1)
+
+    def test_feature_cache_disabled_by_default_and_enabled_by_cli_flag(self):
+        """use_feature_cache はデフォルト False で、--use-feature-cache 指定時のみ True が渡る"""
+        ohlcv_7203 = _build_uptrend_breakout_ohlcv("7203.T", days=90)
+        fin_7203 = _build_sample_financial("7203.T")
+        master_7203 = StockMasterModel(
+            code="7203",
+            symbol="7203.T",
+            name="トヨタ自動車",
+            market="プライム",
+            sector_33="輸送用機器",
+        )
+        # ./data/cache を汚さないよう事前計算結果を返すモックで引数を検証する
+        sample_ind = IndicatorCalculator().calculate_indicators(ohlcv_7203, use_cache=False)
+        sample_feat = calculate_features(ohlcv_7203, sample_ind, fin_7203, use_cache=False)
+
+        # CLI パースの確認
+        parsed_default = parse_args(["--symbols", "7203.T"])
+        self.assertFalse(parsed_default.use_feature_cache)
+        parsed_enabled = parse_args(["--symbols", "7203.T", "--use-feature-cache"])
+        self.assertTrue(parsed_enabled.use_feature_cache)
+
+        with patch("src.main.MasterManager") as mock_master_cls, \
+             patch("src.main.collect_ohlcv_data", return_value=ohlcv_7203), \
+             patch("src.main.collect_financial_data", return_value=fin_7203), \
+             patch("src.main.IndicatorCalculator.calculate_indicators", return_value=sample_ind) as mock_ind, \
+             patch("src.main.calculate_features", return_value=sample_feat) as mock_feat:
+            mock_master_cls.return_value.load_master.return_value = [master_7203]
+
+            # 1. デフォルト: 指標キャッシュは True、特徴量キャッシュは False
+            exit_default = main(["--symbols", "7203.T", "--no-export"])
+            self.assertEqual(exit_default, 0)
+            self.assertIs(mock_ind.call_args.kwargs["use_cache"], True)
+            self.assertIs(mock_feat.call_args.kwargs["use_cache"], False)
+
+            mock_ind.reset_mock()
+            mock_feat.reset_mock()
+
+            # 2. --use-feature-cache 指定時のみ特徴量キャッシュも True
+            exit_enabled = main(["--symbols", "7203.T", "--no-export", "--use-feature-cache"])
+            self.assertEqual(exit_enabled, 0)
+            self.assertIs(mock_ind.call_args.kwargs["use_cache"], True)
+            self.assertIs(mock_feat.call_args.kwargs["use_cache"], True)
+
+            mock_ind.reset_mock()
+            mock_feat.reset_mock()
+
+            # 3. --no-cache と --use-feature-cache 併用時は両方 False
+            exit_nocache = main(
+                ["--symbols", "7203.T", "--no-export", "--no-cache", "--use-feature-cache"]
+            )
+            self.assertEqual(exit_nocache, 0)
+            self.assertIs(mock_ind.call_args.kwargs["use_cache"], False)
+            self.assertIs(mock_feat.call_args.kwargs["use_cache"], False)
+
+    def test_evaluate_mode_single_ohlcv_fetch_no_lookahead_and_timings_sec(self):
+        """
+        mode='evaluate' (end_date=None) で OHLCV が1回で一括取得され ForwardReturnEvaluator が再取得しないこと、
+        分析側へ as_of_date 以前のバーのみ渡ること、latest_close が財務取得へ渡ること、
+        および timings_sec が戻り値・JSONメタデータ(elapsed_sec)・出力サマリーに含まれることを検証する。
+        """
+        screen_ohlcv = _build_uptrend_breakout_ohlcv("7203.T", days=90)
+        asof_bar = screen_ohlcv[-1]
+        as_of = asof_bar.date
+        expected_asof_close = asof_bar.close
+        forward_bars: list[OhlcvModel] = []
+        for i in range(1, 26):
+            close = expected_asof_close * (1.0 + 0.005 * i)
+            forward_bars.append(
+                OhlcvModel(
+                    symbol="7203.T",
+                    date=as_of + timedelta(days=i),
+                    open=close - 5.0,
+                    high=close + 10.0,
+                    low=close - 10.0,
+                    close=close,
+                    volume=300_000,
+                )
+            )
+        full_ohlcv = screen_ohlcv + forward_bars
+        fin_7203 = _build_sample_financial("7203.T")
+        master_7203 = StockMasterModel(
+            code="7203",
+            symbol="7203.T",
+            name="トヨタ自動車",
+            market="プライム",
+            sector_33="輸送用機器",
+        )
+
+        # 分析段階の入力バー日付（先読み防止）を記録する
+        ind_calc = IndicatorCalculator()
+        real_calculate_indicators = IndicatorCalculator.calculate_indicators
+        recorded_ind_dates: list[date] = []
+        recorded_feat_dates: list[date] = []
+        recorded_pat_dates: list[date] = []
+        recorded_score_dates: list[date] = []
+
+        def spy_ind(ohlcv_data, **kwargs):
+            recorded_ind_dates.extend(b.date for b in ohlcv_data)
+            return real_calculate_indicators(ind_calc, ohlcv_data, use_cache=False)
+
+        def spy_feat(ohlcv_data, indicator_data, financial_data=None, **kwargs):
+            recorded_feat_dates.extend(b.date for b in ohlcv_data)
+            return calculate_features(
+                ohlcv_data, indicator_data, financial_data, use_cache=False
+            )
+
+        def spy_pat(ohlcv_data, indicator_data, **kwargs):
+            recorded_pat_dates.extend(b.date for b in ohlcv_data)
+            return detect_patterns(ohlcv_data, indicator_data, **kwargs)
+
+        def spy_score(feature_sets, pattern_sets, **kwargs):
+            ohlcv_arg = kwargs.get("ohlcv_data") or []
+            recorded_score_dates.extend(b.date for b in ohlcv_arg)
+            return calculate_scores(feature_sets, pattern_sets, **kwargs)
+
+        expected_eval_fetch_end = ForwardReturnEvaluator.compute_default_fetch_end(as_of, [5, 20])
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_dir = Path(tmpdir) / "eval_single_fetch"
+            stdout_buf = io.StringIO()
+            with patch("src.main.MasterManager") as mock_master_cls, \
+                 patch("src.main.collect_ohlcv_data", return_value=full_ohlcv) as mock_main_ohlcv, \
+                 patch("src.main.collect_financial_data", return_value=fin_7203) as mock_main_fin, \
+                 patch("src.evaluator.evaluator.data_collector.collect_ohlcv_data") as mock_eval_ohlcv, \
+                 patch("src.main.IndicatorCalculator.calculate_indicators", side_effect=spy_ind), \
+                 patch("src.main.calculate_features", side_effect=spy_feat), \
+                 patch("src.main.detect_patterns", side_effect=spy_pat), \
+                 patch("src.main.calculate_scores", side_effect=spy_score), \
+                 redirect_stdout(stdout_buf):
+                mock_master_cls.return_value.load_master.return_value = [master_7203]
+
+                result = run_full_pipeline(
+                    symbols=["7203.T"],
+                    start_date=full_ohlcv[0].date,
+                    end_date=None,
+                    fiscal_year=2025,
+                    as_of_date=as_of,
+                    output_dir=out_dir,
+                    export_reports=True,
+                    mode="evaluate",
+                    horizons=[5, 20],
+                    use_cache=False,
+                )
+
+            # 1. OHLCV は eval_fetch_end まで一括取得され、Evaluator 側では再取得されない
+            mock_main_ohlcv.assert_called_once_with(
+                "7203.T",
+                full_ohlcv[0].date,
+                expected_eval_fetch_end,
+                as_of_date=expected_eval_fetch_end,
+            )
+            mock_eval_ohlcv.assert_not_called()
+
+            # 2. 財務取得へ as_of_date 時点の終値が渡されていること（未来日の終値ではない）
+            mock_main_fin.assert_called_once()
+            self.assertEqual(mock_main_fin.call_args.kwargs.get("latest_close"), expected_asof_close)
+
+            # 3. 分析側の全工程で as_of_date より後のバーが渡されていないこと（先読みバイアスなし）
+            for label, dates_list in (
+                ("indicators", recorded_ind_dates),
+                ("features", recorded_feat_dates),
+                ("patterns", recorded_pat_dates),
+                ("scores", recorded_score_dates),
+            ):
+                self.assertTrue(dates_list, f"{label} に渡された日付が空です")
+                self.assertLessEqual(max(dates_list), as_of, f"{label} に未来日付が混入しています")
+
+            # 4. フォワードリターン検証が共有 ohlcv_map を使って完了していること
+            eval_summary = result["evaluation_summary"]
+            self.assertIsNotNone(eval_summary)
+            self.assertEqual(eval_summary.overall_summary[5].evaluated_count, 1)
+            self.assertEqual(eval_summary.overall_summary[20].evaluated_count, 1)
+
+            # 5. timings_sec が戻り値・標準出力サマリーに含まれ、JSONメタデータに elapsed_sec が記録されること
+            expected_timing_keys = {
+                "setup_and_prescreen",
+                "ohlcv_collection",
+                "liquidity_filter",
+                "financial_collection",
+                "indicator_calculation",
+                "feature_calculation",
+                "pattern_detection",
+                "score_calculation",
+                "screening_and_ranking",
+                "forward_evaluation",
+                "total",
+            }
+            timings = result["timings_sec"]
+            self.assertEqual(set(timings.keys()), expected_timing_keys)
+            for key, val in timings.items():
+                self.assertIsInstance(val, float, f"{key} の型が float ではありません")
+                self.assertGreaterEqual(val, 0.0, f"{key} が負数です")
+            self.assertGreater(timings["total"], 0.0)
+
+            payload = json.loads(result["report_paths"]["json"].read_text(encoding="utf-8"))
+            self.assertEqual(payload["metadata"]["elapsed_sec"], timings["total"])
+            self.assertNotIn("timings_sec", payload["metadata"])
+            self.assertIn("フェーズ別所要時間:", stdout_buf.getvalue())
+
+    def test_evaluate_mode_with_future_end_date_fetches_once_and_passes_eval_end_date(self):
+        """
+        mode='evaluate' で end_date > as_of_date を指定した場合、end_date まで1回で取得し
+        eval_end_date=end_date で評価され、Evaluator 側で再取得しないことを検証する。
+        """
+        screen_ohlcv = _build_uptrend_breakout_ohlcv("7203.T", days=90)
+        asof_bar = screen_ohlcv[-1]
+        as_of = asof_bar.date
+        eval_end = as_of + timedelta(days=10)
+
+        forward_bars: list[OhlcvModel] = []
+        for i in range(1, 11):
+            close = asof_bar.close * (1.0 + 0.005 * i)
+            forward_bars.append(
+                OhlcvModel(
+                    symbol="7203.T",
+                    date=as_of + timedelta(days=i),
+                    open=close - 5.0,
+                    high=close + 10.0,
+                    low=close - 10.0,
+                    close=close,
+                    volume=300_000,
+                )
+            )
+        full_ohlcv = screen_ohlcv + forward_bars
+        fin_7203 = _build_sample_financial("7203.T")
+        master_7203 = StockMasterModel(
+            code="7203",
+            symbol="7203.T",
+            name="トヨタ自動車",
+            market="プライム",
+            sector_33="輸送用機器",
+        )
+
+        real_evaluate = ForwardReturnEvaluator.evaluate
+        with patch("src.main.MasterManager") as mock_master_cls, \
+             patch("src.main.collect_ohlcv_data", return_value=full_ohlcv) as mock_main_ohlcv, \
+             patch("src.main.collect_financial_data", return_value=fin_7203), \
+             patch("src.evaluator.evaluator.data_collector.collect_ohlcv_data") as mock_eval_ohlcv, \
+             patch.object(
+                 ForwardReturnEvaluator,
+                 "evaluate",
+                 autospec=True,
+                 side_effect=real_evaluate,
+             ) as spy_evaluate:
+            mock_master_cls.return_value.load_master.return_value = [master_7203]
+
+            result = run_full_pipeline(
+                symbols=["7203.T"],
+                start_date=full_ohlcv[0].date,
+                end_date=eval_end,
+                fiscal_year=2025,
+                as_of_date=as_of,
+                export_reports=False,
+                mode="evaluate",
+                horizons=[5],
+                use_cache=False,
+            )
+
+        mock_main_ohlcv.assert_called_once_with(
+            "7203.T",
+            full_ohlcv[0].date,
+            eval_end,
+            as_of_date=eval_end,
+        )
+        mock_eval_ohlcv.assert_not_called()
+        spy_evaluate.assert_called_once()
+        self.assertEqual(spy_evaluate.call_args.kwargs["eval_end_date"], eval_end)
+        self.assertIn("7203.T", spy_evaluate.call_args.kwargs["ohlcv_map"])
+        self.assertEqual(result["evaluation_summary"].overall_summary[5].evaluated_count, 1)
+
+    def test_evaluate_mode_zero_forward_bars_does_not_refetch_and_returns_no_forward_data(self):
+        """
+        mode='evaluate' で一括取得時に未来バーが0件だった場合でも、
+        Evaluator 側が再取得せず status == 'no_forward_data' になることを検証する。
+        """
+        screen_ohlcv = _build_uptrend_breakout_ohlcv("7203.T", days=90)
+        as_of = screen_ohlcv[-1].date
+        fin_7203 = _build_sample_financial("7203.T")
+        master_7203 = StockMasterModel(
+            code="7203",
+            symbol="7203.T",
+            name="トヨタ自動車",
+            market="プライム",
+            sector_33="輸送用機器",
+        )
+
+        with patch("src.main.MasterManager") as mock_master_cls, \
+             patch("src.main.collect_ohlcv_data", return_value=screen_ohlcv) as mock_main_ohlcv, \
+             patch("src.main.collect_financial_data", return_value=fin_7203), \
+             patch("src.evaluator.evaluator.data_collector.collect_ohlcv_data") as mock_eval_ohlcv:
+            mock_master_cls.return_value.load_master.return_value = [master_7203]
+
+            result = run_full_pipeline(
+                symbols=["7203.T"],
+                start_date=screen_ohlcv[0].date,
+                end_date=None,
+                fiscal_year=2025,
+                as_of_date=as_of,
+                export_reports=False,
+                mode="evaluate",
+                horizons=[5],
+                use_cache=False,
+            )
+
+        mock_main_ohlcv.assert_called_once()
+        mock_eval_ohlcv.assert_not_called()
+        eval_summary = result["evaluation_summary"]
+        self.assertIsNotNone(eval_summary)
+        self.assertEqual(len(eval_summary.items), 1)
+        self.assertEqual(eval_summary.items[0].status, "no_forward_data")
+        self.assertEqual(eval_summary.overall_summary[5].evaluated_count, 0)
 
 
 if __name__ == "__main__":

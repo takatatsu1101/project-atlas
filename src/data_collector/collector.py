@@ -345,11 +345,13 @@ class DataCollector:
         as_of_date: Optional[date] = None,
         disclosure_lag_days: int = settings.FINANCIAL_DISCLOSURE_LAG_DAYS,
         allow_download: bool = True,
+        latest_close: Optional[float] = None,
     ) -> Optional[FinancialModel]:
         """
         指定年度の財務データを収集し、FinancialModelを構築して返す。
         as_of_date 指定時は決算期末月末日 + disclosure_lag_days で開示判定を行い、
         未開示またはデータ欠損の場合は最大2期分遡って利用可能な年度データを採用する。
+        latest_close が指定された場合は内部で OHLCV を再取得せず、その終値を用いて PER / PBR を算出する。
         """
         code = self._parse_symbol(symbol)
         target_year = fiscal_year if fiscal_year is not None else (as_of_date or date.today()).year
@@ -444,22 +446,25 @@ class DataCollector:
         per = 0.0
         pbr = 0.0
         try:
-            ohlcv_end_date = as_of_date or date.today()
-            if as_of_date is None:
-                ohlcv_list = self.collect_ohlcv_data(symbol, date(adopted_year, 1, 1), ohlcv_end_date)
-            else:
-                ohlcv_list = self.collect_ohlcv_data(
-                    symbol,
-                    date(adopted_year, 1, 1),
-                    ohlcv_end_date,
-                    as_of_date=as_of_date,
-                )
-            if ohlcv_list:
-                latest_close = ohlcv_list[-1].close
+            resolved_close = latest_close
+            if resolved_close is None:
+                ohlcv_end_date = as_of_date or date.today()
+                if as_of_date is None:
+                    ohlcv_list = self.collect_ohlcv_data(symbol, date(adopted_year, 1, 1), ohlcv_end_date)
+                else:
+                    ohlcv_list = self.collect_ohlcv_data(
+                        symbol,
+                        date(adopted_year, 1, 1),
+                        ohlcv_end_date,
+                        as_of_date=as_of_date,
+                    )
+                if ohlcv_list:
+                    resolved_close = ohlcv_list[-1].close
+            if resolved_close is not None and resolved_close > 0:
                 if eps > 0:
-                    per = latest_close / eps
+                    per = resolved_close / eps
                 if bps > 0:
-                    pbr = latest_close / bps
+                    pbr = resolved_close / bps
         except Exception as e:
             logger.warning(f"最新株価の取得・PER/PBR算出に失敗しました: {e}")
 
@@ -574,8 +579,14 @@ def collect_financial_data(
     as_of_date: Optional[date] = None,
     disclosure_lag_days: int = 60,
     allow_download: bool = True,
+    latest_close: Optional[float] = None,
 ) -> Optional[FinancialModel]:
-    if as_of_date is None and disclosure_lag_days == 60 and allow_download:
+    if (
+        as_of_date is None
+        and disclosure_lag_days == 60
+        and allow_download
+        and latest_close is None
+    ):
         return data_collector.collect_financial_data(symbol, fiscal_year)
     return data_collector.collect_financial_data(
         symbol,
@@ -583,4 +594,5 @@ def collect_financial_data(
         as_of_date=as_of_date,
         disclosure_lag_days=disclosure_lag_days,
         allow_download=allow_download,
+        latest_close=latest_close,
     )

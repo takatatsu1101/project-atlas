@@ -51,6 +51,16 @@ class ForwardReturnEvaluator:
             )
         return entry_price_mode
 
+    @staticmethod
+    def compute_default_fetch_end(as_of_date: date, horizons: Sequence[int]) -> date:
+        """フォワード検証用 OHLCV の既定取得終了日を算出する。"""
+        norm_as_of = ForwardReturnEvaluator._normalize_date(as_of_date) or as_of_date
+        resolved_horizons = ForwardReturnEvaluator._normalize_horizons(horizons)
+        return min(
+            date.today(),
+            norm_as_of + timedelta(days=max(resolved_horizons) * 2 + 30),
+        )
+
     @classmethod
     def _sort_and_dedup_bars(cls, ohlcv_data: Sequence[OhlcvModel]) -> List[OhlcvModel]:
         """OHLCVデータを正規化済みの日付昇順に整列し、同一日付は後勝ちで重複排除する。"""
@@ -281,7 +291,6 @@ class ForwardReturnEvaluator:
 
         norm_as_of = self._normalize_date(as_of_date) or as_of_date
         norm_eval_end = self._normalize_date(eval_end_date)
-        max_h = max(resolved_horizons)
 
         items: List[ForwardEvaluationItemModel] = []
         for candidate in candidates:
@@ -292,8 +301,8 @@ class ForwardReturnEvaluator:
                 signal_date = self._normalize_date(candidate.date) or norm_as_of
                 # signal_date が休場日の場合でも直前営業日の終値にフォールバックできるよう過去マージンを設ける
                 fetch_start = min(signal_date, norm_as_of) - timedelta(days=7)
-                fetch_end = norm_eval_end or min(
-                    date.today(), norm_as_of + timedelta(days=max_h * 2 + 30)
+                fetch_end = norm_eval_end or self.compute_default_fetch_end(
+                    norm_as_of, resolved_horizons
                 )
                 if fetch_end < fetch_start:
                     ohlcv_data = []

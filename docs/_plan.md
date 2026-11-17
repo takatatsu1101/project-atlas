@@ -128,12 +128,36 @@ Project Atlas は、スイングトレード（数週間〜3ヶ月保有）向�
     - [x] 任意の過去基準日（`as_of_date`）を指定したスクリーニング実行と、基準日以降のN営業日後（例：5日・20日・60日後）の騰落率・勝率・最大上昇率（MFE）/最大下落率（MAE）を算出・集計する `Evaluator` モジュールの実装
     - [x] `src/main.py` への CLI 引数（`--as-of-date`, `--mode [screen|evaluate]` 等）の追加と、検証レポート出力のテスト
 
+### 3.4. フェーズ4: 銘柄評価高速化・スケーラビリティ改善 (進行中・1要件1PR構成)
+
+- [x] **PR #1: 重複I/O・逆転キャッシュの排除と計測ログ基盤 (`perf/eliminate-redundant-io-and-cache`)**
+    - [x] パイプライン各フェーズ（マスタ/事前フィルタ・OHLCV・財務・指標・特徴量・パターン・スコア・ランキング・フォワード評価）の所要時間計測ログ (`time.perf_counter()`) と `run_metadata` 出力の追加
+    - [x] `DataCollector.collect_financial_data()` への `latest_close` 引き渡しおよび事前読込キャッシュ活用による 2回目 OHLCV 読込・通信の廃止（後方互換維持）
+    - [x] `FeatureManager` の `features_*_all.json` キャッシュのデフォルト無効化（明示オプション `--use-feature-cache` での切替維持）
+    - [x] `RankingGenerator.generate_strategy_rankings()` におけるルックアップ辞書の1回生成・使い回し
+    - [x] `--mode evaluate` 時における全期間 OHLCV の一括読込と `ForwardReturnEvaluator.evaluate(..., ohlcv_map=...)` への共有（先読みバイアス防止の `as_of_date` スライス境界厳守）
+
+- [ ] **PR #2: `yfinance` 取得判定の適正化とチャンク並列バッチ取得 (`perf/batch-yfinance-and-fetch-check`)**
+    - [ ] 東証最新完了営業日のプリチェックおよび開始日休場マージン考慮による不要な `yfinance` 再通信の抑止
+    - [ ] `DataCollector.prefetch_ohlcv_batch()`（`yf.download(..., actions=True, threads=True, group_by="ticker")` のチャンク単位取得＋失敗ティッカー個別リトライ）の実装と `src/main.py` への統合
+
+- [ ] **PR #3: Parquet 読込・指標ベクトル化と最新日評価モード (`perf/vectorize-and-latest-only-eval`)**
+    - [ ] `DataCollector.collect_ohlcv_data()` の列限定読込・`NaN` クレンジング・`iterrows()` 排除（`OhlcvModel.model_construct`）
+    - [ ] `IndicatorCalculator` の単一 DataFrame / NumPy ベクトル演算への統合（個別計算メソッド互換維持）
+    - [ ] `DoubleBottomPattern` / `DoubleTopPattern` の $O(N)$ 化、および `latest_only_per_symbol=True` 向け「全履歴配列参照・最新日（対象インデックス）のみ評価」モードの実装
+
+- [ ] **PR #4: プロセス並列化と複数基準日一括バックテストランナー (`perf/multiprocess-and-batch-backtest`)**
+    - [ ] `FEATURE_ENGINE_PARALLEL_PROCESSES` / `--workers` による `ProcessPoolExecutor` 並列化（少銘柄時の閾値制御・ワーカー初期化・読取専用制約）
+    - [ ] 複数基準日指定バックテスト用の「全期間1回読込・ベクトル指標1回算出・基準日断面厳密分離」一括評価ランナーの実装
+
 ## 4. 今後のマイルストーン
 - [x] 2026/08/31: フェーズ2の「特徴量・パターン追加およびパイプライン結合」完了
 - [x] 2026/11/15: 要件見直し（v0.2.0）および1要件1PR計画の策定完了（PR #1）
 - [x] 2026/11/16: フェーズ3 PR #2〜#5 の順次実装・検証完了
+- [ ] フェーズ4 PR #1〜#4（銘柄評価高速化・スケーラビリティ改善）の順次実装・検証完了
 
 ## 5. 実行ログ (最新の作業のみ記載)
+- 2026/11/17: フェーズ4 PR #1（`perf/eliminate-redundant-io-and-cache` 相当）を実施。`src/main.py` にフェーズ別時間計測（`timings_sec`・`elapsed_sec`）と `use_feature_cache: bool = False`（CLI `--use-feature-cache`）および `--mode evaluate` 時の全期間 OHLCV 一括取得・`ohlcv_map` 共有（`ForwardReturnEvaluator.compute_default_fetch_end` 共通化・先読みバイアス防止スライス）を実装し、`DataCollector.collect_financial_data()` の `latest_close` 引き渡しによる2回目 OHLCV 読込・通信廃止、`RankingGenerator.generate_strategy_rankings()` のルックアップ1回構築を実施。全テスト215件のパスおよび2段階レビュー（1次 `atlas-reviewer`・2次 `gemini-4-argon-high` Approve）を完了。
 - 2026/11/16: `feat/tune-screening-thresholds` を実施。代表32銘柄×16基準日（2025年4月〜2026年7月）のフォワードリターン検証に基づき `config/screening.yaml` をチューニング（過熱ボラ減点 `10.0→20.0`、ダブルトップ減点係数 `0.35→0.45` / 除外上限 `70.0→60.0`、ブレイクアウト出来高重み `0.25→0.35`、最低総合スコア `60.0→65.0`）。全体 +60営業日勝率が `64.8%→69.5%`、平均リターン `+14.29%→+16.36%`（ブレイクアウト型は `60.6%→69.6%`）へ改善し、全テスト205件パスを確認。
 - 2026/11/16: `feat/optimize-data-collector-and-master` を実施。`DataCollector` に IR BANK JSON のインメモリキャッシュ・ダウンロード失敗/破損JSONのネガティブキャッシュ・`timeout=15`・`allow_download` 制御・`as_of_date=None` 時フォールバック統一を実装し、`MasterManager` に JPX 東証上場銘柄一覧（`data_j.xlsx`）の標準ライブラリのみによる自動取得・解析・更新機能（更新日時優先解決、ふりがな `<rPh>` 除外、タイトル行/複数シート動的探索含む）を追加。`src/main.py` に `--update-master` / `--no-irbank-download` を統合し、全テスト205件パスおよび2段階レビュー（1次 `atlas-reviewer`・2次 `gemini-4-argon-high` Approve）を完了。
 - 2026/11/16: PR #5（`feat/forward-return-evaluator`）を実施。`IndicatorCalculator` / `FeatureManager` のキャッシュ分離（`cache_key_suffix` / `use_cache`）と全日付・財務署名一致検証による先読みバイアス・汚染防止強化、フォワードリターン評価モデル（`HorizonMetricsModel` 等）と `EvaluationConfig`（`config/screening.yaml`）の追加、`ForwardReturnEvaluator`（`Evaluator`：N営業日後リターン・勝率・MFE/MAE・全体/戦略別集計・休場日7日ルックバック）の実装、`Presenter` の CLI/JSON/Markdown 検証レポート対応（`evaluation_report_*`）、および `src/main.py` への CLI パーサ（`--mode`, `--as-of-date`, `--horizons`, `--no-cache` 等）統合を実装し、全テスト191件のパスおよび2段階レビュー（1次 `atlas-reviewer`・2次 `gemini-4-argon-high` 双方 Approve）を完了。
