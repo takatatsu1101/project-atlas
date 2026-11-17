@@ -1,13 +1,18 @@
 import tempfile
 import unittest
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 import pandas as pd
 import os
 
 from src.common.storage import StorageManager
-from src.data_collector.collector import DataCollector, collect_ohlcv_data, collect_financial_data
+from src.data_collector.collector import (
+    DataCollector,
+    collect_ohlcv_data,
+    collect_financial_data,
+    prefetch_ohlcv_batch,
+)
 from src.model.data_models import OhlcvModel, FinancialModel
 
 class TestDataCollector(unittest.TestCase):
@@ -602,6 +607,629 @@ class TestDataCollector(unittest.TestCase):
         self.assertIsNotNone(fin)
         self.assertEqual(fin.per, 0.0)
         self.assertEqual(fin.pbr, 0.0)
+
+    @staticmethod
+    def _build_price_df(dates_list, base_price=1000.0):
+        return pd.DataFrame({
+            "date": dates_list,
+            "open": [base_price + i for i in range(len(dates_list))],
+            "high": [base_price + i + 10.0 for i in range(len(dates_list))],
+            "low": [base_price + i - 10.0 for i in range(len(dates_list))],
+            "close": [base_price + i + 5.0 for i in range(len(dates_list))],
+            "volume": [10000 + i * 100 for i in range(len(dates_list))],
+        })
+
+    @staticmethod
+    def _build_yf_multiindex_df(symbol_rows: dict[str, pd.DataFrame]) -> pd.DataFrame:
+        """yf.download(group_by='ticker') 形式の MultiIndex DataFrame を生成する。"""
+        frames = {}
+        for sym, df in symbol_rows.items():
+            sub = df.copy()
+            sub["Date"] = pd.to_datetime(sub["date"])
+            sub = sub.set_index("Date")
+            sub = sub.rename(columns={
+                "open": "Open",
+                "high": "High",
+                "low": "Low",
+                "close": "Close",
+                "volume": "Volume",
+            })[["Open", "High", "Low", "Close", "Volume"]]
+            frames[sym] = sub
+        return pd.concat(frames, axis=1)
+
+    @patch("yfinance.Ticker")
+    def test_get_ohlcv_from_yfinance_uses_exclusive_end_plus_one_day(self, mock_ticker):
+        """_get_ohlcv_from_yfinance が end_date + 1日を yfinance へ渡し当日足を落とさない"""
+        mock_instance = MagicMock()
+        mock_ticker.return_value = mock_instance
+        raw = pd.DataFrame(
+            {
+                "Open": [100.0, 101.0, 102.0],
+                "High": [105.0, 106.0, 107.0],
+                "Low": [99.0, 100.0, 101.0],
+                "Close": [104.0, 105.0, 106.0],
+                "Volume": [1000, None, 1200],
+            },
+            index=pd.to_datetime(["2025-01-06", "2025-01-07", "2025-01-08"]),
+        )
+        # 一部 NaN 価格行が混入しても除去され、2025-01-09 の余分な行は max_date で除外される
+        extra = pd.DataFrame(
+            {
+                "Open": [None, 103.0],
+                "High": [110.0, 108.0],
+                "Low": [98.0, 102.0],
+                "Close": [105.0, 107.0],
+                "Volume": [500, 1300],
+            },
+            index=pd.to_datetime(["2025-01-07", "2025-01-09"]),
+        )
+        mock_instance.history.return_value = pd.concat([raw, extra])
+
+        df = self.collector._get_ohlcv_from_yfinance("7203.T", date(2025, 1, 6), date(2025, 1, 8))
+        mock_instance.history.assert_called_once_with(start="2025-01-06", end="2025-01-09")
+        self.assertEqual(list(df["date"]), [date(2025, 1, 6), date(2025, 1, 7), date(2025, 1, 8)])
+        self.assertEqual(df.loc[df["date"] == date(2025, 1, 7), "volume"].iloc[0], 0)
+
+    def test_is_cache_sufficient_holiday_margin_and_intraday_skip(self):
+        """開始・終了日の休場マージンおよび場中カットオフ時にキャッシュ十分と判定して再通信しない"""
+        # 2025/1/1(水・祝)〜1/5(日)は休場、最初の営業日は 1/6(月)
+        # 2025/1/10(金)までキャッシュがあれば、1/12(日)を終了日指定しても十分と判定される
+        cached_df = self._build_price_df([
+            date(2025, 1, 6),
+            date(2025, 1, 7),
+            date(2025, 1, 8),
+            date(2025, 1, 9),
+            date(2025, 1, 10),
+        ])
+        self.collector.storage.save_parquet(cached_df, "price/7203.T.parquet")
+
+        self.assertTrue(
+            self.collector._is_cache_sufficient(
+                cached_df,
+                req_start=date(2025, 1, 1),
+                req_end=date(2025, 1, 12),
+            )
+        )
+        with patch.object(self.collector, "_get_ohlcv_from_yfinance") as mock_yf:
+            res = self.collector.collect_ohlcv_data("7203.T", date(2025, 1, 1), date(2025, 1, 12))
+            mock_yf.assert_not_called()
+            self.assertEqual(len(res), 5)
+
+        # 場中（例: 2025-01-14 火曜 10:00 JST -> 完了営業日は 2025-01-10 金曜[1/13成人の日]）
+        with patch(
+            "src.data_collector.collector.get_latest_completed_trading_day",
+            return_value=date(2025, 1, 10),
+        ):
+            self.assertTrue(
+                self.collector._is_cache_sufficient(
+                    cached_df,
+                    req_start=date(2025, 1, 6),
+                    req_end=date(2025, 1, 14),
+                )
+            )
+
+    def test_prefetch_ohlcv_batch_market_precheck_moves_tail_missing_to_skipped(self):
+        """1306.T プリチェックで実市場最新日がキャッシュ済み末尾と一致した場合、tail_missing が skipped に移る"""
+        # 2025-01-10(金)までキャッシュ済み、要求は 2025-01-14(火)まで（スケジュール上は 1/14 が営業日）
+        cached_df = self._build_price_df([date(2025, 1, 6), date(2025, 1, 10)])
+        self.collector.storage.save_parquet(cached_df, "price/7203.T.parquet")
+
+        benchmark_df = pd.DataFrame(
+            {
+                "Open": [2800.0],
+                "High": [2820.0],
+                "Low": [2790.0],
+                "Close": [2810.0],
+                "Volume": [100000],
+            },
+            index=pd.to_datetime(["2025-01-10"]),
+        )
+        mock_ticker_inst = MagicMock()
+        mock_ticker_inst.history.return_value = benchmark_df
+
+        with patch("yfinance.Ticker", return_value=mock_ticker_inst) as mock_ticker_cls, \
+             patch("yfinance.download") as mock_download:
+            summary = self.collector.prefetch_ohlcv_batch(
+                symbols=["7203.T"],
+                start_date=date(2025, 1, 6),
+                end_date=date(2025, 1, 14),
+                precheck_market=True,
+                benchmark_symbol="1306.T",
+            )
+
+        mock_ticker_cls.assert_called_once_with("1306.T")
+        mock_download.assert_not_called()
+        self.assertEqual(summary["total"], 1)
+        self.assertEqual(summary["skipped"], 1)
+        self.assertEqual(summary["batch_updated"], 0)
+        self.assertEqual(summary["market_latest_date"], date(2025, 1, 10))
+        cached_entry = self.collector._market_latest_date_cache[(date(2025, 1, 14), "1306.T")]
+        self.assertEqual(cached_entry[0], date(2025, 1, 10))
+
+    def test_prefetch_ohlcv_batch_skips_precheck_when_no_cache_or_all_skipped(self):
+        """全銘柄キャッシュなし（新規取得のみ）または全銘柄スキップ時は 1306.T プリチェックを実行しない"""
+        # 1. 新規取得のみ（キャッシュなし）
+        dl_df = self._build_yf_multiindex_df({
+            "7203.T": self._build_price_df([date(2025, 1, 6), date(2025, 1, 7)]),
+        })
+        with patch.object(self.collector, "resolve_latest_completed_trading_day") as mock_precheck, \
+             patch("yfinance.download", return_value=dl_df) as mock_download:
+            summary_new = self.collector.prefetch_ohlcv_batch(
+                symbols=["7203.T", "7203.T"],  # 重複排除も検証
+                start_date=date(2025, 1, 6),
+                end_date=date(2025, 1, 7),
+                precheck_market=True,
+            )
+        mock_precheck.assert_not_called()
+        mock_download.assert_called_once()
+        self.assertEqual(summary_new["total"], 1)
+        self.assertEqual(summary_new["batch_updated"], 1)
+
+        # 2. 既にキャッシュが十分な状態（全銘柄スキップ）
+        with patch.object(self.collector, "resolve_latest_completed_trading_day") as mock_precheck, \
+             patch("yfinance.download") as mock_download:
+            summary_skip = self.collector.prefetch_ohlcv_batch(
+                symbols=["7203.T"],
+                start_date=date(2025, 1, 6),
+                end_date=date(2025, 1, 7),
+                precheck_market=True,
+            )
+        mock_precheck.assert_not_called()
+        mock_download.assert_not_called()
+        self.assertEqual(summary_skip["skipped"], 1)
+
+    def test_prefetch_ohlcv_batch_chunks_case_insensitive_and_single_layer(self):
+        """チャンク分割・大文字小文字ティッカー一致・単一ティッカー単層DF・as_of_date非切り詰めを検証する"""
+        # 3銘柄を chunk_size=2 で2チャンク（[130a.T, 7203.T], [9984.T]）に分割
+        chunk1_df = self._build_yf_multiindex_df({
+            # yf.download がティッカーを大文字化して返すケース
+            "130A.T": self._build_price_df([date(2025, 1, 6), date(2025, 1, 10)]),
+            "7203.T": self._build_price_df([date(2025, 1, 6), date(2025, 1, 10)], base_price=2000.0),
+        })
+        # 単一ティッカーチャンクで単層 DataFrame が返るケース
+        chunk2_df = self._build_price_df([date(2025, 1, 6), date(2025, 1, 10)], base_price=3000.0)
+        chunk2_df["Date"] = pd.to_datetime(chunk2_df["date"])
+        chunk2_df = chunk2_df.set_index("Date")[["open", "high", "low", "close", "volume"]]
+        chunk2_df.columns = ["Open", "High", "Low", "Close", "Volume"]
+
+        with patch("yfinance.download", side_effect=[chunk1_df, chunk2_df]) as mock_download:
+            summary = self.collector.prefetch_ohlcv_batch(
+                symbols=["130a.T", "7203.T", "9984.T"],
+                start_date=date(2025, 1, 6),
+                end_date=date(2025, 1, 10),
+                as_of_date=date(2025, 1, 8),  # 取得範囲は end_date=2025-01-10 を切り詰めない
+                chunk_size=2,
+                precheck_market=False,
+            )
+
+        self.assertEqual(mock_download.call_count, 2)
+        first_call_kwargs = mock_download.call_args_list[0].kwargs
+        self.assertEqual(first_call_kwargs["tickers"], ["130a.T", "7203.T"])
+        self.assertEqual(first_call_kwargs["start"], "2025-01-06")
+        self.assertEqual(first_call_kwargs["end"], "2025-01-11")
+        self.assertTrue(first_call_kwargs["actions"])
+        self.assertTrue(first_call_kwargs["threads"])
+        self.assertEqual(first_call_kwargs["group_by"], "ticker")
+        self.assertFalse(first_call_kwargs["progress"])
+
+        self.assertEqual(summary["batch_updated"], 3)
+        self.assertEqual(summary["failed"], 0)
+        for sym in ("130a.T", "7203.T", "9984.T"):
+            saved = self.collector.storage.load_parquet(f"price/{sym}.parquet")
+            self.assertIsNotNone(saved)
+            self.assertEqual(len(saved), 2)
+            # 2025-01-10 まで保存されており as_of_date=1/8 で中抜けしていない
+            self.assertEqual(pd.to_datetime(saved["date"]).dt.date.max(), date(2025, 1, 10))
+
+    def test_prefetch_ohlcv_batch_retry_on_missing_and_error_and_skip_refetch(self):
+        """バッチ欠損/例外時の個別リトライ（成功・失敗継続）と _attempted_fetch_ranges による再通信抑止を検証"""
+        # 7203.T はバッチで全NaN（有効行0件）、6758.T はティッカー欠損、9984.T はバッチ成功
+        nan_df = pd.DataFrame(
+            {"Open": [None], "High": [None], "Low": [None], "Close": [None], "Volume": [None]},
+            index=pd.to_datetime(["2025-01-06"]),
+        )
+        dl_df = pd.concat(
+            {
+                "9984.T": pd.DataFrame(
+                    {"Open": [100.0], "High": [105.0], "Low": [99.0], "Close": [104.0], "Volume": [1000]},
+                    index=pd.to_datetime(["2025-01-06"]),
+                ),
+                "7203.T": nan_df,
+            },
+            axis=1,
+        )
+
+        retry_7203_df = self._build_price_df([date(2025, 1, 6), date(2025, 1, 7)])
+
+        def retry_side_effect(sym, s_date, e_date):
+            if sym == "7203.T":
+                return retry_7203_df
+            raise Exception("network error")
+
+        with patch("yfinance.download", return_value=dl_df), \
+             patch.object(self.collector, "_get_ohlcv_from_yfinance", side_effect=retry_side_effect) as mock_retry:
+            summary = self.collector.prefetch_ohlcv_batch(
+                symbols=["9984.T", "7203.T", "6758.T"],
+                start_date=date(2025, 1, 6),
+                end_date=date(2025, 1, 7),
+                precheck_market=False,
+            )
+
+        self.assertEqual(summary["batch_updated"], 1)
+        self.assertEqual(summary["retried_updated"], 1)
+        self.assertEqual(summary["failed"], 1)
+        self.assertEqual(summary["failed_symbols"], ["6758.T"])
+        self.assertEqual(mock_retry.call_count, 2)
+
+        # 直後に失敗銘柄 6758.T を collect_ohlcv_data しても _attempted_fetch_ranges により再通信しない
+        with patch.object(self.collector, "_get_ohlcv_from_yfinance") as mock_single:
+            res_failed = self.collector.collect_ohlcv_data("6758.T", date(2025, 1, 6), date(2025, 1, 7))
+            mock_single.assert_not_called()
+            self.assertEqual(res_failed, [])
+
+        # yf.download 自体が例外を起こした場合も全銘柄個別リトライへ回る
+        collector2 = DataCollector()
+        collector2.storage = self.collector.storage
+        with patch("yfinance.download", side_effect=RuntimeError("download failed")), \
+             patch.object(collector2, "_get_ohlcv_from_yfinance", return_value=pd.DataFrame()) as mock_retry2:
+            summary2 = collector2.prefetch_ohlcv_batch(
+                symbols=["6758.T"],
+                start_date=date(2025, 1, 6),
+                end_date=date(2025, 1, 7),
+                precheck_market=False,
+            )
+        mock_retry2.assert_called_once_with("6758.T", date(2025, 1, 6), date(2025, 1, 7))
+        self.assertEqual(summary2["failed"], 1)
+
+    def test_prefetch_ohlcv_batch_tail_missing_narrow_range_and_skip_refetch_when_no_bar(self):
+        """末尾のみ不足グループは max_date - 7日 の狭い範囲で取得し、新着なしでも再通信を抑止する"""
+        cached_df = self._build_price_df([
+            date(2025, 1, 6),
+            date(2025, 1, 7),
+            date(2025, 1, 8),
+            date(2025, 1, 9),
+            date(2025, 1, 10),
+        ])
+        self.collector.storage.save_parquet(cached_df, "price/7203.T.parquet")
+
+        with patch("yfinance.download", return_value=pd.DataFrame()) as mock_dl, \
+             patch.object(self.collector, "_get_ohlcv_from_yfinance", return_value=pd.DataFrame()):
+            summary = self.collector.prefetch_ohlcv_batch(
+                symbols=["7203.T"],
+                start_date=date(2025, 1, 1),
+                end_date=date(2025, 1, 15),
+                precheck_market=False,
+            )
+
+        # start=max(2025-01-01, 2025-01-10 - 7d = 2025-01-03) -> 2025-01-03
+        self.assertEqual(mock_dl.call_args.kwargs["start"], "2025-01-03")
+        self.assertEqual(mock_dl.call_args.kwargs["end"], "2025-01-16")
+        self.assertEqual(summary["failed"], 1)
+
+        # tail_missing 取得試行済みなので、直後の collect_ohlcv_data でも再通信しない
+        with patch.object(self.collector, "_get_ohlcv_from_yfinance") as mock_single:
+            res = self.collector.collect_ohlcv_data("7203.T", date(2025, 1, 1), date(2025, 1, 15))
+            mock_single.assert_not_called()
+            self.assertEqual(len(res), 5)
+
+    @patch("src.data_collector.collector.data_collector")
+    def test_module_level_prefetch_ohlcv_batch(self, mock_data_collector):
+        """モジュールレベル prefetch_ohlcv_batch が data_collector へ委譲される"""
+        mock_data_collector.prefetch_ohlcv_batch.return_value = {"total": 1, "skipped": 0}
+        res = prefetch_ohlcv_batch(
+            ["7203.T"],
+            date(2025, 1, 1),
+            date(2025, 1, 10),
+            as_of_date=date(2025, 1, 8),
+            chunk_size=50,
+            precheck_market=False,
+            benchmark_symbol="1306.T",
+        )
+        mock_data_collector.prefetch_ohlcv_batch.assert_called_once_with(
+            symbols=["7203.T"],
+            start_date=date(2025, 1, 1),
+            end_date=date(2025, 1, 10),
+            as_of_date=date(2025, 1, 8),
+            chunk_size=50,
+            precheck_market=False,
+            benchmark_symbol="1306.T",
+        )
+        self.assertEqual(res["total"], 1)
+
+    def test_prefetch_ohlcv_batch_tail_missing_prevents_gap_when_req_start_after_max_date(self):
+        """tail_missing で req_start > max_d の場合も既存キャッシュとの間に中抜けを作らない"""
+        # 既存キャッシュは 1/6〜1/8 のみ。要求は 1/20〜1/24 (req_start=1/20 > max_d=1/8)
+        cached_df = self._build_price_df([date(2025, 1, 6), date(2025, 1, 7), date(2025, 1, 8)])
+        self.collector.storage.save_parquet(cached_df, "price/7203.T.parquet")
+
+        batch_df = self._build_yf_multiindex_df({
+            "7203.T": self._build_price_df(
+                [date(2025, 1, 9), date(2025, 1, 10), date(2025, 1, 20), date(2025, 1, 24)]
+            ),
+        })
+        with patch("yfinance.download", return_value=batch_df) as mock_dl:
+            summary = self.collector.prefetch_ohlcv_batch(
+                symbols=["7203.T"],
+                start_date=date(2025, 1, 20),
+                end_date=date(2025, 1, 24),
+                precheck_market=False,
+            )
+
+        self.assertEqual(summary["batch_updated"], 1)
+        # sym_start = max(min(1/20, 1/6), 1/8 - 7d = 1/1) = 1/6 となり中抜けしない
+        self.assertEqual(mock_dl.call_args.kwargs["start"], "2025-01-06")
+        saved = self.collector.storage.load_parquet("price/7203.T.parquet")
+        saved_dates = list(pd.to_datetime(saved["date"]).dt.date)
+        self.assertIn(date(2025, 1, 9), saved_dates)
+        self.assertIn(date(2025, 1, 10), saved_dates)
+        self.assertIn(date(2025, 1, 24), saved_dates)
+
+    def test_attempted_fetch_ranges_isolated_on_retry_and_holiday_start(self):
+        """チャンク内リトライ銘柄へ他銘柄の広い範囲が誤記録されないこと・休場開始日カバー判定を検証"""
+        # 7203.T: 1/20..1/24 キャッシュあり (tail_missing: sym_start=1/17) だがバッチ欠損で個別リトライ失敗
+        # 9984.T: キャッシュなし、ただし start_date=1/6 ではなく既存キャッシュで範囲差を作る
+        # A(9984.T): キャッシュ 1/15..1/16, 要求 1/6..1/24 -> head_missing (sym_start=1/6)
+        # B(7203.T): キャッシュ 1/6..1/6? いや同グループ full_or_head_missing に混在させるため:
+        # A(9984.T): キャッシュ 1/10..1/15 -> head_missing (sym_start=1/6)
+        # B(7203.T): キャッシュ 1/20..1/21 -> head_missing (sym_start=1/6) ではなく
+        # B の sym_start を 1/20 にするため、start_date=1/20 かつ A は min_d=1/6 のキャッシュあり head_missing にする?
+        # head_missing は start_ok=False なので min_d > expected_start。
+        # tail_missing グループ内で混在させると分かりやすい！
+        # A(9984.T): 1/6..1/10 キャッシュ (max_d=1/10 -> sym_start=1/6)
+        # B(7203.T): 1/6..1/22 キャッシュ (max_d=1/22 -> sym_start=1/15)
+        self.collector.storage.save_parquet(
+            self._build_price_df([date(2025, 1, 6), date(2025, 1, 10)]),
+            "price/9984.T.parquet",
+        )
+        self.collector.storage.save_parquet(
+            self._build_price_df([date(2025, 1, 6), date(2025, 1, 22)]),
+            "price/7203.T.parquet",
+        )
+
+        # バッチは 9984.T のみ返却、7203.T は欠損 -> 7203.T のみ個別リトライ(失敗)
+        dl_df = self._build_yf_multiindex_df({
+            "9984.T": self._build_price_df([date(2025, 1, 10), date(2025, 1, 24)]),
+        })
+        with patch("yfinance.download", return_value=dl_df), \
+             patch.object(self.collector, "_get_ohlcv_from_yfinance", side_effect=RuntimeError("fail")) as mock_retry:
+            summary = self.collector.prefetch_ohlcv_batch(
+                symbols=["9984.T", "7203.T"],
+                start_date=date(2025, 1, 6),
+                end_date=date(2025, 1, 24),
+                chunk_size=10,
+                precheck_market=False,
+            )
+
+        self.assertEqual(summary["batch_updated"], 1)
+        self.assertEqual(summary["failed"], 1)
+        mock_retry.assert_called_once_with("7203.T", date(2025, 1, 15), date(2025, 1, 24))
+        # 7203.T には他銘柄の 1/6 ではなく自身の 1/15..1/24 が記録される
+        self.assertEqual(self.collector._attempted_fetch_ranges["7203.T"], (date(2025, 1, 15), date(2025, 1, 24)))
+        self.assertEqual(self.collector._attempted_fetch_ranges["9984.T"], (date(2025, 1, 6), date(2025, 1, 24)))
+
+        # 7203.T を新しい開始日 2025-01-10 で（キャッシュ削除して）再要求した場合、att_start=1/15 > expected_start=1/10 なので再通信する
+        self.collector.storage.save_parquet(self._build_price_df([date(2025, 1, 20)]), "price/7203.T.parquet")
+        with patch.object(self.collector, "_get_ohlcv_from_yfinance", return_value=pd.DataFrame()) as mock_refetch:
+            self.collector.collect_ohlcv_data("7203.T", date(2025, 1, 10), date(2025, 1, 24))
+            mock_refetch.assert_called_once()
+
+        # 休場日(1/1〜1/5)から開始する collect_ohlcv_data でも att_start=1/6 <= expected_start=1/6 でスキップされる
+        self.collector._attempted_fetch_ranges["6758.T"] = (date(2025, 1, 6), date(2025, 1, 10))
+        with patch.object(self.collector, "_get_ohlcv_from_yfinance") as mock_skip:
+            res = self.collector.collect_ohlcv_data("6758.T", date(2025, 1, 1), date(2025, 1, 10))
+            mock_skip.assert_not_called()
+            self.assertEqual(res, [])
+
+    def test_ohlcv_normalization_types_standard_columns_and_missing_required_col(self):
+        """volume の int64 維持・actions の NaN 補完・不要列除去・必須 OHLC 欠損時のリトライを検証"""
+        # 既存キャッシュは actions なし・float volume
+        cached_df = pd.DataFrame({
+            "date": [date(2025, 1, 6)],
+            "open": [100.0],
+            "high": [105.0],
+            "low": [99.0],
+            "close": [104.0],
+            "volume": [1000.0],
+        })
+        self.collector.storage.save_parquet(cached_df, "price/9984.T.parquet")
+
+        # 新着バッチは Dividends / Stock Splits / Capital Gains / Adj Close 混在・float volume
+        new_raw = pd.DataFrame(
+            {
+                "Open": [101.0],
+                "High": [106.0],
+                "Low": [100.0],
+                "Close": [105.0],
+                "Adj Close": [105.0],
+                "Volume": [1500.0],
+                "Dividends": [25.0],
+                "Stock Splits": [None],
+                "Capital Gains": [99.0],
+            },
+            index=pd.to_datetime(["2025-01-07"]),
+        )
+        # 7203.T は必須列 'Low' が欠損しているケース
+        bad_raw = pd.DataFrame(
+            {
+                "Open": [200.0],
+                "High": [210.0],
+                "Close": [205.0],
+                "Volume": [3000],
+            },
+            index=pd.to_datetime(["2025-01-07"]),
+        )
+        multi_raw = pd.concat({"9984.T": new_raw, "7203.T": bad_raw}, axis=1)
+
+        retry_7203 = self._build_price_df([date(2025, 1, 6), date(2025, 1, 7)])
+        with patch("yfinance.download", return_value=multi_raw), \
+             patch.object(self.collector, "_get_ohlcv_from_yfinance", return_value=retry_7203) as mock_retry:
+            summary = self.collector.prefetch_ohlcv_batch(
+                symbols=["9984.T", "7203.T"],
+                start_date=date(2025, 1, 6),
+                end_date=date(2025, 1, 7),
+                precheck_market=False,
+            )
+
+        self.assertEqual(summary["batch_updated"], 1)
+        self.assertEqual(summary["retried_updated"], 1)
+        mock_retry.assert_called_once()
+
+        saved_9984 = self.collector.storage.load_parquet("price/9984.T.parquet")
+        self.assertEqual(
+            list(saved_9984.columns),
+            ["date", "open", "high", "low", "close", "volume", "dividends", "stock_splits"],
+        )
+        self.assertEqual(str(saved_9984["volume"].dtype), "int64")
+        self.assertEqual(saved_9984["dividends"].isna().sum(), 0)
+        self.assertEqual(saved_9984["stock_splits"].isna().sum(), 0)
+        self.assertEqual(saved_9984.loc[0, "dividends"], 0.0)
+        self.assertEqual(saved_9984.loc[1, "dividends"], 25.0)
+
+    def test_market_latest_date_cache_benchmark_separation_and_ttl(self):
+        """_market_latest_date_cache のベンチマーク別キー分離、TTL 期限切れ再取得、確定日保持・例外フォールバックを検証"""
+        df_1306 = pd.DataFrame(
+            {"Open": [1.0], "High": [1.0], "Low": [1.0], "Close": [1.0], "Volume": [100]},
+            index=pd.to_datetime(["2025-01-10"]),
+        )
+        df_1321 = pd.DataFrame(
+            {"Open": [1.0], "High": [1.0], "Low": [1.0], "Close": [1.0], "Volume": [100]},
+            index=pd.to_datetime(["2025-01-14"]),
+        )
+
+        def ticker_side_effect(sym):
+            m = MagicMock()
+            if sym == "1306.T":
+                m.history.return_value = df_1306
+            elif sym == "1321.T":
+                m.history.return_value = df_1321
+            else:
+                m.history.side_effect = RuntimeError("timeout")
+            return m
+
+        with patch("yfinance.Ticker", side_effect=ticker_side_effect) as mock_ticker, \
+             patch("src.data_collector.collector.time.monotonic", side_effect=[100.0, 100.0, 200.0, 500.0, 500.0, 900.0]):
+            # 1. 1306.T は未確定日 (1/10 < 1/14) としてキャッシュ
+            res_1306_1 = self.collector.resolve_latest_completed_trading_day(
+                ref_date=date(2025, 1, 14), benchmark_symbol="1306.T"
+            )
+            # 2. 別ベンチマーク 1321.T は別キーなので独立取得 (1/14 == schedule_end)
+            res_1321_1 = self.collector.resolve_latest_completed_trading_day(
+                ref_date=date(2025, 1, 14), benchmark_symbol="1321.T"
+            )
+            # 3. TTL 内 (200.0 - 100.0 = 100 < 300) は 1306.T キャッシュヒット
+            res_1306_2 = self.collector.resolve_latest_completed_trading_day(
+                ref_date=date(2025, 1, 14), benchmark_symbol="1306.T"
+            )
+            # 4. TTL 超過 (500.0 - 100.0 = 400 > 300) は 1306.T を再取得
+            res_1306_3 = self.collector.resolve_latest_completed_trading_day(
+                ref_date=date(2025, 1, 14), benchmark_symbol="1306.T"
+            )
+            # 5. 確定済み (1321.T は 1/14 == schedule_end) は TTL 超過相当時刻 (900.0) でも再取得しない
+            res_1321_2 = self.collector.resolve_latest_completed_trading_day(
+                ref_date=date(2025, 1, 14), benchmark_symbol="1321.T"
+            )
+            # 6. 例外発生時は schedule_end へフォールバックしキャッシュしない
+            res_err = self.collector.resolve_latest_completed_trading_day(
+                ref_date=date(2025, 1, 14), benchmark_symbol="9999.T"
+            )
+
+        self.assertEqual(res_1306_1, date(2025, 1, 10))
+        self.assertEqual(res_1306_2, date(2025, 1, 10))
+        self.assertEqual(res_1306_3, date(2025, 1, 10))
+        self.assertEqual(res_1321_1, date(2025, 1, 14))
+        self.assertEqual(res_1321_2, date(2025, 1, 14))
+        self.assertEqual(res_err, date(2025, 1, 14))
+        self.assertNotIn((date(2025, 1, 14), "9999.T"), self.collector._market_latest_date_cache)
+        # 1306.T が2回、1321.T が1回、9999.T が1回 = 計4回
+        self.assertEqual(mock_ticker.call_count, 4)
+
+    def test_prefetch_edge_cases_level1_sort_optimization_and_io_isolation(self):
+        """level1 MultiIndex抽出・chunk_size<=0・早期終了・チャンク最適化・Parquet例外隔離・TZ正規化を検証"""
+        # 1. chunk_size <= 0
+        with self.assertRaises(ValueError):
+            self.collector.prefetch_ohlcv_batch(["7203.T"], date(2025, 1, 6), date(2025, 1, 7), chunk_size=0)
+
+        # 2. symbols=[] および 営業日0日（キャッシュなしでも通信しない）
+        with patch("yfinance.download") as mock_dl:
+            s_empty = self.collector.prefetch_ohlcv_batch([], date(2025, 1, 6), date(2025, 1, 7))
+            s_no_bd = self.collector.prefetch_ohlcv_batch(["7203.T"], date(2025, 1, 1), date(2025, 1, 5))
+        mock_dl.assert_not_called()
+        self.assertEqual(s_empty["total"], 0)
+        self.assertEqual(s_no_bd["skipped"], 1)
+
+        # 3. _extract_symbol_df_from_download の level1 パス
+        level0_df = self._build_yf_multiindex_df({"130A.T": self._build_price_df([date(2025, 1, 6)])})
+        level1_df = level0_df.swaplevel(0, 1, axis=1)
+        extracted = self.collector._extract_symbol_df_from_download(level1_df, "130a.T", 2)
+        self.assertFalse(extracted.empty)
+        self.assertIn("Close", extracted.columns)
+
+        # 4. _normalize_date_column の UTC / 混合 TZ -> JST 正規化
+        tz_df = pd.DataFrame({
+            "date": [
+                pd.Timestamp("2025-01-05 16:00:00+00:00"),  # JST 2025-01-06 01:00
+                pd.Timestamp("2025-01-07 09:00:00+09:00"),  # JST 2025-01-07 09:00
+            ]
+        })
+        norm_tz = self.collector._normalize_date_column(tz_df)
+        self.assertEqual(list(norm_tz["date"]), [date(2025, 1, 6), date(2025, 1, 7)])
+
+        # 5. sym_start 降順ソートによるチャンク開始日最適化
+        # A(1111.T): 古いキャッシュ 1/6..1/8 -> tail_missing sym_start=1/6
+        # B(2222.T): 直近キャッシュ 1/6..1/22 -> tail_missing sym_start=1/15
+        # C(3333.T): 直近キャッシュ 1/6..1/23 -> tail_missing sym_start=1/16
+        self.collector.storage.save_parquet(self._build_price_df([date(2025, 1, 6), date(2025, 1, 8)]), "price/1111.T.parquet")
+        self.collector.storage.save_parquet(self._build_price_df([date(2025, 1, 6), date(2025, 1, 22)]), "price/2222.T.parquet")
+        self.collector.storage.save_parquet(self._build_price_df([date(2025, 1, 6), date(2025, 1, 23)]), "price/3333.T.parquet")
+
+        chunk_a = self._build_yf_multiindex_df({
+            "3333.T": self._build_price_df([date(2025, 1, 24)]),
+            "2222.T": self._build_price_df([date(2025, 1, 24)]),
+        })
+        chunk_b = self._build_yf_multiindex_df({
+            "1111.T": self._build_price_df([date(2025, 1, 24)]),
+        })
+        with patch("yfinance.download", side_effect=[chunk_a, chunk_b]) as mock_dl:
+            self.collector.prefetch_ohlcv_batch(
+                symbols=["1111.T", "2222.T", "3333.T"],
+                start_date=date(2025, 1, 6),
+                end_date=date(2025, 1, 24),
+                chunk_size=2,
+                precheck_market=False,
+            )
+        # 降順ソートにより [3333.T, 2222.T] が先頭チャンク (start=2025-01-15) で取得される
+        self.assertEqual(mock_dl.call_args_list[0].kwargs["tickers"], ["3333.T", "2222.T"])
+        self.assertEqual(mock_dl.call_args_list[0].kwargs["start"], "2025-01-15")
+        self.assertEqual(mock_dl.call_args_list[1].kwargs["tickers"], ["1111.T"])
+        self.assertEqual(mock_dl.call_args_list[1].kwargs["start"], "2025-01-06")
+
+        # 6. Parquet 読込失敗・保存失敗の銘柄別隔離
+        def load_side_effect(path):
+            if "BAD_READ" in path:
+                raise OSError("corrupt parquet")
+            return None
+
+        def save_side_effect(df, path):
+            if "BAD_SAVE" in path:
+                raise OSError("disk full")
+
+        dl_io = self._build_yf_multiindex_df({
+            "BAD_READ.T": self._build_price_df([date(2025, 1, 6)]),
+            "BAD_SAVE.T": self._build_price_df([date(2025, 1, 6)]),
+            "GOOD.T": self._build_price_df([date(2025, 1, 6)]),
+        })
+        with patch.object(self.collector.storage, "load_parquet", side_effect=load_side_effect), \
+             patch.object(self.collector.storage, "save_parquet", side_effect=save_side_effect), \
+             patch("yfinance.download", return_value=dl_io):
+            summary_io = self.collector.prefetch_ohlcv_batch(
+                symbols=["BAD_READ.T", "BAD_SAVE.T", "GOOD.T"],
+                start_date=date(2025, 1, 6),
+                end_date=date(2025, 1, 6),
+                precheck_market=False,
+            )
+        self.assertEqual(summary_io["batch_updated"], 2)  # BAD_READ.T と GOOD.T は保存成功
+        self.assertEqual(summary_io["failed"], 1)
+        self.assertEqual(summary_io["failed_symbols"], ["BAD_SAVE.T"])
 
 if __name__ == '__main__':
     unittest.main()

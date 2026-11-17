@@ -137,9 +137,9 @@ Project Atlas は、スイングトレード（数週間〜3ヶ月保有）向�
     - [x] `RankingGenerator.generate_strategy_rankings()` におけるルックアップ辞書の1回生成・使い回し
     - [x] `--mode evaluate` 時における全期間 OHLCV の一括読込と `ForwardReturnEvaluator.evaluate(..., ohlcv_map=...)` への共有（先読みバイアス防止の `as_of_date` スライス境界厳守）
 
-- [ ] **PR #2: `yfinance` 取得判定の適正化とチャンク並列バッチ取得 (`perf/batch-yfinance-and-fetch-check`)**
-    - [ ] 東証最新完了営業日のプリチェックおよび開始日休場マージン考慮による不要な `yfinance` 再通信の抑止
-    - [ ] `DataCollector.prefetch_ohlcv_batch()`（`yf.download(..., actions=True, threads=True, group_by="ticker")` のチャンク単位取得＋失敗ティッカー個別リトライ）の実装と `src/main.py` への統合
+- [x] **PR #2: `yfinance` 取得判定の適正化とチャンク並列バッチ取得 (`perf/batch-yfinance-and-fetch-check`)**
+    - [x] 東証最新完了営業日のプリチェックおよび開始日休場マージン考慮による不要な `yfinance` 再通信の抑止
+    - [x] `DataCollector.prefetch_ohlcv_batch()`（`yf.download(..., actions=True, threads=True, group_by="ticker")` のチャンク単位取得＋失敗ティッカー個別リトライ）の実装と `src/main.py` への統合
 
 - [ ] **PR #3: Parquet 読込・指標ベクトル化と最新日評価モード (`perf/vectorize-and-latest-only-eval`)**
     - [ ] `DataCollector.collect_ohlcv_data()` の列限定読込・`NaN` クレンジング・`iterrows()` 排除（`OhlcvModel.model_construct`）
@@ -157,6 +157,7 @@ Project Atlas は、スイングトレード（数週間〜3ヶ月保有）向�
 - [ ] フェーズ4 PR #1〜#4（銘柄評価高速化・スケーラビリティ改善）の順次実装・検証完了
 
 ## 5. 実行ログ (最新の作業のみ記載)
+- 2026/11/18: フェーズ4 PR #2（`perf/batch-yfinance-and-fetch-check`）を実施。標準ライブラリのみで東証営業日カレンダー（日本の祝日・振替休日・国民の休日・年末年始・JST 15:35 カットオフ判定）を提供する `src/data_collector/market_calendar.py` を新設し、`DataCollector` に開始日休場マージン考慮・`1306.T` 市場最新完了営業日プリチェック（TTL付きキャッシュ）・`yf.download(..., actions=True, threads=True, group_by="ticker")` によるチャンク単位並列取得＋欠損/失敗ティッカー個別リトライを行う `prefetch_ohlcv_batch()` を実装して `src/main.py` に統合。全テスト237件のパスおよび2段階レビュー（1次 `atlas-reviewer` 指摘修正後・2次 `gemini-4-argon-high` Approve）を完了。
 - 2026/11/17: フェーズ4 PR #1（`perf/eliminate-redundant-io-and-cache` 相当）を実施。`src/main.py` にフェーズ別時間計測（`timings_sec`・`elapsed_sec`）と `use_feature_cache: bool = False`（CLI `--use-feature-cache`）および `--mode evaluate` 時の全期間 OHLCV 一括取得・`ohlcv_map` 共有（`ForwardReturnEvaluator.compute_default_fetch_end` 共通化・先読みバイアス防止スライス）を実装し、`DataCollector.collect_financial_data()` の `latest_close` 引き渡しによる2回目 OHLCV 読込・通信廃止、`RankingGenerator.generate_strategy_rankings()` のルックアップ1回構築を実施。全テスト215件のパスおよび2段階レビュー（1次 `atlas-reviewer`・2次 `gemini-4-argon-high` Approve）を完了。
 - 2026/11/16: `feat/tune-screening-thresholds` を実施。代表32銘柄×16基準日（2025年4月〜2026年7月）のフォワードリターン検証に基づき `config/screening.yaml` をチューニング（過熱ボラ減点 `10.0→20.0`、ダブルトップ減点係数 `0.35→0.45` / 除外上限 `70.0→60.0`、ブレイクアウト出来高重み `0.25→0.35`、最低総合スコア `60.0→65.0`）。全体 +60営業日勝率が `64.8%→69.5%`、平均リターン `+14.29%→+16.36%`（ブレイクアウト型は `60.6%→69.6%`）へ改善し、全テスト205件パスを確認。
 - 2026/11/16: `feat/optimize-data-collector-and-master` を実施。`DataCollector` に IR BANK JSON のインメモリキャッシュ・ダウンロード失敗/破損JSONのネガティブキャッシュ・`timeout=15`・`allow_download` 制御・`as_of_date=None` 時フォールバック統一を実装し、`MasterManager` に JPX 東証上場銘柄一覧（`data_j.xlsx`）の標準ライブラリのみによる自動取得・解析・更新機能（更新日時優先解決、ふりがな `<rPh>` 除外、タイトル行/複数シート動的探索含む）を追加。`src/main.py` に `--update-master` / `--no-irbank-download` を統合し、全テスト205件パスおよび2段階レビュー（1次 `atlas-reviewer`・2次 `gemini-4-argon-high` Approve）を完了。

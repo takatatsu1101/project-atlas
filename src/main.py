@@ -11,6 +11,7 @@ from src.data_collector.collector import (
     collect_financial_data,
     collect_ohlcv_data,
     data_collector,
+    prefetch_ohlcv_batch,
 )
 from src.data_collector.master import MasterManager
 from src.evaluator.evaluator import ForwardReturnEvaluator
@@ -203,6 +204,20 @@ def run_full_pipeline(
     financial_map: Dict[str, FinancialModel] = {}
     eval_ohlcv_map: Dict[str, List[OhlcvModel]] = {}
     processed_symbols: List[str] = []
+
+    # 対象銘柄の OHLCV を事前にチャンク並列で一括プリフェッチ
+    if target_symbols:
+        t_prefetch = time.perf_counter()
+        if fetch_as_of is not None:
+            prefetch_ohlcv_batch(
+                target_symbols,
+                effective_start,
+                fetch_end,
+                as_of_date=fetch_as_of,
+            )
+        else:
+            prefetch_ohlcv_batch(target_symbols, effective_start, fetch_end)
+        timings_sec["ohlcv_collection"] += time.perf_counter() - t_prefetch
 
     for symbol in target_symbols:
         print(f"\n--- [{symbol}] 処理開始 ---")

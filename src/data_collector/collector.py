@@ -5,7 +5,7 @@ import time
 import re
 import calendar
 from datetime import date, datetime, timedelta
-from typing import Any, List, Dict, Optional, Tuple
+from typing import Any, List, Dict, Optional, Sequence, Tuple
 import pandas as pd
 import yfinance as yf
 import requests
@@ -15,6 +15,10 @@ from src.config.settings import load_settings
 from src.common.logger import get_logger
 from src.common.exceptions import DataCollectionError
 from src.common.storage import StorageManager
+from src.data_collector.market_calendar import (
+    get_first_trading_day_on_or_after,
+    get_latest_completed_trading_day,
+)
 
 logger = get_logger("DataCollector")
 
@@ -40,6 +44,11 @@ class DataCollector:
         # IR BANK JSON のインメモリキャッシュとダウンロード失敗のネガティブキャッシュ
         self._irbank_json_cache: Dict[str, Dict] = {}
         self._irbank_failed_downloads: set[str] = set()
+        # 市場最新完了営業日キャッシュ（(スケジュール終了日, ベンチマーク銘柄) -> (解決済み実市場最新日, 取得時刻)）
+        self._market_latest_date_cache: Dict[Tuple[date, str], Tuple[date, float]] = {}
+        self._market_latest_cache_ttl_sec: float = 300.0
+        # バッチプリフェッチで取得試行済みの期間（symbol -> (fetch_start, fetch_end)）
+        self._attempted_fetch_ranges: Dict[str, Tuple[date, date]] = {}
 
     def _parse_symbol(self, symbol: str) -> str:
         """
@@ -50,29 +59,648 @@ class DataCollector:
             return match.group(1).upper()
         return symbol
 
+    @staticmethod
+    def _normalize_date_column(df: pd.DataFrame) -> pd.DataFrame:
+        """DataFrame の date 列を datetime.date 型へ正規化する（TZ付きは JST へ変換）。"""
+        if df is None or df.empty or "date" not in df.columns:
+            return df
+        result = df.copy()
+        date_series = result["date"]
+
+        if pd.api.types.is_datetime64_any_dtype(date_series):
+            if getattr(date_series.dt, "tz", None) is not None:
+                date_series = date_series.dt.tz_convert("Asia/Tokyo").dt.tz_localize(None)
+            result["date"] = date_series.dt.date
+            return result
+
+        orig_valid_count = int(date_series.notna().sum())
+        try:
+            parsed = pd.to_datetime(date_series, errors="coerce")
+        except (TypeError, ValueError):
+            parsed = None
+
+        if (
+            parsed is not None
+            and pd.api.types.is_datetime64_any_dtype(parsed)
+            and int(parsed.notna().sum()) == orig_valid_count
+        ):
+            if getattr(parsed.dt, "tz", None) is not None:
+                parsed = parsed.dt.tz_convert("Asia/Tokyo").dt.tz_localize(None)
+            result["date"] = parsed.dt.date
+            return result
+
+        # 混合TZ・naive/aware混在時は pd.to_datetime が異なるTZ要素を NaT 化するため要素単位で安全変換する
+        def _parse_single_date(val: Any) -> Optional[date]:
+            if pd.isna(val):
+                return None
+            if isinstance(val, datetime):
+                if val.tzinfo is not None and val.utcoffset() is not None:
+                    return pd.Timestamp(val).tz_convert("Asia/Tokyo").date()
+                return val.date()
+            if isinstance(val, date):
+                return val
+            try:
+                ts = pd.Timestamp(val)
+            except Exception:
+                return None
+            if pd.isna(ts):
+                return None
+            if ts.tzinfo is not None:
+                return ts.tz_convert("Asia/Tokyo").date()
+            return ts.date()
+
+        result["date"] = date_series.map(_parse_single_date)
+        return result
+
+    @staticmethod
+    def _finalize_ohlcv_columns(df: pd.DataFrame) -> pd.DataFrame:
+        """OHLCV DataFrame の列構成（標準8列）と数値型（volume int64・actions float64）を統一する。"""
+        result = df.copy()
+        if "volume" not in result.columns:
+            result["volume"] = 0
+        result["volume"] = (
+            pd.to_numeric(result["volume"], errors="coerce").fillna(0).round().astype("int64")
+        )
+
+        standard_cols = ["date", "open", "high", "low", "close", "volume"]
+        for action_col in ("dividends", "stock_splits"):
+            if action_col in result.columns:
+                result[action_col] = pd.to_numeric(result[action_col], errors="coerce").fillna(0.0)
+                standard_cols.append(action_col)
+
+        existing_cols = [col for col in standard_cols if col in result.columns]
+        return result[existing_cols]
+
+    @classmethod
+    def _normalize_ohlcv_df(
+        cls,
+        df: pd.DataFrame,
+        max_date: Optional[date] = None,
+    ) -> pd.DataFrame:
+        """OHLCV DataFrame の列名・日付型・必須OHLC列・欠損値・上限日付を正規化する。"""
+        if df is None or df.empty:
+            return pd.DataFrame()
+
+        result = df.copy()
+        cols_lower = [str(col).lower().replace(" ", "_") for col in result.columns]
+        if "date" not in cols_lower:
+            result = result.reset_index()
+            result.columns = [str(col).lower().replace(" ", "_") for col in result.columns]
+            if "date" not in result.columns and "index" in result.columns:
+                result = result.rename(columns={"index": "date"})
+            elif "date" not in result.columns and "datetime" in result.columns:
+                result = result.rename(columns={"datetime": "date"})
+        else:
+            result.columns = cols_lower
+
+        if "date" not in result.columns:
+            return pd.DataFrame()
+
+        result = cls._normalize_date_column(result)
+        result = result[result["date"].notna()]
+        if result.empty:
+            return pd.DataFrame()
+
+        required_price_cols = ["open", "high", "low", "close"]
+        if not all(col in result.columns for col in required_price_cols):
+            return pd.DataFrame()
+
+        for col in required_price_cols:
+            result[col] = pd.to_numeric(result[col], errors="coerce")
+        result = result.dropna(subset=required_price_cols)
+        if result.empty:
+            return pd.DataFrame()
+
+        if max_date is not None:
+            result = result[result["date"] <= max_date]
+            if result.empty:
+                return pd.DataFrame()
+
+        result = cls._finalize_ohlcv_columns(result)
+        return result.reset_index(drop=True)
+
+    def _fetch_ticker_history_df(
+        self,
+        symbol: str,
+        start_date: date,
+        end_date: date,
+    ) -> pd.DataFrame:
+        """yf.Ticker.history で期間データを取得し、正規化済み DataFrame を返す共通ヘルパー。"""
+        ticker = yf.Ticker(symbol)
+        # yfinance の end は exclusive のため +1 日して当日足落ちを防ぐ
+        yf_end = (end_date + timedelta(days=1)).strftime("%Y-%m-%d")
+        df = ticker.history(start=start_date.strftime("%Y-%m-%d"), end=yf_end)
+        if df is None or df.empty:
+            return pd.DataFrame()
+        return self._normalize_ohlcv_df(df, max_date=end_date)
+
     def _get_ohlcv_from_yfinance(self, symbol: str, start_date: date, end_date: date) -> pd.DataFrame:
         """
         Yahoo FinanceからOHLCVデータを取得する。
         """
         logger.info(f"Yahoo Financeから {symbol} のOHLCVデータを取得中... ({start_date} - {end_date})")
         try:
-            ticker = yf.Ticker(symbol)
-            df = ticker.history(start=start_date.strftime("%Y-%m-%d"), end=end_date.strftime("%Y-%m-%d"))
-            if df.empty:
+            norm_df = self._fetch_ticker_history_df(symbol, start_date, end_date)
+            if norm_df.empty:
                 logger.warning(f"{symbol} のOHLCVデータが見つかりませんでした。")
                 return pd.DataFrame()
-            df = df.reset_index()
-            df.columns = [col.lower().replace(' ', '_') for col in df.columns]
-            
-            if 'date' in df.columns:
-                if not pd.api.types.is_datetime64_any_dtype(df["date"]):
-                    df["date"] = pd.to_datetime(df["date"])
-                df["date"] = df["date"].dt.tz_localize(None) if df["date"].dt.tz is not None else df["date"]
-                df["date"] = df["date"].dt.date # 時刻情報を削除
-            return df
+            return norm_df
         except Exception as e:
             logger.error(f"{symbol} のOHLCVデータ取得中にエラーが発生しました: {e}")
             raise DataCollectionError(f"OHLCV data collection failed for {symbol}: {e}") from e
+
+    def _fetch_benchmark_latest_date(
+        self,
+        benchmark_symbol: str,
+        start_date: date,
+        end_date: date,
+    ) -> Optional[date]:
+        """ベンチマーク銘柄の直近バーから実際の市場最新完了営業日を取得する。"""
+        try:
+            norm_df = self._fetch_ticker_history_df(benchmark_symbol, start_date, end_date)
+            if norm_df.empty or "date" not in norm_df.columns:
+                return None
+            latest = norm_df["date"].max()
+            return latest.date() if isinstance(latest, datetime) else latest
+        except Exception as e:
+            logger.warning(f"市場最新営業日のプリチェック ({benchmark_symbol}) に失敗しました: {e}")
+            return None
+
+    def _get_cached_market_latest_date(
+        self,
+        schedule_end: date,
+        benchmark_symbol: str = "1306.T",
+    ) -> Optional[date]:
+        """TTL を考慮してキャッシュ済みの市場最新完了営業日を返す（期限切れ時は None）。"""
+        entry = self._market_latest_date_cache.get((schedule_end, benchmark_symbol))
+        if entry is None:
+            return None
+        resolved_date, cached_at = entry
+        if resolved_date < schedule_end:
+            if (time.monotonic() - cached_at) > self._market_latest_cache_ttl_sec:
+                return None
+        return resolved_date
+
+    def resolve_latest_completed_trading_day(
+        self,
+        ref_date: Optional[date] = None,
+        benchmark_symbol: str = "1306.T",
+        use_remote_precheck: bool = True,
+    ) -> date:
+        """スケジュール基準の最新完了営業日を解決し、必要に応じベンチマーク銘柄で実市場日を確認する。"""
+        schedule_end = get_latest_completed_trading_day(ref_date=ref_date)
+        cached_resolved = self._get_cached_market_latest_date(
+            schedule_end, benchmark_symbol=benchmark_symbol
+        )
+        if cached_resolved is not None:
+            return cached_resolved
+
+        if not use_remote_precheck:
+            return schedule_end
+
+        actual_latest = self._fetch_benchmark_latest_date(
+            benchmark_symbol=benchmark_symbol,
+            start_date=schedule_end - timedelta(days=14),
+            end_date=schedule_end,
+        )
+        if actual_latest is not None:
+            resolved = min(schedule_end, actual_latest)
+            self._market_latest_date_cache[(schedule_end, benchmark_symbol)] = (
+                resolved,
+                time.monotonic(),
+            )
+            return resolved
+
+        return schedule_end
+
+    def _resolve_expected_range(
+        self,
+        req_start: date,
+        req_end: date,
+        market_latest_date: Optional[date] = None,
+        benchmark_symbol: str = "1306.T",
+    ) -> Tuple[date, date]:
+        """要求期間の期待営業日開始日・終了日を算出する。"""
+        expected_start = get_first_trading_day_on_or_after(req_start)
+        expected_end = get_latest_completed_trading_day(ref_date=req_end)
+        resolved_market_latest = (
+            market_latest_date
+            if market_latest_date is not None
+            else self._get_cached_market_latest_date(expected_end, benchmark_symbol=benchmark_symbol)
+        )
+        if resolved_market_latest is not None:
+            expected_end = min(expected_end, resolved_market_latest)
+        return expected_start, expected_end
+
+    def _is_cache_sufficient(
+        self,
+        cached_df: Optional[pd.DataFrame],
+        req_start: date,
+        req_end: date,
+        market_latest_date: Optional[date] = None,
+    ) -> bool:
+        """ローカルキャッシュが要求期間の完了営業日を十分にカバーしているかを判定する。"""
+        if cached_df is None or cached_df.empty or "date" not in cached_df.columns:
+            return False
+
+        normalized_df = self._normalize_date_column(cached_df)
+        normalized_df = normalized_df[normalized_df["date"].notna()]
+        if normalized_df.empty:
+            return False
+
+        expected_start, expected_end = self._resolve_expected_range(
+            req_start, req_end, market_latest_date=market_latest_date
+        )
+        if expected_start > expected_end:
+            return True
+
+        min_date = normalized_df["date"].min()
+        max_date = normalized_df["date"].max()
+        return bool(min_date <= expected_start and max_date >= expected_end)
+
+    def _merge_and_save_ohlcv(
+        self,
+        symbol: str,
+        cached_df: Optional[pd.DataFrame],
+        new_df: pd.DataFrame,
+    ) -> pd.DataFrame:
+        """既存キャッシュと新規取得 OHLCV を日付重複排除・ソート・型統一して Parquet 保存する。"""
+        if cached_df is not None and not cached_df.empty:
+            combined_df = pd.concat([cached_df, new_df], ignore_index=True).drop_duplicates(
+                subset=["date"], keep="last"
+            )
+            combined_df = combined_df.sort_values("date").reset_index(drop=True)
+        else:
+            combined_df = new_df.sort_values("date").reset_index(drop=True)
+
+        combined_df = self._finalize_ohlcv_columns(combined_df)
+        self.storage.save_parquet(combined_df, f"price/{symbol}.parquet")
+        return combined_df
+
+    @staticmethod
+    def _extract_symbol_df_from_download(
+        raw_df: Optional[pd.DataFrame],
+        symbol: str,
+        chunk_len: int,
+    ) -> pd.DataFrame:
+        """yf.download の戻り値から指定銘柄の DataFrame を抽出する。"""
+        if raw_df is None or raw_df.empty:
+            return pd.DataFrame()
+
+        if isinstance(raw_df.columns, pd.MultiIndex):
+            level0 = raw_df.columns.get_level_values(0)
+            if symbol in level0:
+                return raw_df[symbol].copy()
+            upper_map0 = {str(k).upper(): k for k in dict.fromkeys(level0)}
+            if symbol.upper() in upper_map0:
+                return raw_df[upper_map0[symbol.upper()]].copy()
+
+            if raw_df.columns.nlevels > 1:
+                level1 = raw_df.columns.get_level_values(1)
+                if symbol in level1:
+                    return raw_df.xs(symbol, axis=1, level=1).copy()
+                upper_map1 = {str(k).upper(): k for k in dict.fromkeys(level1)}
+                if symbol.upper() in upper_map1:
+                    return raw_df.xs(upper_map1[symbol.upper()], axis=1, level=1).copy()
+            return pd.DataFrame()
+
+        if chunk_len == 1:
+            return raw_df.copy()
+        return pd.DataFrame()
+
+    @staticmethod
+    def _build_prefetch_summary(
+        total: int,
+        skipped: int,
+        batch_updated: int = 0,
+        retried_updated: int = 0,
+        failed_symbols: Optional[List[str]] = None,
+        market_latest_date: Optional[date] = None,
+    ) -> Dict[str, Any]:
+        """バッチプリフェッチの結果サマリー辞書を構築する。"""
+        failed_list = list(failed_symbols or [])
+        return {
+            "total": total,
+            "skipped": skipped,
+            "batch_updated": batch_updated,
+            "retried_updated": retried_updated,
+            "failed": len(failed_list),
+            "failed_symbols": failed_list,
+            "market_latest_date": market_latest_date,
+        }
+
+    def _classify_cached_symbols(
+        self,
+        symbols: Sequence[str],
+        schedule_expected_start: date,
+        schedule_expected_end: date,
+    ) -> Tuple[
+        Dict[str, Optional[pd.DataFrame]],
+        Dict[str, Tuple[date, date]],
+        List[str],
+        List[str],
+        List[str],
+    ]:
+        """各銘柄のローカル Parquet を読み込み、スキップ・末尾不足候補・全取得に分類する。"""
+        cached_dfs: Dict[str, Optional[pd.DataFrame]] = {}
+        cached_ranges: Dict[str, Tuple[date, date]] = {}
+        skipped_symbols: List[str] = []
+        tail_missing_candidates: List[str] = []
+        head_or_full_missing: List[str] = []
+
+        for symbol in symbols:
+            try:
+                df = self.storage.load_parquet(f"price/{symbol}.parquet")
+            except Exception as e:
+                logger.warning(
+                    f"{symbol} のParquetキャッシュ読込に失敗したためキャッシュなしとして扱います: {e}"
+                )
+                df = None
+
+            if df is not None and not df.empty and "date" in df.columns:
+                df = self._normalize_date_column(df)
+                df = df[df["date"].notna()]
+            if df is None or df.empty or "date" not in df.columns:
+                cached_dfs[symbol] = None
+                head_or_full_missing.append(symbol)
+                continue
+
+            cached_dfs[symbol] = df
+            min_d = df["date"].min()
+            max_d = df["date"].max()
+            cached_ranges[symbol] = (min_d, max_d)
+
+            start_ok = min_d <= schedule_expected_start
+            end_ok = max_d >= schedule_expected_end
+            if start_ok and end_ok:
+                skipped_symbols.append(symbol)
+            elif start_ok and not end_ok:
+                tail_missing_candidates.append(symbol)
+            else:
+                head_or_full_missing.append(symbol)
+
+        return (
+            cached_dfs,
+            cached_ranges,
+            skipped_symbols,
+            tail_missing_candidates,
+            head_or_full_missing,
+        )
+
+    def _build_prefetch_groups(
+        self,
+        req_start: date,
+        req_end_raw: date,
+        cached_ranges: Dict[str, Tuple[date, date]],
+        tail_missing_symbols: Sequence[str],
+        head_or_full_missing: Sequence[str],
+    ) -> List[Tuple[str, Dict[str, Tuple[date, date]]]]:
+        """不足種別ごとに銘柄別フェッチ範囲を算出し、取得グループリストを構築する。"""
+        fetch_groups: List[Tuple[str, Dict[str, Tuple[date, date]]]] = []
+        if tail_missing_symbols:
+            tail_ranges: Dict[str, Tuple[date, date]] = {}
+            for sym in tail_missing_symbols:
+                min_d, max_d = cached_ranges[sym]
+                # req_start > max_d の場合でも既存キャッシュ min_d..max_d との連続性を保ち中抜けを防ぐ
+                sym_start = max(min(req_start, min_d), max_d - timedelta(days=7))
+                sym_end = max(req_end_raw, max_d)
+                tail_ranges[sym] = (sym_start, sym_end)
+            fetch_groups.append(("tail_missing", tail_ranges))
+
+        if head_or_full_missing:
+            full_ranges: Dict[str, Tuple[date, date]] = {}
+            for sym in head_or_full_missing:
+                if sym in cached_ranges:
+                    min_d, max_d = cached_ranges[sym]
+                    sym_start = min(req_start, min_d)
+                    sym_end = max(req_end_raw, max_d)
+                else:
+                    sym_start = req_start
+                    sym_end = req_end_raw
+                full_ranges[sym] = (sym_start, sym_end)
+            fetch_groups.append(("full_or_head_missing", full_ranges))
+
+        return fetch_groups
+
+    def _execute_prefetch_group(
+        self,
+        group_name: str,
+        sym_ranges: Dict[str, Tuple[date, date]],
+        cached_dfs: Dict[str, Optional[pd.DataFrame]],
+        chunk_size: int,
+        failed_symbols: List[str],
+    ) -> Tuple[int, int]:
+        """取得グループを sym_start 降順ソートしてチャンク分割し、バッチ取得・個別リトライを実行する。"""
+        sorted_symbols = sorted(
+            sym_ranges.keys(),
+            key=lambda s: sym_ranges[s][0],
+            reverse=True,
+        )
+        group_min_start = min(r[0] for r in sym_ranges.values())
+        group_max_end = max(r[1] for r in sym_ranges.values())
+        logger.info(
+            f"OHLCVバッチ取得開始 [{group_name}]: {len(sorted_symbols)}銘柄 "
+            f"({group_min_start} - {group_max_end}, chunk_size={chunk_size})"
+        )
+
+        batch_updated = 0
+        retried_updated = 0
+        retry_targets: List[str] = []
+        attempted_chunk_ranges: Dict[str, Tuple[date, date]] = {}
+
+        for idx in range(0, len(sorted_symbols), chunk_size):
+            chunk = sorted_symbols[idx : idx + chunk_size]
+            chunk_start = min(sym_ranges[s][0] for s in chunk)
+            chunk_end = max(sym_ranges[s][1] for s in chunk)
+            yf_end = (chunk_end + timedelta(days=1)).strftime("%Y-%m-%d")
+
+            try:
+                raw_df = yf.download(
+                    tickers=chunk,
+                    start=chunk_start.strftime("%Y-%m-%d"),
+                    end=yf_end,
+                    actions=True,
+                    threads=True,
+                    group_by="ticker",
+                    progress=False,
+                )
+            except Exception as e:
+                logger.warning(
+                    f"yf.download チャンク取得に失敗したため個別リトライへ回します ({len(chunk)}銘柄): {e}"
+                )
+                retry_targets.extend(chunk)
+                continue
+
+            if raw_df is None or raw_df.empty:
+                logger.warning(
+                    f"yf.download の戻り値が空のため個別リトライへ回します ({len(chunk)}銘柄)"
+                )
+                retry_targets.extend(chunk)
+                continue
+
+            for sym in chunk:
+                sub_df = self._extract_symbol_df_from_download(raw_df, sym, len(chunk))
+                norm_df = self._normalize_ohlcv_df(sub_df, max_date=chunk_end)
+                if not norm_df.empty and "date" in norm_df.columns:
+                    norm_df = norm_df[
+                        (norm_df["date"] >= chunk_start) & (norm_df["date"] <= chunk_end)
+                    ]
+                if norm_df.empty:
+                    retry_targets.append(sym)
+                    continue
+
+                attempted_chunk_ranges[sym] = (chunk_start, chunk_end)
+                try:
+                    self._merge_and_save_ohlcv(sym, cached_dfs.get(sym), norm_df)
+                    batch_updated += 1
+                except Exception as e:
+                    logger.warning(f"{sym} のOHLCV Parquet保存に失敗しました: {e}")
+                    failed_symbols.append(sym)
+
+        # バッチ成功銘柄には実際に取得したチャンク範囲を記録する
+        for sym, chunk_range in attempted_chunk_ranges.items():
+            self._attempted_fetch_ranges[sym] = chunk_range
+
+        # 欠損・失敗銘柄を1銘柄ずつ個別リトライし、実際に試みた sym_ranges[sym] を記録する
+        for sym in retry_targets:
+            sym_start, sym_end = sym_ranges[sym]
+            try:
+                retry_df = self._get_ohlcv_from_yfinance(sym, sym_start, sym_end)
+                if retry_df is not None and not retry_df.empty:
+                    self._merge_and_save_ohlcv(sym, cached_dfs.get(sym), retry_df)
+                    retried_updated += 1
+                else:
+                    logger.warning(f"個別リトライでも {sym} のOHLCVデータが取得できませんでした。")
+                    failed_symbols.append(sym)
+            except Exception as e:
+                logger.warning(f"個別リトライ中に {sym} の取得または保存が失敗しました: {e}")
+                failed_symbols.append(sym)
+            finally:
+                self._attempted_fetch_ranges[sym] = (sym_start, sym_end)
+
+        return batch_updated, retried_updated
+
+    def prefetch_ohlcv_batch(
+        self,
+        symbols: Sequence[str],
+        start_date: date,
+        end_date: date,
+        as_of_date: Optional[date] = None,
+        chunk_size: int = 100,
+        precheck_market: bool = True,
+        benchmark_symbol: str = "1306.T",
+    ) -> Dict[str, Any]:
+        """複数銘柄の OHLCV データをキャッシュ判定・市場プリチェック付きでチャンク並列バッチ取得する。"""
+        if chunk_size <= 0:
+            raise ValueError(f"chunk_size は 1 以上の整数を指定してください: {chunk_size}")
+
+        req_start = start_date.date() if isinstance(start_date, datetime) else start_date
+        req_end_raw = end_date.date() if isinstance(end_date, datetime) else end_date
+        as_of = as_of_date.date() if isinstance(as_of_date, datetime) else as_of_date
+        effective_end = min(req_end_raw, as_of) if as_of is not None else req_end_raw
+
+        unique_symbols = list(dict.fromkeys(s for s in symbols if s))
+        if not unique_symbols or req_start > effective_end:
+            summary = self._build_prefetch_summary(
+                total=len(unique_symbols),
+                skipped=len(unique_symbols),
+            )
+            logger.info(
+                f"OHLCVバッチプリフェッチ完了（早期終了）: 対象={summary['total']}件, スキップ={summary['skipped']}件"
+            )
+            return summary
+
+        schedule_expected_start = get_first_trading_day_on_or_after(req_start)
+        schedule_expected_end = get_latest_completed_trading_day(ref_date=effective_end)
+        if schedule_expected_start > schedule_expected_end:
+            summary = self._build_prefetch_summary(
+                total=len(unique_symbols),
+                skipped=len(unique_symbols),
+            )
+            logger.info(
+                f"OHLCVバッチプリフェッチ完了（対象期間内に完了営業日なし）: "
+                f"対象={summary['total']}件, スキップ={summary['skipped']}件"
+            )
+            return summary
+
+        # 1. 全対象銘柄のローカルキャッシュをロードしてスケジュール基準で分類
+        (
+            cached_dfs,
+            cached_ranges,
+            skipped_symbols,
+            tail_missing_candidates,
+            head_or_full_missing,
+        ) = self._classify_cached_symbols(
+            unique_symbols,
+            schedule_expected_start=schedule_expected_start,
+            schedule_expected_end=schedule_expected_end,
+        )
+
+        # 2. キャッシュありで end_ok=False の銘柄がある場合のみベンチマーク銘柄で市場最新日を1回プリチェック
+        market_latest_date: Optional[date] = None
+        has_cached_end_missing = any(
+            sym in cached_ranges and cached_ranges[sym][1] < schedule_expected_end
+            for sym in (tail_missing_candidates + head_or_full_missing)
+        )
+        if precheck_market and has_cached_end_missing:
+            market_latest_date = self.resolve_latest_completed_trading_day(
+                ref_date=effective_end,
+                benchmark_symbol=benchmark_symbol,
+                use_remote_precheck=True,
+            )
+            effective_expected_end = min(schedule_expected_end, market_latest_date)
+            remaining_tail: List[str] = []
+            for sym in tail_missing_candidates:
+                if (
+                    schedule_expected_start > effective_expected_end
+                    or cached_ranges[sym][1] >= effective_expected_end
+                ):
+                    skipped_symbols.append(sym)
+                else:
+                    remaining_tail.append(sym)
+            tail_missing_symbols = remaining_tail
+        else:
+            tail_missing_symbols = tail_missing_candidates
+
+        # 3. 取得グループ化（末尾不足グループ / 先頭不足・新規グループ）
+        fetch_groups = self._build_prefetch_groups(
+            req_start=req_start,
+            req_end_raw=req_end_raw,
+            cached_ranges=cached_ranges,
+            tail_missing_symbols=tail_missing_symbols,
+            head_or_full_missing=head_or_full_missing,
+        )
+
+        # 4. グループごとにチャンク並列バッチ取得と失敗分の個別リトライを実行
+        batch_updated = 0
+        retried_updated = 0
+        failed_symbols: List[str] = []
+        for group_name, sym_ranges in fetch_groups:
+            g_batch, g_retry = self._execute_prefetch_group(
+                group_name=group_name,
+                sym_ranges=sym_ranges,
+                cached_dfs=cached_dfs,
+                chunk_size=chunk_size,
+                failed_symbols=failed_symbols,
+            )
+            batch_updated += g_batch
+            retried_updated += g_retry
+
+        summary = self._build_prefetch_summary(
+            total=len(unique_symbols),
+            skipped=len(skipped_symbols),
+            batch_updated=batch_updated,
+            retried_updated=retried_updated,
+            failed_symbols=failed_symbols,
+            market_latest_date=market_latest_date,
+        )
+        logger.info(
+            f"OHLCVバッチプリフェッチ完了: 対象={summary['total']}件, "
+            f"スキップ={summary['skipped']}件, バッチ更新={summary['batch_updated']}件, "
+            f"個別リトライ更新={summary['retried_updated']}件, 失敗={summary['failed']}件, "
+            f"市場最新完了営業日={market_latest_date}"
+        )
+        return summary
 
     def collect_ohlcv_data(
         self,
@@ -85,73 +713,84 @@ class DataCollector:
         指定期間のOHLCVデータを収集し、Parquet永続化・差分更新を行い、データを返す。
         as_of_date が指定された場合は、その日付以降のデータを含めない（先読みバイアス防止）。
         """
-        effective_end = min(end_date, as_of_date) if as_of_date is not None else end_date
-        if start_date > effective_end:
+        req_start = start_date.date() if isinstance(start_date, datetime) else start_date
+        req_end_raw = end_date.date() if isinstance(end_date, datetime) else end_date
+        as_of = as_of_date.date() if isinstance(as_of_date, datetime) else as_of_date
+        effective_end = min(req_end_raw, as_of) if as_of is not None else req_end_raw
+        if req_start > effective_end:
             return []
 
-        req_start = start_date
         req_end = effective_end
-        fetch_start = start_date
-        fetch_end = end_date
+        fetch_start = req_start
+        fetch_end = req_end_raw
 
         parquet_path = f"price/{symbol}.parquet"
 
         # 1. 既存のParquetデータをロード
         cached_df = self.storage.load_parquet(parquet_path)
+        if cached_df is not None and not cached_df.empty and "date" in cached_df.columns:
+            cached_df = self._normalize_date_column(cached_df)
+            cached_df = cached_df[cached_df["date"].notna()]
 
         need_fetch = True
-        if cached_df is not None and not cached_df.empty:
-            if 'date' in cached_df.columns:
-                if not pd.api.types.is_datetime64_any_dtype(cached_df["date"]):
-                    cached_df["date"] = pd.to_datetime(cached_df["date"])
-                cached_df["date"] = cached_df["date"].dt.tz_localize(None) if cached_df["date"].dt.tz is not None else cached_df["date"]
-                cached_df["date"] = cached_df["date"].dt.date
-
-                min_date = cached_df['date'].min()
-                max_date = cached_df['date'].max()
-
-                # キャッシュが要求期間を完全にカバーしていれば再取得不要
-                if min_date <= req_start and max_date >= req_end:
+        if self._is_cache_sufficient(cached_df, req_start, req_end):
+            need_fetch = False
+            logger.info(f"{symbol} のOHLCVデータをParquetストレージからロードしました。")
+        else:
+            expected_start, expected_end = self._resolve_expected_range(req_start, req_end)
+            attempted = self._attempted_fetch_ranges.get(symbol)
+            if attempted is not None:
+                att_start, att_end = attempted
+                start_covered = att_start <= expected_start
+                if (
+                    not start_covered
+                    and cached_df is not None
+                    and not cached_df.empty
+                    and "date" in cached_df.columns
+                ):
+                    if cached_df["date"].min() <= expected_start and att_start <= cached_df["date"].max():
+                        start_covered = True
+                if start_covered and att_end >= expected_end:
                     need_fetch = False
-                    logger.info(f"{symbol} のOHLCVデータをParquetストレージからロードしました。")
-                else:
-                    # 不足分がある場合は期間を拡張して再取得しマージ（キャッシュの中抜け防止のため as_of_date で切り詰めない）
-                    fetch_start = min(start_date, min_date)
-                    fetch_end = max(end_date, max_date)
+                    logger.info(f"{symbol} はバッチ取得試行済みのため再通信をスキップします。")
+
+            if need_fetch and cached_df is not None and not cached_df.empty and "date" in cached_df.columns:
+                min_date = cached_df["date"].min()
+                max_date = cached_df["date"].max()
+                # 不足分がある場合は期間を拡張して再取得しマージ（キャッシュの中抜け防止のため as_of_date で切り詰めない）
+                fetch_start = min(req_start, min_date)
+                fetch_end = max(req_end_raw, max_date)
 
         if need_fetch:
             new_df = self._get_ohlcv_from_yfinance(symbol, fetch_start, fetch_end)
             if new_df.empty:
                 if cached_df is not None and not cached_df.empty:
-                    df_filtered = cached_df[(cached_df['date'] >= req_start) & (cached_df['date'] <= req_end)]
+                    df_filtered = cached_df[(cached_df["date"] >= req_start) & (cached_df["date"] <= req_end)]
                 else:
                     return []
             else:
-                if cached_df is not None and not cached_df.empty:
-                    # 既存データと新着データを結合し、日付で重複排除（新着優先）
-                    combined_df = pd.concat([cached_df, new_df]).drop_duplicates(subset=['date'], keep='last')
-                    combined_df = combined_df.sort_values('date').reset_index(drop=True)
-                else:
-                    combined_df = new_df.sort_values('date').reset_index(drop=True)
-
-                # Parquetとして保存
-                self.storage.save_parquet(combined_df, parquet_path)
-                cached_df = combined_df
-
-            df_filtered = cached_df[(cached_df['date'] >= req_start) & (cached_df['date'] <= req_end)]
+                if "date" in new_df.columns:
+                    new_df = self._normalize_date_column(new_df)
+                cached_df = self._merge_and_save_ohlcv(symbol, cached_df, new_df)
+                df_filtered = cached_df[(cached_df["date"] >= req_start) & (cached_df["date"] <= req_end)]
         else:
-            df_filtered = cached_df[(cached_df['date'] >= req_start) & (cached_df['date'] <= req_end)]
+            if cached_df is None or cached_df.empty or "date" not in cached_df.columns:
+                return []
+            df_filtered = cached_df[(cached_df["date"] >= req_start) & (cached_df["date"] <= req_end)]
+
+        if df_filtered is None or df_filtered.empty:
+            return []
 
         ohlcv_data = []
         for _, row in df_filtered.iterrows():
             ohlcv_data.append(OhlcvModel(
                 symbol=symbol,
-                date=row['date'],
-                open=row['open'],
-                high=row['high'],
-                low=row['low'],
-                close=row['close'],
-                volume=row['volume']
+                date=row["date"],
+                open=row["open"],
+                high=row["high"],
+                low=row["low"],
+                close=row["close"],
+                volume=row["volume"]
             ))
         return ohlcv_data
 
@@ -571,6 +1210,27 @@ def collect_ohlcv_data(
     if as_of_date is None:
         return data_collector.collect_ohlcv_data(symbol, start_date, end_date)
     return data_collector.collect_ohlcv_data(symbol, start_date, end_date, as_of_date=as_of_date)
+
+
+def prefetch_ohlcv_batch(
+    symbols: Sequence[str],
+    start_date: date,
+    end_date: date,
+    as_of_date: Optional[date] = None,
+    chunk_size: int = 100,
+    precheck_market: bool = True,
+    benchmark_symbol: str = "1306.T",
+) -> Dict[str, Any]:
+    """複数銘柄の OHLCV データを事前にバッチ取得してローカルキャッシュを更新する。"""
+    return data_collector.prefetch_ohlcv_batch(
+        symbols=symbols,
+        start_date=start_date,
+        end_date=end_date,
+        as_of_date=as_of_date,
+        chunk_size=chunk_size,
+        precheck_market=precheck_market,
+        benchmark_symbol=benchmark_symbol,
+    )
 
 
 def collect_financial_data(
