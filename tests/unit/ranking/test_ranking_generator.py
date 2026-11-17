@@ -1,5 +1,6 @@
 import unittest
 from datetime import date
+from unittest.mock import patch
 
 from src.model.data_models import (
     FeatureResultModel,
@@ -316,6 +317,121 @@ class TestRankingGenerator(unittest.TestCase):
         self.assertEqual(by_symbol["6758"].feature_results[0].feature_id, "F_6758_TICKER")
         self.assertEqual(by_symbol["6758"].pattern_results[0].pattern_id, "R001_DoubleBottom")
         self.assertEqual(by_symbol["9984.T"].feature_results[0].feature_id, "F_9984_EXACT")
+
+    def test_generate_strategy_rankings_builds_lookups_once_and_matches_single_calls(self):
+        """generate_strategy_rankings はルックアップ構築を1回のみ行い、個別 generate_ranking と同一結果を返す"""
+        scores = [
+            ScoreResultModel(
+                symbol="7203.T",
+                date=self.target_date,
+                total_score=85.0,
+                strategy_type="pullback",
+                sub_scores={"pullback_strategy_score": 85.0, "trend_env_score": 80.0},
+            ),
+            ScoreResultModel(
+                symbol="6758.T",
+                date=self.target_date,
+                total_score=88.0,
+                strategy_type="breakout",
+                sub_scores={"breakout_strategy_score": 88.0, "trend_env_score": 82.0},
+            ),
+        ]
+        masters = [
+            StockMasterModel(code="7203", symbol="7203.T", name="トヨタ自動車", market="プライム"),
+            StockMasterModel(code="6758", symbol="6758.T", name="ソニーグループ", market="プライム"),
+        ]
+        feature_sets = [
+            FeatureSetModel(
+                symbol="7203.T",
+                date=self.target_date,
+                results=[
+                    FeatureResultModel(feature_id="F1", feature_name="F1", score=80.0, raw_value=80.0)
+                ],
+            )
+        ]
+        pattern_sets = [
+            PatternSetModel(
+                symbol="6758.T",
+                date=self.target_date,
+                results=[
+                    PatternResultModel(pattern_id="P1", pattern_name="P1", confidence=75.0)
+                ],
+            )
+        ]
+        financial_map = {
+            "7203.T": FinancialModel(symbol="7203.T", fiscal_date=date(2025, 3, 31), roe=12.0),
+            "6758.T": FinancialModel(symbol="6758.T", fiscal_date=date(2025, 3, 31), roe=14.0),
+        }
+
+        expected_overall = self.generator.generate_ranking(
+            scores,
+            master_map=masters,
+            feature_sets=feature_sets,
+            pattern_sets=pattern_sets,
+            financial_map=financial_map,
+            strategy_filter=None,
+            top_n=2,
+        )
+        expected_pullback = self.generator.generate_ranking(
+            scores,
+            master_map=masters,
+            feature_sets=feature_sets,
+            pattern_sets=pattern_sets,
+            financial_map=financial_map,
+            strategy_filter="pullback",
+            top_n=1,
+        )
+        expected_breakout = self.generator.generate_ranking(
+            scores,
+            master_map=masters,
+            feature_sets=feature_sets,
+            pattern_sets=pattern_sets,
+            financial_map=financial_map,
+            strategy_filter="breakout",
+            top_n=1,
+        )
+
+        with patch.object(
+            self.generator, "_build_master_lookup", wraps=self.generator._build_master_lookup
+        ) as spy_master, patch.object(
+            self.generator, "_build_financial_lookup", wraps=self.generator._build_financial_lookup
+        ) as spy_fin, patch.object(
+            self.generator, "_build_set_lookup", wraps=self.generator._build_set_lookup
+        ) as spy_set:
+            rankings = self.generator.generate_strategy_rankings(
+                scores,
+                master_map=masters,
+                feature_sets=feature_sets,
+                pattern_sets=pattern_sets,
+                financial_map=financial_map,
+                overall_top_n=2,
+                strategy_top_n=1,
+            )
+
+        self.assertEqual(spy_master.call_count, 1)
+        self.assertEqual(spy_fin.call_count, 1)
+        # feature_sets と pattern_sets の2回のみ
+        self.assertEqual(spy_set.call_count, 2)
+
+        self.assertEqual(rankings["overall"], expected_overall)
+        self.assertEqual(rankings["pullback"], expected_pullback)
+        self.assertEqual(rankings["breakout"], expected_breakout)
+
+    def test_generate_strategy_rankings_empty_input_skips_lookups(self):
+        """generate_strategy_rankings([]) 空入力時はルックアップ構築が0回で全戦略空リストを返す"""
+        with patch.object(
+            self.generator, "_build_master_lookup", wraps=self.generator._build_master_lookup
+        ) as spy_master, patch.object(
+            self.generator, "_build_financial_lookup", wraps=self.generator._build_financial_lookup
+        ) as spy_fin, patch.object(
+            self.generator, "_build_set_lookup", wraps=self.generator._build_set_lookup
+        ) as spy_set:
+            rankings = self.generator.generate_strategy_rankings([])
+
+        self.assertEqual(rankings, {"overall": [], "pullback": [], "breakout": []})
+        spy_master.assert_not_called()
+        spy_fin.assert_not_called()
+        spy_set.assert_not_called()
 
 
 if __name__ == "__main__":

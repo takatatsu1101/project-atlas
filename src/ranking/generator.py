@@ -39,6 +39,13 @@ _FINANCIAL_SUMMARY_FIELDS: Tuple[str, ...] = (
     "net_profit",
 )
 
+_SetLookupTuple = Tuple[
+    Dict[Tuple[str, date], Any],
+    Dict[str, Any],
+    Dict[Tuple[str, date], Any],
+    Dict[str, Any],
+]
+
 
 class RankingGenerator:
     """スクリーニング済みスコア結果から総合・戦略別ランキングを生成するクラス"""
@@ -102,12 +109,7 @@ class RankingGenerator:
     def _build_set_lookup(
         cls,
         sets: Optional[Union[List[Any], Dict[Any, Any]]],
-    ) -> Tuple[
-        Dict[Tuple[str, date], Any],
-        Dict[str, Any],
-        Dict[Tuple[str, date], Any],
-        Dict[str, Any],
-    ]:
+    ) -> _SetLookupTuple:
         """
         FeatureSetModel / PatternSetModel の検索用インデックスを構築する。
         (symbol, date) 完全一致、symbol 最新、(code, date) コード一致、code 最新を返す。
@@ -157,12 +159,7 @@ class RankingGenerator:
     @classmethod
     def _lookup_set(
         cls,
-        lookup_tuple: Tuple[
-            Dict[Tuple[str, date], Any],
-            Dict[str, Any],
-            Dict[Tuple[str, date], Any],
-            Dict[str, Any],
-        ],
+        lookup_tuple: _SetLookupTuple,
         symbol: str,
         norm_date: Optional[date],
     ) -> Optional[Any]:
@@ -234,21 +231,17 @@ class RankingGenerator:
             base += f" 主な根拠: {reasons[0]}"
         return base
 
-    def generate_ranking(
+    def _generate_ranking_with_lookups(
         self,
         filtered_score_results: List[ScoreResultModel],
-        master_map: Optional[Union[List[StockMasterModel], Dict[str, StockMasterModel]]] = None,
-        feature_sets: Optional[Union[List[FeatureSetModel], Dict[Any, FeatureSetModel]]] = None,
-        pattern_sets: Optional[Union[List[PatternSetModel], Dict[Any, PatternSetModel]]] = None,
-        financial_map: Optional[Dict[str, FinancialModel]] = None,
+        master_lookup: Dict[str, StockMasterModel],
+        financial_lookup: Dict[str, FinancialModel],
+        feature_lookup: _SetLookupTuple,
+        pattern_lookup: _SetLookupTuple,
         strategy_filter: Optional[str] = None,
         top_n: Optional[int] = None,
     ) -> List[AnalysisResultModel]:
-        """
-        フィルタリングされたスコア結果からランキングを生成し、最終分析結果のリストを返す。
-        - strategy_filter 指定時は該当戦略のみ抽出し、対応する戦略スコアでソートする。
-        - タイブレークは trend_env_score 降順 -> symbol 昇順で決定論的にソートする。
-        """
+        """構築済みルックアップ辞書を用いてランキングを生成する共通ヘルパー"""
         if not filtered_score_results:
             return []
 
@@ -270,11 +263,6 @@ class RankingGenerator:
 
         if top_n is not None:
             sorted_results = sorted_results[: max(0, top_n)]
-
-        master_lookup = self._build_master_lookup(master_map)
-        financial_lookup = self._build_financial_lookup(financial_map)
-        feature_lookup = self._build_set_lookup(feature_sets)
-        pattern_lookup = self._build_set_lookup(pattern_sets)
 
         analysis_results: List[AnalysisResultModel] = []
         for idx, score_result in enumerate(sorted_results):
@@ -357,6 +345,43 @@ class RankingGenerator:
         print(f"ランキングを生成しました。{len(analysis_results)} 件の分析結果。")
         return analysis_results
 
+    def generate_ranking(
+        self,
+        filtered_score_results: List[ScoreResultModel],
+        master_map: Optional[Union[List[StockMasterModel], Dict[str, StockMasterModel]]] = None,
+        feature_sets: Optional[Union[List[FeatureSetModel], Dict[Any, FeatureSetModel]]] = None,
+        pattern_sets: Optional[Union[List[PatternSetModel], Dict[Any, PatternSetModel]]] = None,
+        financial_map: Optional[Dict[str, FinancialModel]] = None,
+        strategy_filter: Optional[str] = None,
+        top_n: Optional[int] = None,
+    ) -> List[AnalysisResultModel]:
+        """
+        フィルタリングされたスコア結果からランキングを生成し、最終分析結果のリストを返す。
+        - strategy_filter 指定時は該当戦略のみ抽出し、対応する戦略スコアでソートする。
+        - タイブレークは trend_env_score 降順 -> symbol 昇順で決定論的にソートする。
+        """
+        if not filtered_score_results:
+            return []
+        if strategy_filter is not None and not any(
+            r.strategy_type == strategy_filter for r in filtered_score_results
+        ):
+            return []
+
+        master_lookup = self._build_master_lookup(master_map)
+        financial_lookup = self._build_financial_lookup(financial_map)
+        feature_lookup = self._build_set_lookup(feature_sets)
+        pattern_lookup = self._build_set_lookup(pattern_sets)
+
+        return self._generate_ranking_with_lookups(
+            filtered_score_results,
+            master_lookup=master_lookup,
+            financial_lookup=financial_lookup,
+            feature_lookup=feature_lookup,
+            pattern_lookup=pattern_lookup,
+            strategy_filter=strategy_filter,
+            top_n=top_n,
+        )
+
     def generate_strategy_rankings(
         self,
         filtered_score_results: List[ScoreResultModel],
@@ -371,34 +396,31 @@ class RankingGenerator:
         総合ランキング（overall）、押し目買い型（pullback）、ブレイクアウト型（breakout）の
         3種類のランキング辞書を生成して返す。
         """
+        if not filtered_score_results:
+            return {"overall": [], "pullback": [], "breakout": []}
+
+        # 3種類のランキング生成でルックアップ辞書を1回だけ構築して使い回す
+        master_lookup = self._build_master_lookup(master_map)
+        financial_lookup = self._build_financial_lookup(financial_map)
+        feature_lookup = self._build_set_lookup(feature_sets)
+        pattern_lookup = self._build_set_lookup(pattern_sets)
+
+        strategy_specs = (
+            ("overall", None, overall_top_n),
+            ("pullback", "pullback", strategy_top_n),
+            ("breakout", "breakout", strategy_top_n),
+        )
         return {
-            "overall": self.generate_ranking(
+            key: self._generate_ranking_with_lookups(
                 filtered_score_results,
-                master_map=master_map,
-                feature_sets=feature_sets,
-                pattern_sets=pattern_sets,
-                financial_map=financial_map,
-                strategy_filter=None,
-                top_n=overall_top_n,
-            ),
-            "pullback": self.generate_ranking(
-                filtered_score_results,
-                master_map=master_map,
-                feature_sets=feature_sets,
-                pattern_sets=pattern_sets,
-                financial_map=financial_map,
-                strategy_filter="pullback",
-                top_n=strategy_top_n,
-            ),
-            "breakout": self.generate_ranking(
-                filtered_score_results,
-                master_map=master_map,
-                feature_sets=feature_sets,
-                pattern_sets=pattern_sets,
-                financial_map=financial_map,
-                strategy_filter="breakout",
-                top_n=strategy_top_n,
-            ),
+                master_lookup=master_lookup,
+                financial_lookup=financial_lookup,
+                feature_lookup=feature_lookup,
+                pattern_lookup=pattern_lookup,
+                strategy_filter=strat_filter,
+                top_n=top_n,
+            )
+            for key, strat_filter, top_n in strategy_specs
         }
 
 
