@@ -5,12 +5,17 @@ from datetime import date, datetime, timedelta
 import io
 from contextlib import redirect_stdout
 from pathlib import Path
+import time
 from unittest.mock import patch
+
+import pandas as pd
 
 import src.feature_engine
 import src.pattern_detector
 import src.score_engine
+from src.common.storage import StorageManager
 from src.config.screening_config import AtlasScreeningConfig
+from src.data_collector.collector import DataCollector
 from src.evaluator.evaluator import ForwardReturnEvaluator
 from src.feature_engine.manager import calculate_features
 from src.feature_engine.registry import feature_registry
@@ -277,6 +282,7 @@ class TestPipelineIntegration(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             out_dir = Path(tmpdir) / "out_explicit"
             with patch("src.main.MasterManager") as mock_master_cls, \
+                 patch("src.main.prefetch_ohlcv_batch"), \
                  patch("src.main.collect_ohlcv_data", return_value=ohlcv_7203), \
                  patch("src.main.collect_financial_data", return_value=fin_7203):
                 mock_master_cls.return_value.load_master.return_value = [master_7203]
@@ -301,6 +307,7 @@ class TestPipelineIntegration(unittest.TestCase):
             out_dir_auto = Path(tmpdir) / "out_auto"
             with patch("src.main.MasterManager") as mock_master_cls, \
                  patch("src.main.data_collector") as mock_dc, \
+                 patch("src.main.prefetch_ohlcv_batch"), \
                  patch("src.main.collect_ohlcv_data", return_value=ohlcv_7203), \
                  patch("src.main.collect_financial_data", return_value=fin_7203):
                 mock_master_cls.return_value.load_master.return_value = [master_7203, master_9999]
@@ -368,6 +375,7 @@ class TestPipelineIntegration(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             out_dir = Path(tmpdir) / "eval_out"
             with patch("src.main.MasterManager") as mock_master_cls, \
+                 patch("src.main.prefetch_ohlcv_batch"), \
                  patch("src.main.collect_ohlcv_data", return_value=ohlcv_screen), \
                  patch("src.main.collect_financial_data", return_value=fin_7203), \
                  patch("src.evaluator.evaluator.data_collector.collect_ohlcv_data", return_value=forward_bars), \
@@ -435,6 +443,7 @@ class TestPipelineIntegration(unittest.TestCase):
 
             full_cli_ohlcv = ohlcv_screen + forward_bars[1:]
             with patch("src.main.MasterManager") as mock_master_cls, \
+                 patch("src.main.prefetch_ohlcv_batch"), \
                  patch("src.main.collect_ohlcv_data", return_value=full_cli_ohlcv), \
                  patch("src.main.collect_financial_data", return_value=fin_7203) as mock_fin_fn, \
                  patch("src.evaluator.evaluator.data_collector.collect_ohlcv_data") as mock_eval_ohlcv:
@@ -489,6 +498,7 @@ class TestPipelineIntegration(unittest.TestCase):
         self.assertTrue(parsed_enabled.use_feature_cache)
 
         with patch("src.main.MasterManager") as mock_master_cls, \
+             patch("src.main.prefetch_ohlcv_batch"), \
              patch("src.main.collect_ohlcv_data", return_value=ohlcv_7203), \
              patch("src.main.collect_financial_data", return_value=fin_7203), \
              patch("src.main.IndicatorCalculator.calculate_indicators", return_value=sample_ind) as mock_ind, \
@@ -588,6 +598,7 @@ class TestPipelineIntegration(unittest.TestCase):
             out_dir = Path(tmpdir) / "eval_single_fetch"
             stdout_buf = io.StringIO()
             with patch("src.main.MasterManager") as mock_master_cls, \
+                 patch("src.main.prefetch_ohlcv_batch"), \
                  patch("src.main.collect_ohlcv_data", return_value=full_ohlcv) as mock_main_ohlcv, \
                  patch("src.main.collect_financial_data", return_value=fin_7203) as mock_main_fin, \
                  patch("src.evaluator.evaluator.data_collector.collect_ohlcv_data") as mock_eval_ohlcv, \
@@ -702,6 +713,7 @@ class TestPipelineIntegration(unittest.TestCase):
 
         real_evaluate = ForwardReturnEvaluator.evaluate
         with patch("src.main.MasterManager") as mock_master_cls, \
+             patch("src.main.prefetch_ohlcv_batch"), \
              patch("src.main.collect_ohlcv_data", return_value=full_ohlcv) as mock_main_ohlcv, \
              patch("src.main.collect_financial_data", return_value=fin_7203), \
              patch("src.evaluator.evaluator.data_collector.collect_ohlcv_data") as mock_eval_ohlcv, \
@@ -754,6 +766,7 @@ class TestPipelineIntegration(unittest.TestCase):
         )
 
         with patch("src.main.MasterManager") as mock_master_cls, \
+             patch("src.main.prefetch_ohlcv_batch"), \
              patch("src.main.collect_ohlcv_data", return_value=screen_ohlcv) as mock_main_ohlcv, \
              patch("src.main.collect_financial_data", return_value=fin_7203), \
              patch("src.evaluator.evaluator.data_collector.collect_ohlcv_data") as mock_eval_ohlcv:
@@ -778,6 +791,124 @@ class TestPipelineIntegration(unittest.TestCase):
         self.assertEqual(len(eval_summary.items), 1)
         self.assertEqual(eval_summary.items[0].status, "no_forward_data")
         self.assertEqual(eval_summary.overall_summary[5].evaluated_count, 0)
+
+    def test_run_full_pipeline_calls_prefetch_ohlcv_batch_and_records_timing(self):
+        """run_full_pipeline が prefetch_ohlcv_batch を期待引数で呼び、ohlcv_collection へ計上する"""
+        ohlcv_7203 = _build_uptrend_breakout_ohlcv("7203.T", days=90)
+        ohlcv_9984 = _build_uptrend_breakout_ohlcv("9984.T", days=90)
+        fin_7203 = _build_sample_financial("7203.T")
+        fin_9984 = _build_sample_financial("9984.T")
+        masters = [
+            StockMasterModel(code="7203", symbol="7203.T", name="トヨタ", market="プライム", sector_33="輸送用機器"),
+            StockMasterModel(code="9984", symbol="9984.T", name="ソフトバンクG", market="プライム", sector_33="情報・通信業"),
+        ]
+
+        def slow_prefetch(*args, **kwargs):
+            time.sleep(0.02)
+            return {"total": 2, "skipped": 0, "batch_updated": 2, "retried_updated": 0, "failed": 0}
+
+        with patch("src.main.MasterManager") as mock_master_cls, \
+             patch("src.main.prefetch_ohlcv_batch", side_effect=slow_prefetch) as mock_prefetch, \
+             patch("src.main.collect_ohlcv_data", side_effect=[ohlcv_7203, ohlcv_9984]), \
+             patch("src.main.collect_financial_data", side_effect=[fin_7203, fin_9984]):
+            mock_master_cls.return_value.load_master.return_value = masters
+
+            result = run_full_pipeline(
+                symbols=["7203.T", "9984.T"],
+                start_date=date(2025, 10, 1),
+                end_date=date(2025, 12, 31),
+                fiscal_year=2025,
+                as_of_date=date(2025, 12, 31),
+                export_reports=False,
+                use_cache=False,
+            )
+
+        mock_prefetch.assert_called_once_with(
+            ["7203.T", "9984.T"],
+            date(2025, 10, 1),
+            date(2025, 12, 31),
+            as_of_date=date(2025, 12, 31),
+        )
+        self.assertGreaterEqual(result["timings_sec"]["ohlcv_collection"], 0.015)
+
+    def test_run_full_pipeline_real_collector_second_run_zero_network_calls(self):
+        """実 DataCollector + モック yf.download で2回目パイプライン実行時に再通信ゼロとなることを検証"""
+        # 2025-10-01 〜 2025-12-30（12/31は東証休場のため最終完了営業日は 12/30）
+        bars_7203 = _build_uptrend_breakout_ohlcv("7203.T", days=91)
+        bars_9984 = _build_uptrend_breakout_ohlcv("9984.T", days=91)
+
+        def to_yf_frame(bars):
+            df = pd.DataFrame([
+                {
+                    "Date": pd.Timestamp(b.date),
+                    "Open": b.open,
+                    "High": b.high,
+                    "Low": b.low,
+                    "Close": b.close,
+                    "Volume": b.volume,
+                }
+                for b in bars
+            ]).set_index("Date")
+            return df
+
+        multi_df = pd.concat(
+            {
+                "7203.T": to_yf_frame(bars_7203),
+                "9984.T": to_yf_frame(bars_9984),
+            },
+            axis=1,
+        )
+        masters = [
+            StockMasterModel(code="7203", symbol="7203.T", name="トヨタ", market="プライム", sector_33="輸送用機器"),
+            StockMasterModel(code="9984", symbol="9984.T", name="ソフトバンクG", market="プライム", sector_33="情報・通信業"),
+        ]
+        fin_map = {
+            "7203.T": _build_sample_financial("7203.T"),
+            "9984.T": _build_sample_financial("9984.T"),
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            real_collector = DataCollector()
+            real_collector.storage = StorageManager(base_dir=Path(tmpdir))
+
+            with patch("src.data_collector.collector.data_collector", real_collector), \
+                 patch("src.main.data_collector", real_collector), \
+                 patch("src.main.MasterManager") as mock_master_cls, \
+                 patch("src.main.collect_financial_data", side_effect=lambda sym, *args, **kwargs: fin_map[sym]), \
+                 patch("yfinance.download", return_value=multi_df) as mock_download, \
+                 patch("yfinance.Ticker") as mock_ticker:
+                mock_master_cls.return_value.load_master.return_value = masters
+
+                # 1回目実行: yf.download が1回呼ばれ、個別 Ticker 取得は不要
+                res1 = run_full_pipeline(
+                    symbols=["7203.T", "9984.T"],
+                    start_date=date(2025, 10, 1),
+                    end_date=date(2025, 12, 31),
+                    fiscal_year=2025,
+                    as_of_date=date(2025, 12, 31),
+                    export_reports=False,
+                    use_cache=False,
+                )
+                self.assertEqual(res1["processed_symbols"], ["7203.T", "9984.T"])
+                self.assertEqual(mock_download.call_count, 1)
+                mock_ticker.assert_not_called()
+
+                mock_download.reset_mock()
+                mock_ticker.reset_mock()
+
+                # 2回目実行: Parquet キャッシュが 2025-10-01〜2025-12-30（12/31休場マージン込）で十分なため再通信ゼロ
+                res2 = run_full_pipeline(
+                    symbols=["7203.T", "9984.T"],
+                    start_date=date(2025, 10, 1),
+                    end_date=date(2025, 12, 31),
+                    fiscal_year=2025,
+                    as_of_date=date(2025, 12, 31),
+                    export_reports=False,
+                    use_cache=False,
+                )
+                self.assertEqual(res2["processed_symbols"], ["7203.T", "9984.T"])
+                mock_download.assert_not_called()
+                mock_ticker.assert_not_called()
 
 
 if __name__ == "__main__":
