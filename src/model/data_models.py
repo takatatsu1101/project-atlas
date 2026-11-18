@@ -161,3 +161,16 @@ class EvaluationSummaryModel(BaseModel):
     overall_summary: Dict[int, HorizonSummaryModel] = Field(default_factory=dict)
     strategy_summary: Dict[str, Dict[int, HorizonSummaryModel]] = Field(default_factory=dict)
     items: List[ForwardEvaluationItemModel] = Field(default_factory=list)
+
+
+class BatchBacktestSummaryModel(BaseModel):
+    """複数基準日一括バックテストの横断集計サマリーモデル"""
+
+    as_of_dates: List[DateType]
+    horizons: List[int]
+    entry_price_mode: str = "signal_close"
+    total_dates: int = 0
+    total_candidates: int = 0
+    aggregated_overall_summary: Dict[int, HorizonSummaryModel] = Field(default_factory=dict)
+    aggregated_strategy_summary: Dict[str, Dict[int, HorizonSummaryModel]] = Field(default_factory=dict)
+    per_date_summaries: Dict[DateType, EvaluationSummaryModel] = Field(default_factory=dict)

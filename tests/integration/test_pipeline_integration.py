@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import unittest
 from datetime import date, datetime, timedelta
@@ -20,7 +21,14 @@ from src.evaluator.evaluator import ForwardReturnEvaluator
 from src.feature_engine.manager import calculate_features
 from src.feature_engine.registry import feature_registry
 from src.indicator_calculator.calculator import IndicatorCalculator
-from src.main import main, parse_args, run_full_pipeline
+from src.main import (
+    DEFAULT_PARALLEL_MIN_SYMBOLS,
+    _resolve_worker_count,
+    main,
+    parse_args,
+    run_batch_backtest,
+    run_full_pipeline,
+)
 from src.model.data_models import (
     FeatureResultModel,
     FeatureSetModel,
@@ -1051,6 +1059,604 @@ class TestPipelineIntegration(unittest.TestCase):
                 self.assertIs(spy_feat_false.call_args.kwargs.get("latest_only"), False)
                 self.assertIs(spy_pat_false.call_args.kwargs.get("latest_only"), False)
                 self.assertGreater(len(res_false["score_results"]), 1)
+
+    def test_resolve_worker_count_and_cli_args(self):
+        """_resolve_worker_count の実環境変数参照・異常値エラー・閾値制御、CLI競合チェックおよび run_batch_backtest バリデーションを検証する"""
+        orig_env = os.environ.get("FEATURE_ENGINE_PARALLEL_PROCESSES")
+        try:
+            os.environ["FEATURE_ENGINE_PARALLEL_PROCESSES"] = "3"
+            self.assertEqual(_resolve_worker_count(None, 25), 3)
+            self.assertEqual(_resolve_worker_count(None, 19), 1)
+            self.assertEqual(_resolve_worker_count(None, 5, parallel_min_symbols=2), 3)
+        finally:
+            if orig_env is None:
+                os.environ.pop("FEATURE_ENGINE_PARALLEL_PROCESSES", None)
+            else:
+                os.environ["FEATURE_ENGINE_PARALLEL_PROCESSES"] = orig_env
+
+        self.assertEqual(_resolve_worker_count(1, 100, parallel_min_symbols=2), 1)
+        self.assertEqual(_resolve_worker_count(8, 5, parallel_min_symbols=2), 5)
+        self.assertEqual(DEFAULT_PARALLEL_MIN_SYMBOLS, 20)
+
+        for invalid in (0, -1, True, False):
+            with self.assertRaises(ValueError):
+                _resolve_worker_count(invalid, 10)
+
+        with self.assertRaises(ValueError):
+            run_batch_backtest(
+                as_of_dates=[date(2025, 5, 15), date(2025, 6, 5)],
+                end_date=date(2025, 6, 1),
+            )
+        for bad_lb in (0, -5, True, False):
+            with self.assertRaises(ValueError):
+                run_batch_backtest(
+                    as_of_dates=[date(2025, 5, 15)],
+                    lookback_days=bad_lb,
+                )
+
+        # --mode evaluate と --as-of-dates の併用は終了コード 1
+        self.assertEqual(
+            main(["--mode", "evaluate", "--as-of-dates", "2025-05-15"]),
+            1,
+        )
+
+        ns = parse_args(
+            [
+                "--mode",
+                "backtest",
+                "--as-of-dates",
+                "2025-05-15",
+                "2025-06-05",
+                "--workers",
+                "3",
+            ]
+        )
+        self.assertEqual(ns.mode, "backtest")
+        self.assertEqual(ns.as_of_dates, [date(2025, 5, 15), date(2025, 6, 5)])
+        self.assertEqual(ns.workers, 3)
+
+    @staticmethod
+    def _write_temp_env(
+        tmpdir: str,
+        bars_by_symbol: dict[str, list[OhlcvModel]],
+        bs_by_year: dict[int, dict],
+        pl_by_year: dict[int, dict],
+    ) -> DataCollector:
+        tmp_path = Path(tmpdir)
+        storage = StorageManager(base_dir=tmp_path)
+        for sym, bars in bars_by_symbol.items():
+            df = pd.DataFrame(
+                [
+                    {
+                        "date": b.date,
+                        "open": b.open,
+                        "high": b.high,
+                        "low": b.low,
+                        "close": b.close,
+                        "volume": b.volume,
+                    }
+                    for b in bars
+                ]
+            )
+            storage.save_parquet(df, f"price/{sym}.parquet")
+
+        for yr, bs in bs_by_year.items():
+            suffix = f"00{str(yr)[-2:]}"
+            storage.save_json(bs, f"financial/{suffix}-fy-balance-sheet.json")
+        for yr, pl in pl_by_year.items():
+            suffix = f"00{str(yr)[-2:]}"
+            storage.save_json(pl, f"financial/{suffix}-fy-profit-and-loss.json")
+
+        collector = DataCollector()
+        collector.storage = storage
+        collector.cache_dir = str(tmp_path / "cache")
+        collector.local_irbank_dir = str(tmp_path / "irbank_local")
+        collector.user_irbank_dir = str(tmp_path / "irbank_user")
+        Path(collector.local_irbank_dir).mkdir(parents=True, exist_ok=True)
+        Path(collector.user_irbank_dir).mkdir(parents=True, exist_ok=True)
+        return collector
+
+    @staticmethod
+    def _snapshot_tree(root: Path) -> dict[str, tuple[int, int]]:
+        snap: dict[str, tuple[int, int]] = {}
+        for p in sorted(root.rglob("*")):
+            if p.is_file():
+                st = p.stat()
+                snap[str(p.relative_to(root))] = (st.st_mtime_ns, st.st_size)
+        return snap
+
+    def test_run_full_pipeline_multiprocess_matches_sequential_and_enforces_read_only(self):
+        """ProcessPoolExecutor(workers=2) の結果が workers=1 と一致し、ワーカーが読取専用かつ1銘柄失敗を隔離する"""
+        bars_7203 = _build_uptrend_breakout_ohlcv("7203.T", days=90)
+        bars_6758 = _build_uptrend_breakout_ohlcv("6758.T", days=90)
+        bars_9984 = _build_uptrend_breakout_ohlcv("9984.T", days=90)
+        as_of = bars_7203[-1].date
+
+        bs_2025 = {
+            "item": {
+                "7203": ["2025/03", "100000", "0", "0", "0", "0", "0", "1200.0", "45.0"],
+                "6758": ["2025/03", "80000", "0", "0", "0", "0", "0", "1100.0", "42.0"],
+                "9984": ["2025/03", "90000", "0", "0", "0", "0", "0", "1300.0", "40.0"],
+            }
+        }
+        pl_2025 = {
+            "item": {
+                "7203": ["2025/03", "50000000000", "5000000000", "5200000000", "3500000000", "150.0", "15.0", "8.0"],
+                "6758": ["2025/03", "40000000000", "4000000000", "4100000000", "2800000000", "140.0", "14.0", "7.5"],
+                "9984": ["2025/03", "45000000000", "4500000000", "4700000000", "3100000000", "160.0", "16.0", "8.5"],
+            }
+        }
+        masters = [
+            StockMasterModel(code="7203", symbol="7203.T", name="トヨタ自動車", market="プライム", sector_33="輸送用機器"),
+            StockMasterModel(code="6758", symbol="6758.T", name="ソニーG", market="プライム", sector_33="電気機器"),
+            StockMasterModel(code="9984", symbol="9984.T", name="ソフトバンクG", market="プライム", sector_33="情報・通信業"),
+            StockMasterModel(code="8888", symbol="8888.T", name="破損銘柄", market="プライム", sector_33="その他"),
+            StockMasterModel(code="9999", symbol="9999.T", name="欠損銘柄", market="プライム", sector_33="その他"),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            real_collector = self._write_temp_env(
+                tmpdir,
+                {"7203.T": bars_7203, "6758.T": bars_6758, "9984.T": bars_9984},
+                bs_by_year={2025: bs_2025},
+                pl_by_year={2025: pl_2025},
+            )
+            # 8888.T に不正バイト列の破損 Parquet を配置し、子プロセス内で実際に例外送出させてエラー隔離を検証する
+            (Path(tmpdir) / "price" / "8888.T.parquet").write_bytes(b"not-a-valid-parquet-file")
+            # 破損銘柄 8888.T（例外）と欠損銘柄 9999.T（空）を混ぜてもワーカー・親プロセスが落ちずに残り3銘柄を処理できる
+            target_syms = ["7203.T", "8888.T", "9999.T", "6758.T", "9984.T"]
+            before_snapshot = self._snapshot_tree(Path(tmpdir))
+
+            with patch("src.data_collector.collector.data_collector", real_collector), \
+                 patch("src.main.data_collector", real_collector), \
+                 patch("src.main.prefetch_ohlcv_batch"), \
+                 patch("src.main.MasterManager") as mock_master_cls:
+                mock_master_cls.return_value.load_master.return_value = masters
+
+                # 1. 先に workers=2 (use_cache=True, use_feature_cache=True) を実行し、読取専用制約で書込ゼロを検証
+                res_par = run_full_pipeline(
+                    symbols=target_syms,
+                    start_date=bars_7203[0].date,
+                    end_date=as_of,
+                    fiscal_year=2025,
+                    as_of_date=as_of,
+                    export_reports=False,
+                    use_cache=True,
+                    use_feature_cache=True,
+                    allow_irbank_download=False,
+                    workers=2,
+                    parallel_min_symbols=2,
+                )
+                after_par_snapshot = self._snapshot_tree(Path(tmpdir))
+                self.assertEqual(before_snapshot, after_par_snapshot)
+
+                # 2. 同一条件 (use_cache=True, use_feature_cache=True) の workers=1 と結果が完全一致し、
+                # 逐次側でも同一StorageManager(tmpdir)へ対称的にキャッシュ保存されることを検証
+                res_seq = run_full_pipeline(
+                    symbols=target_syms,
+                    start_date=bars_7203[0].date,
+                    end_date=as_of,
+                    fiscal_year=2025,
+                    as_of_date=as_of,
+                    export_reports=False,
+                    use_cache=True,
+                    use_feature_cache=True,
+                    allow_irbank_download=False,
+                    workers=1,
+                    parallel_min_symbols=2,
+                )
+                self.assertTrue((Path(tmpdir) / "cache" / f"indicators_7203.T_asof_{as_of.isoformat()}.json").exists())
+
+            self.assertEqual(res_seq["processed_symbols"], ["7203.T", "6758.T", "9984.T"])
+            self.assertEqual(res_par["processed_symbols"], res_seq["processed_symbols"])
+            self.assertEqual(
+                [r.model_dump() for r in res_par["score_results"]],
+                [r.model_dump() for r in res_seq["score_results"]],
+            )
+            self.assertEqual(
+                [r.model_dump() for r in res_par["analysis_results"]],
+                [r.model_dump() for r in res_seq["analysis_results"]],
+            )
+
+    def test_run_batch_backtest_single_fetch_zero_lookahead_and_disclosure_lag(self):
+        """
+        run_batch_backtest において:
+        1) collect_ohlcv_data と calculate_indicators が銘柄あたり1回しか呼ばれない
+        2) 未来日の株価を極端値へ改ざんしても過去基準日のスコア・ランキングが1ビットも変化しない
+        3) 基準日間の開示ラグによる財務データ切り替えが正しく反映される
+        """
+        # 2025-02-01 〜 2025-07-10 まで約160日分の日次バーを生成
+        start_dt = date(2025, 2, 1)
+        d1 = date(2025, 5, 15)  # 2025/03期 + 60日(=2025-05-30) 未到達 -> 2024/03期を採用
+        d2 = date(2025, 6, 5)   # 2025/03期 開示済み -> 2025/03期を採用
+
+        def build_series(symbol: str, spike_after_d1: bool = False) -> list[OhlcvModel]:
+            bars: list[OhlcvModel] = []
+            for i in range(160):
+                dt = start_dt + timedelta(days=i)
+                base_close = 1000.0 + i * 3.0
+                if spike_after_d1 and dt > d1:
+                    # d1 より後の未来バーを極端な異常値へ改ざん
+                    base_close = 999_999.0 if i % 2 == 0 else 1.0
+                bars.append(
+                    OhlcvModel(
+                        symbol=symbol,
+                        date=dt,
+                        open=base_close - 2.0,
+                        high=base_close + 8.0,
+                        low=base_close - 8.0,
+                        close=base_close,
+                        volume=300_000,
+                    )
+                )
+            return bars
+
+        bs_2024 = {
+            "item": {
+                "7203": ["2024/03", "80000", "0", "0", "0", "0", "0", "1000.0", "40.0"],
+                "6758": ["2024/03", "70000", "0", "0", "0", "0", "0", "900.0", "38.0"],
+            }
+        }
+        pl_2024 = {
+            "item": {
+                "7203": ["2024/03", "40000000000", "3000000000", "3100000000", "2000000000", "100.0", "10.0", "5.0"],
+                "6758": ["2024/03", "35000000000", "2500000000", "2600000000", "1800000000", "90.0", "9.0", "4.5"],
+            }
+        }
+        bs_2025 = {
+            "item": {
+                "7203": ["2025/03", "100000", "0", "0", "0", "0", "0", "1200.0", "48.0"],
+                "6758": ["2025/03", "90000", "0", "0", "0", "0", "0", "1100.0", "46.0"],
+            }
+        }
+        pl_2025 = {
+            "item": {
+                "7203": ["2025/03", "60000000000", "7000000000", "7200000000", "5000000000", "250.0", "20.0", "10.0"],
+                "6758": ["2025/03", "50000000000", "6000000000", "6200000000", "4000000000", "200.0", "18.0", "9.0"],
+            }
+        }
+        masters = [
+            StockMasterModel(code="7203", symbol="7203.T", name="トヨタ自動車", market="プライム", sector_33="輸送用機器"),
+            StockMasterModel(code="6758", symbol="6758.T", name="ソニーG", market="プライム", sector_33="電気機器"),
+        ]
+
+        orig_bars = {"7203.T": build_series("7203.T", False), "6758.T": build_series("6758.T", False)}
+        tampered_bars = {"7203.T": build_series("7203.T", True), "6758.T": build_series("6758.T", True)}
+
+        with tempfile.TemporaryDirectory() as tmp1, tempfile.TemporaryDirectory() as tmp2:
+            col_orig = self._write_temp_env(
+                tmp1, orig_bars, {2024: bs_2024, 2025: bs_2025}, {2024: pl_2024, 2025: pl_2025}
+            )
+            with patch("src.data_collector.collector.data_collector", col_orig), \
+                 patch("src.main.data_collector", col_orig), \
+                 patch("src.main.prefetch_ohlcv_batch"), \
+                 patch("src.main.collect_ohlcv_data", wraps=col_orig.collect_ohlcv_data) as spy_ohlcv, \
+                 patch.object(IndicatorCalculator, "calculate_indicators", autospec=True, wraps=IndicatorCalculator.calculate_indicators) as spy_ind, \
+                 patch("src.main.MasterManager") as mock_master_cls:
+                mock_master_cls.return_value.load_master.return_value = masters
+
+                res_orig = run_batch_backtest(
+                    as_of_dates=[d2, d1, d1],  # 重複＆降順で渡す
+                    symbols=["7203.T", "6758.T"],
+                    start_date=start_dt,
+                    end_date=date(2025, 7, 5),
+                    horizons=[5],
+                    export_reports=False,
+                    use_cache=False,
+                    allow_irbank_download=False,
+                    workers=1,
+                )
+
+            # 1) 2基準日×2銘柄でも OHLCV 読込と指標算出は各銘柄1回ずつ（計2回）
+            self.assertEqual(spy_ohlcv.call_count, 2)
+            self.assertEqual(spy_ind.call_count, 2)
+            self.assertEqual(res_orig["as_of_dates"], [d1, d2])
+
+            # 3) 開示ラグによる財務データ切り替え検証 (d1=2025-05-15 -> ROE 10.0%, d2=2025-06-05 -> ROE 20.0%)
+            d1_7203 = next(r for r in res_orig["per_date_results"][d1]["analysis_results"] if r.symbol == "7203.T")
+            d2_7203 = next(r for r in res_orig["per_date_results"][d2]["analysis_results"] if r.symbol == "7203.T")
+            self.assertEqual(d1_7203.financial_summary["roe"], 10.0)
+            self.assertEqual(d2_7203.financial_summary["roe"], 20.0)
+
+            # 2) d1 より後の未来バーを極端値へ改ざんして再実行しても d1 のスコア・ランキングは1ビットも変化しない
+            col_tampered = self._write_temp_env(
+                tmp2, tampered_bars, {2024: bs_2024, 2025: bs_2025}, {2024: pl_2024, 2025: pl_2025}
+            )
+            with patch("src.data_collector.collector.data_collector", col_tampered), \
+                 patch("src.main.data_collector", col_tampered), \
+                 patch("src.main.prefetch_ohlcv_batch"), \
+                 patch("src.main.collect_ohlcv_data", wraps=col_tampered.collect_ohlcv_data), \
+                 patch("src.main.MasterManager") as mock_master_cls:
+                mock_master_cls.return_value.load_master.return_value = masters
+
+                res_tampered = run_batch_backtest(
+                    as_of_dates=[d1, d2],
+                    symbols=["7203.T", "6758.T"],
+                    start_date=start_dt,
+                    end_date=date(2025, 7, 5),
+                    horizons=[5],
+                    export_reports=False,
+                    use_cache=False,
+                    allow_irbank_download=False,
+                    workers=1,
+                )
+
+            self.assertEqual(
+                [s.model_dump() for s in res_orig["per_date_results"][d1]["score_results"]],
+                [s.model_dump() for s in res_tampered["per_date_results"][d1]["score_results"]],
+            )
+            self.assertEqual(
+                [r.model_dump() for r in res_orig["per_date_results"][d1]["analysis_results"]],
+                [r.model_dump() for r in res_tampered["per_date_results"][d1]["analysis_results"]],
+            )
+
+    def test_run_batch_backtest_multiprocess_and_cli_dispatch(self):
+        """run_batch_backtest の workers=2 並列一致、および CLI --mode backtest / --as-of-dates を検証"""
+        # --mode backtest で日付未指定時は終了コード 1
+        self.assertEqual(main(["--mode", "backtest"]), 1)
+
+        start_dt = date(2025, 2, 1)
+        d1 = date(2025, 5, 15)
+        d2 = date(2025, 6, 5)
+
+        def make_bars(sym: str) -> list[OhlcvModel]:
+            out = []
+            for i in range(150):
+                c = 1000.0 + i * 3.0
+                out.append(
+                    OhlcvModel(
+                        symbol=sym,
+                        date=start_dt + timedelta(days=i),
+                        open=c - 2.0,
+                        high=c + 8.0,
+                        low=c - 8.0,
+                        close=c,
+                        volume=300_000,
+                    )
+                )
+            return out
+
+        bs_2024 = {"item": {"7203": ["2024/03", "80000", "0", "0", "0", "0", "0", "1000.0", "40.0"], "6758": ["2024/03", "70000", "0", "0", "0", "0", "0", "900.0", "38.0"]}}
+        pl_2024 = {"item": {"7203": ["2024/03", "40000000000", "3000000000", "3100000000", "2000000000", "100.0", "10.0", "5.0"], "6758": ["2024/03", "35000000000", "2500000000", "2600000000", "1800000000", "90.0", "9.0", "4.5"]}}
+        bs_2025 = {"item": {"7203": ["2025/03", "100000", "0", "0", "0", "0", "0", "1200.0", "48.0"], "6758": ["2025/03", "90000", "0", "0", "0", "0", "0", "1100.0", "46.0"]}}
+        pl_2025 = {"item": {"7203": ["2025/03", "60000000000", "7000000000", "7200000000", "5000000000", "250.0", "20.0", "10.0"], "6758": ["2025/03", "50000000000", "6000000000", "6200000000", "4000000000", "200.0", "18.0", "9.0"]}}
+        masters = [
+            StockMasterModel(code="7203", symbol="7203.T", name="トヨタ自動車", market="プライム", sector_33="輸送用機器"),
+            StockMasterModel(code="6758", symbol="6758.T", name="ソニーG", market="プライム", sector_33="電気機器"),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            real_collector = self._write_temp_env(
+                tmpdir,
+                {"7203.T": make_bars("7203.T"), "6758.T": make_bars("6758.T")},
+                {2024: bs_2024, 2025: bs_2025},
+                {2024: pl_2024, 2025: pl_2025},
+            )
+            out_dir = Path(tmpdir) / "reports"
+            before_snapshot = self._snapshot_tree(Path(tmpdir))
+
+            with patch("src.data_collector.collector.data_collector", real_collector), \
+                 patch("src.main.data_collector", real_collector), \
+                 patch("src.main.prefetch_ohlcv_batch"), \
+                 patch("src.main.MasterManager") as mock_master_cls:
+                mock_master_cls.return_value.load_master.return_value = masters
+
+                # 1. 先に workers=2 (use_cache=True, use_feature_cache=True, export_reports=False) を実行し、
+                # 並列ワーカー実行で cache/*.json や price/*.parquet が一切作成・更新されないことを検証
+                res_par_ro = run_batch_backtest(
+                    as_of_dates=[d1, d2],
+                    symbols=["7203.T", "6758.T"],
+                    start_date=start_dt,
+                    end_date=date(2025, 6, 30),
+                    horizons=[5],
+                    export_reports=False,
+                    use_cache=True,
+                    use_feature_cache=True,
+                    allow_irbank_download=False,
+                    workers=2,
+                    parallel_min_symbols=2,
+                )
+                after_par_snapshot = self._snapshot_tree(Path(tmpdir))
+                self.assertEqual(before_snapshot, after_par_snapshot)
+
+                # 2. 同一条件 (use_cache=True, use_feature_cache=True) の workers=1 と結果完全一致を検証
+                res_seq = run_batch_backtest(
+                    as_of_dates=[d1, d2],
+                    symbols=["7203.T", "6758.T"],
+                    start_date=start_dt,
+                    end_date=date(2025, 6, 30),
+                    horizons=[5],
+                    export_reports=False,
+                    use_cache=True,
+                    use_feature_cache=True,
+                    allow_irbank_download=False,
+                    workers=1,
+                    parallel_min_symbols=2,
+                )
+
+                # 3. レポート出力付き並列実行
+                res_par = run_batch_backtest(
+                    as_of_dates=[d1, d2],
+                    symbols=["7203.T", "6758.T"],
+                    start_date=start_dt,
+                    end_date=date(2025, 6, 30),
+                    horizons=[5],
+                    output_dir=out_dir,
+                    export_reports=True,
+                    use_cache=True,
+                    use_feature_cache=True,
+                    allow_irbank_download=False,
+                    workers=2,
+                    parallel_min_symbols=2,
+                )
+
+                self.assertEqual(res_seq["workers_used"], 1)
+                self.assertEqual(res_par_ro["workers_used"], 2)
+                self.assertEqual(res_par["workers_used"], 2)
+                self.assertEqual(
+                    set(res_par["timings_sec"].keys()),
+                    {
+                        "setup_and_prescreen",
+                        "ohlcv_collection",
+                        "symbol_evaluation",
+                        "screening_and_ranking",
+                        "forward_evaluation",
+                        "total",
+                    },
+                )
+                self.assertEqual(
+                    res_par_ro["batch_summary"].model_dump(),
+                    res_seq["batch_summary"].model_dump(),
+                )
+                self.assertEqual(
+                    res_par["batch_summary"].model_dump(),
+                    res_seq["batch_summary"].model_dump(),
+                )
+                for d in (d1, d2):
+                    self.assertEqual(
+                        [r.model_dump() for r in res_par_ro["per_date_results"][d]["analysis_results"]],
+                        [r.model_dump() for r in res_seq["per_date_results"][d]["analysis_results"]],
+                    )
+                self.assertTrue(res_par["report_paths"]["json"].exists())
+                self.assertTrue(res_par["report_paths"]["markdown"].exists())
+
+                # CLI --as-of-dates（--mode 省略時でも run_batch_backtest が呼ばれる）
+                exit_code = main(
+                    [
+                        "--as-of-dates",
+                        d1.isoformat(),
+                        d2.isoformat(),
+                        "--symbols",
+                        "7203.T",
+                        "6758.T",
+                        "--start-date",
+                        start_dt.isoformat(),
+                        "--end-date",
+                        "2025-06-30",
+                        "--horizons",
+                        "5",
+                        "--output-dir",
+                        str(out_dir),
+                        "--no-cache",
+                        "--no-irbank-download",
+                        "--workers",
+                        "1",
+                    ]
+                )
+                self.assertEqual(exit_code, 0)
+
+    def test_run_batch_backtest_prescreening_warmup_and_dynamic_liquidity(self):
+        """
+        run_batch_backtest で symbols=None 事前スクリーニング＋流動性フィルタを有効にした際:
+        1) _resolve_target_symbols 前に warmup_irbank_cache が実行され初回でも 0銘柄化しないこと
+        2) 基準日ごとに開示済み財務・流動性通過銘柄が動的に切り替わること
+        """
+        start_dt = date(2025, 2, 1)
+        d1 = date(2025, 5, 15)  # 7203 のみ流動性通過・開示済み
+        d2 = date(2025, 6, 15)  # 6758 も流動性通過・2025/03期開示済み
+
+        bars_7203: list[OhlcvModel] = []
+        bars_6758: list[OhlcvModel] = []
+        for i in range(150):
+            dt = start_dt + timedelta(days=i)
+            c = 1000.0 + i * 3.0
+            bars_7203.append(
+                OhlcvModel(
+                    symbol="7203.T",
+                    date=dt,
+                    open=c - 2.0,
+                    high=c + 8.0,
+                    low=c - 8.0,
+                    close=c,
+                    volume=300_000,  # 常に売買代金 > 3億円（1億円基準クリア）
+                )
+            )
+            # 6758 は 5/20 以降から出来高増加（d1 時点では売買代金不足、d2 時点では流動性クリア）
+            vol_6758 = 10_000 if dt <= d1 else 300_000
+            bars_6758.append(
+                OhlcvModel(
+                    symbol="6758.T",
+                    date=dt,
+                    open=c - 2.0,
+                    high=c + 8.0,
+                    low=c - 8.0,
+                    close=c,
+                    volume=vol_6758,
+                )
+            )
+
+        irbank_payloads = {
+            ("0024", "fy-balance-sheet.json"): {
+                "item": {
+                    "7203": ["2024/03", "80000", "0", "0", "0", "0", "0", "1000.0", "40.0"],
+                    "6758": ["2024/03", "70000", "0", "0", "0", "0", "0", "900.0", "38.0"],
+                }
+            },
+            ("0024", "fy-profit-and-loss.json"): {
+                "item": {
+                    "7203": ["2024/03", "40000000000", "3000000000", "3100000000", "2000000000", "100.0", "10.0", "5.0"],
+                    "6758": ["2024/03", "35000000000", "2500000000", "2600000000", "1800000000", "90.0", "9.0", "4.5"],
+                }
+            },
+            ("0025", "fy-balance-sheet.json"): {
+                "item": {
+                    "7203": ["2025/03", "100000", "0", "0", "0", "0", "0", "1200.0", "48.0"],
+                    "6758": ["2025/03", "90000", "0", "0", "0", "0", "0", "1100.0", "46.0"],
+                }
+            },
+            ("0025", "fy-profit-and-loss.json"): {
+                "item": {
+                    "7203": ["2025/03", "60000000000", "7000000000", "7200000000", "5000000000", "250.0", "20.0", "10.0"],
+                    "6758": ["2025/03", "50000000000", "6000000000", "6200000000", "4000000000", "200.0", "18.0", "9.0"],
+                }
+            },
+        }
+        masters = [
+            StockMasterModel(code="7203", symbol="7203.T", name="トヨタ自動車", market="プライム", sector_33="輸送用機器"),
+            StockMasterModel(code="6758", symbol="6758.T", name="ソニーG", market="プライム", sector_33="電気機器"),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # 初期状態では IR BANK JSON を一切置かない（初回実行シミュレーション）
+            real_collector = self._write_temp_env(
+                tmpdir,
+                {"7203.T": bars_7203, "6758.T": bars_6758},
+                bs_by_year={},
+                pl_by_year={},
+            )
+
+            def fake_download_irbank(year_suffix: str, fy_type: str, save_path: str, timeout: int = 15):
+                payload = irbank_payloads.get((year_suffix, fy_type))
+                if payload is None:
+                    raise RuntimeError(f"missing mock payload: {year_suffix}-{fy_type}")
+                Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+                Path(save_path).write_text(json.dumps(payload), encoding="utf-8")
+
+            with patch("src.data_collector.collector.data_collector", real_collector), \
+                 patch("src.main.data_collector", real_collector), \
+                 patch.object(real_collector, "_download_irbank_file", side_effect=fake_download_irbank) as mock_dl, \
+                 patch("src.main.prefetch_ohlcv_batch"), \
+                 patch("src.main.MasterManager") as mock_master_cls:
+                mock_master_cls.return_value.load_master.return_value = masters
+
+                res = run_batch_backtest(
+                    as_of_dates=[d1, d2],
+                    symbols=None,
+                    start_date=start_dt,
+                    end_date=date(2025, 6, 30),
+                    horizons=[5],
+                    apply_liquidity_filter=True,
+                    export_reports=False,
+                    use_cache=True,
+                    allow_irbank_download=True,
+                    workers=2,
+                    parallel_min_symbols=2,
+                )
+
+            self.assertGreaterEqual(mock_dl.call_count, 4)
+            # d1 時点では 7203.T のみ流動性通過、d2 時点では両銘柄通過
+            self.assertEqual(res["per_date_results"][d1]["processed_symbols"], ["7203.T"])
+            self.assertEqual(res["per_date_results"][d2]["processed_symbols"], ["7203.T", "6758.T"])
 
 
 if __name__ == "__main__":

@@ -12,9 +12,9 @@ from src.common.logger import get_logger
 logger = get_logger("FeatureManager")
 
 class FeatureManager:
-    def __init__(self):
+    def __init__(self, storage: Optional[StorageManager] = None):
         self.registry = feature_registry
-        self.storage = StorageManager()
+        self.storage = storage if storage is not None else StorageManager()
 
     def calculate_features(
         self,
@@ -26,11 +26,13 @@ class FeatureManager:
         cache_key_suffix: Optional[str] = None,
         latest_only: bool = False,
         target_indices: Optional[Sequence[int]] = None,
+        write_cache: bool = True,
     ) -> List[FeatureSetModel]:
         """
         指定された入力データに基づいて特徴量を計算し、結果のリストを返す（キャッシュ対応）。
         feature_idsが指定された場合は、その特徴量のみを計算する。
         use_cache=False の場合はキャッシュの読み込み・保存をスキップする。
+        write_cache=False の場合は既存キャッシュの読込のみ行い、新規キャッシュ保存を行わない。
         cache_key_suffix を指定した場合はサフィックス付きのキャッシュキーを使用する。
         latest_only=True または target_indices 指定時は全履歴を参照しつつ対象日のみ評価し、
         全日付キャッシュを上書き破壊しない。
@@ -124,8 +126,8 @@ class FeatureManager:
                 results=all_feature_sets[date_key]
             ))
 
-        # キャッシュとして保存（部分評価時は全日付キャッシュを上書き破壊しない）
-        if use_cache and not is_partial_eval:
+        # キャッシュとして保存（部分評価時または write_cache=False 時は保存しない）
+        if use_cache and write_cache and not is_partial_eval:
             try:
                 cache_payload = {
                     "meta": {
@@ -155,6 +157,7 @@ def calculate_features(
     cache_key_suffix: Optional[str] = None,
     latest_only: bool = False,
     target_indices: Optional[Sequence[int]] = None,
+    write_cache: bool = True,
 ) -> List[FeatureSetModel]:
     return feature_manager.calculate_features(
         ohlcv_data,
@@ -165,4 +168,5 @@ def calculate_features(
         cache_key_suffix=cache_key_suffix,
         latest_only=latest_only,
         target_indices=target_indices,
+        write_cache=write_cache,
     )

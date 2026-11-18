@@ -128,7 +128,7 @@ Project Atlas は、スイングトレード（数週間〜3ヶ月保有）向�
     - [x] 任意の過去基準日（`as_of_date`）を指定したスクリーニング実行と、基準日以降のN営業日後（例：5日・20日・60日後）の騰落率・勝率・最大上昇率（MFE）/最大下落率（MAE）を算出・集計する `Evaluator` モジュールの実装
     - [x] `src/main.py` への CLI 引数（`--as-of-date`, `--mode [screen|evaluate]` 等）の追加と、検証レポート出力のテスト
 
-### 3.4. フェーズ4: 銘柄評価高速化・スケーラビリティ改善 (進行中・1要件1PR構成)
+### 3.4. フェーズ4: 銘柄評価高速化・スケーラビリティ改善 (完了・1要件1PR構成)
 
 - [x] **PR #1: 重複I/O・逆転キャッシュの排除と計測ログ基盤 (`perf/eliminate-redundant-io-and-cache`)**
     - [x] パイプライン各フェーズ（マスタ/事前フィルタ・OHLCV・財務・指標・特徴量・パターン・スコア・ランキング・フォワード評価）の所要時間計測ログ (`time.perf_counter()`) と `run_metadata` 出力の追加
@@ -146,17 +146,18 @@ Project Atlas は、スイングトレード（数週間〜3ヶ月保有）向�
     - [x] `IndicatorCalculator` の単一 DataFrame / NumPy ベクトル演算への統合（個別計算メソッド互換維持）
     - [x] `DoubleBottomPattern` / `DoubleTopPattern` の $O(N)$ 化、および `latest_only_per_symbol=True` 向け「全履歴配列参照・最新日（対象インデックス）のみ評価」モードの実装
 
-- [ ] **PR #4: プロセス並列化と複数基準日一括バックテストランナー (`perf/multiprocess-and-batch-backtest`)**
-    - [ ] `FEATURE_ENGINE_PARALLEL_PROCESSES` / `--workers` による `ProcessPoolExecutor` 並列化（少銘柄時の閾値制御・ワーカー初期化・読取専用制約）
-    - [ ] 複数基準日指定バックテスト用の「全期間1回読込・ベクトル指標1回算出・基準日断面厳密分離」一括評価ランナーの実装
+- [x] **PR #4: プロセス並列化と複数基準日一括バックテストランナー (`perf/multiprocess-and-batch-backtest`)**
+    - [x] `FEATURE_ENGINE_PARALLEL_PROCESSES` / `--workers` による `ProcessPoolExecutor` 並列化（少銘柄時の閾値制御・ワーカー初期化・読取専用制約）
+    - [x] 複数基準日指定バックテスト用の「全期間1回読込・ベクトル指標1回算出・基準日断面厳密分離」一括評価ランナーの実装
 
 ## 4. 今後のマイルストーン
 - [x] 2026/08/31: フェーズ2の「特徴量・パターン追加およびパイプライン結合」完了
 - [x] 2026/11/15: 要件見直し（v0.2.0）および1要件1PR計画の策定完了（PR #1）
 - [x] 2026/11/16: フェーズ3 PR #2〜#5 の順次実装・検証完了
-- [ ] フェーズ4 PR #1〜#4（銘柄評価高速化・スケーラビリティ改善）の順次実装・検証完了
+- [x] 2026/11/18: フェーズ4 PR #1〜#4（銘柄評価高速化・スケーラビリティ改善）の順次実装・検証完了
 
 ## 5. 実行ログ (最新の作業のみ記載)
+- 2026/11/18: フェーズ4 PR #4（`perf/multiprocess-and-batch-backtest`）を実施。`src/pipeline_worker.py` を新設して `ProcessPoolExecutor`（macOS `spawn` 対応の `init_pipeline_worker`・3レジストリ初期化・完全読取専用制約・決定的順序結合・1銘柄例外隔離）と少銘柄閾値制御（`DEFAULT_PARALLEL_MIN_SYMBOLS=20`・`FEATURE_ENGINE_PARALLEL_PROCESSES` / `--workers`）を `src/main.py` に統合。さらに複数基準日一括バックテストランナー `run_batch_backtest`（CLI `--mode backtest` / `--as-of-dates`）および `BatchBacktestSummaryModel` / `ForwardReturnEvaluator.aggregate_batch_summaries` / `Presenter` 横断レポート出力を実装し、「全期間1回読込・ベクトル指標1回算出・基準日断面厳密分離（未来バー完全遮断・開示ラグ財務対応）」を実現。全テスト277件のパスおよび2段階レビュー（1次 `atlas-reviewer` 指摘修正後・2次 `gemini-4-argon-high` Approve）を完了。
 - 2026/11/18: フェーズ4 PR #3（`perf/vectorize-and-latest-only-eval`）を実施。`StorageManager.load_parquet(..., columns=...)` による列限定読込（不在列時のみフォールバック）と `DataCollector.collect_ohlcv_data()` の `NaN`/`inf` クレンジング・`iterrows()` 排除（`OhlcvModel.model_construct`）、`IndicatorCalculator` の単一ベクトル演算統合、`DoubleBottomPattern` / `DoubleTopPattern` の 1パス $O(N)$ 化（`src/pattern_detector/patterns/reversal/_common.py`）、および `src/common/indexing.py` を用いた全13特徴量・全3パターン・`FeatureManager` / `PatternManager`・`src/main.py` 向けの「全履歴参照・対象インデックス（`latest_only_per_symbol=True` 時は最新日）のみ評価」モードを実装。全テスト262件のパスおよび2段階レビュー（1次 `atlas-reviewer` 指摘修正後・2次 `gemini-4-argon-high` Approve）を完了。
 - 2026/11/18: フェーズ4 PR #2（`perf/batch-yfinance-and-fetch-check`）を実施。標準ライブラリのみで東証営業日カレンダー（日本の祝日・振替休日・国民の休日・年末年始・JST 15:35 カットオフ判定）を提供する `src/data_collector/market_calendar.py` を新設し、`DataCollector` に開始日休場マージン考慮・`1306.T` 市場最新完了営業日プリチェック（TTL付きキャッシュ）・`yf.download(..., actions=True, threads=True, group_by="ticker")` によるチャンク単位並列取得＋欠損/失敗ティッカー個別リトライを行う `prefetch_ohlcv_batch()` を実装して `src/main.py` に統合。全テスト237件のパスおよび2段階レビュー（1次 `atlas-reviewer` 指摘修正後・2次 `gemini-4-argon-high` Approve）を完了。
 - 2026/11/17: フェーズ4 PR #1（`perf/eliminate-redundant-io-and-cache` 相当）を実施。`src/main.py` にフェーズ別時間計測（`timings_sec`・`elapsed_sec`）と `use_feature_cache: bool = False`（CLI `--use-feature-cache`）および `--mode evaluate` 時の全期間 OHLCV 一括取得・`ohlcv_map` 共有（`ForwardReturnEvaluator.compute_default_fetch_end` 共通化・先読みバイアス防止スライス）を実装し、`DataCollector.collect_financial_data()` の `latest_close` 引き渡しによる2回目 OHLCV 読込・通信廃止、`RankingGenerator.generate_strategy_rankings()` のルックアップ1回構築を実施。全テスト215件のパスおよび2段階レビュー（1次 `atlas-reviewer`・2次 `gemini-4-argon-high` Approve）を完了。

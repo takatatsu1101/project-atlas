@@ -29,16 +29,32 @@ settings = load_settings()
 OHLCV_READ_COLUMNS: Tuple[str, ...] = ("date", "open", "high", "low", "close", "volume")
 
 class DataCollector:
-    def __init__(self):
-        self.storage = StorageManager()
-        self.cache_dir = settings.DATA_CACHE_DIR
-        os.makedirs(self.cache_dir, exist_ok=True)
-        
+    def __init__(
+        self,
+        storage: Optional[StorageManager] = None,
+        cache_dir: Optional[str] = None,
+        local_irbank_dir: Optional[str] = None,
+        user_irbank_dir: Optional[str] = None,
+        create_dirs: bool = True,
+    ):
+        self.storage = storage if storage is not None else StorageManager()
+        self.cache_dir = str(cache_dir) if cache_dir is not None else settings.DATA_CACHE_DIR
+
         # ユーザー提供の既存IR BANKキャッシュディレクトリ
-        self.user_irbank_dir = "/Users/takatoritatsuo/program/python/stock_choice/data_fetcher/code_data"
+        self.user_irbank_dir = (
+            str(user_irbank_dir)
+            if user_irbank_dir is not None
+            else "/Users/takatoritatsuo/program/python/stock_choice/data_fetcher/code_data"
+        )
         # 本プロジェクト内のIR BANKキャッシュ保存先
-        self.local_irbank_dir = os.path.join(self.cache_dir, "irbank_code_data")
-        os.makedirs(self.local_irbank_dir, exist_ok=True)
+        self.local_irbank_dir = (
+            str(local_irbank_dir)
+            if local_irbank_dir is not None
+            else os.path.join(self.cache_dir, "irbank_code_data")
+        )
+        if create_dirs:
+            os.makedirs(self.cache_dir, exist_ok=True)
+            os.makedirs(self.local_irbank_dir, exist_ok=True)
 
         # IR BANKのダウンロード用定数
         self.URL_IRBANK_FILES = "https://f.irbank.net/files/"
@@ -711,10 +727,12 @@ class DataCollector:
         start_date: date,
         end_date: date,
         as_of_date: Optional[date] = None,
+        read_only: bool = False,
     ) -> List[OhlcvModel]:
         """
         指定期間のOHLCVデータを収集し、Parquet永続化・差分更新を行い、データを返す。
         as_of_date が指定された場合は、その日付以降のデータを含めない（先読みバイアス防止）。
+        read_only=True の場合はローカルParquetキャッシュのみを参照し、通信・保存を一切行わない。
         """
         req_start = start_date.date() if isinstance(start_date, datetime) else start_date
         req_end_raw = end_date.date() if isinstance(end_date, datetime) else end_date
@@ -739,7 +757,9 @@ class DataCollector:
             cached_df = cached_df[cached_df["date"].notna()]
 
         need_fetch = True
-        if self._is_cache_sufficient(cached_df, req_start, req_end):
+        if read_only:
+            need_fetch = False
+        elif self._is_cache_sufficient(cached_df, req_start, req_end):
             need_fetch = False
             logger.info(f"{symbol} のOHLCVデータをParquetストレージからロードしました。")
         else:
@@ -912,9 +932,16 @@ class DataCollector:
             f.write(response.content)
         logger.info(f"ダウンロード完了: {save_path}")
 
-    def _load_irbank_json(self, year: int, fy_type: str, allow_download: bool = True) -> Optional[Dict]:
+    def _load_irbank_json(
+        self,
+        year: int,
+        fy_type: str,
+        allow_download: bool = True,
+        read_only: bool = False,
+    ) -> Optional[Dict]:
         """
-        指定年度のIR BANKの財務JSONデータをStorageManagerを利用してロードする
+        指定年度のIR BANKの財務JSONデータをStorageManagerを利用してロードする。
+        read_only=True の場合はダウンロードおよび破損ファイルの削除を一切行わない。
         """
         # 2010年以降の場合にサフィックス生成
         if year >= 2010:
@@ -927,10 +954,11 @@ class DataCollector:
             return self._irbank_json_cache[file_name]
 
         file_path = self._get_irbank_file_path(year_suffix, file_name)
+        effective_allow_download = allow_download and not read_only
         
-        # キャッシュがなければ自動ダウンロード（allow_download=False または失敗記録済みの場合は抑制）
+        # キャッシュがなければ自動ダウンロード（allow_download=False / read_only=True または失敗記録済みの場合は抑制）
         if not os.path.exists(file_path):
-            if not allow_download or file_name in self._irbank_failed_downloads:
+            if not effective_allow_download or file_name in self._irbank_failed_downloads:
                 return None
             try:
                 self._download_irbank_file(year_suffix, fy_type, file_path)
@@ -946,8 +974,8 @@ class DataCollector:
             logger.error(f"エラー: IR BANKファイル({year_suffix}-{fy_type})のJSON読込失敗: {e}")
             data = None
         if data is None:
-            # 破損JSON等でロード失敗した場合は削除し、同一プロセス内の無限再ダウンロードを防止
-            if os.path.exists(file_path):
+            # 破損JSON等でロード失敗した場合は削除し、同一プロセス内の無限再ダウンロードを防止（読取専用時は削除しない）
+            if not read_only and os.path.exists(file_path):
                 try:
                     os.remove(file_path)
                 except Exception:
@@ -956,6 +984,19 @@ class DataCollector:
         elif isinstance(data, dict):
             self._irbank_json_cache[file_name] = data
         return data
+
+    def warmup_irbank_cache(
+        self,
+        fiscal_years: Sequence[int],
+        allow_download: bool = True,
+    ) -> None:
+        """
+        並列ワーカー起動前に親プロセス側で指定年度群の BS / PL JSON を事前にロード・ダウンロードする。
+        """
+        unique_years = sorted({int(y) for y in fiscal_years if not isinstance(y, bool)})
+        for year in unique_years:
+            self._load_irbank_json(year, self.BALANCE_SHEET_FILE_NAME, allow_download=allow_download)
+            self._load_irbank_json(year, self.PROFIT_AND_LOSS_FILE_NAME, allow_download=allow_download)
 
     @staticmethod
     def _to_float(val: Any) -> float:
@@ -997,6 +1038,20 @@ class DataCollector:
         """決算期末月末日 + 開示ラグ日数が as_of_date 以下であれば開示済みと判定する"""
         return (fiscal_end_date + timedelta(days=disclosure_lag_days)) <= as_of_date
 
+    def _load_irbank_json_with_mode(
+        self,
+        year: int,
+        fy_type: str,
+        allow_download: bool,
+        read_only: bool,
+    ) -> Optional[Dict]:
+        """read_only=False 時は既存モック互換のため read_only 引数を省略して _load_irbank_json を呼ぶ。"""
+        if read_only:
+            return self._load_irbank_json(
+                year, fy_type, allow_download=allow_download, read_only=True
+            )
+        return self._load_irbank_json(year, fy_type, allow_download=allow_download)
+
     def _resolve_disclosed_entry(
         self,
         code: str,
@@ -1006,20 +1061,28 @@ class DataCollector:
         bs_by_year: Dict[int, Optional[Dict]],
         pl_by_year: Dict[int, Optional[Dict]],
         allow_download: bool = True,
+        read_only: bool = False,
     ) -> Optional[Tuple[int, List[Any], List[Any], date]]:
         """
         指定年度（データ未公開・欠損時や as_of_date 指定時は最大2期遡る）の BS・PL エントリを解決する。
         """
         max_lookback = 3
+        effective_allow_download = allow_download and not read_only
         for offset in range(max_lookback):
             candidate_year = target_year - offset
             if candidate_year not in bs_by_year:
-                bs_by_year[candidate_year] = self._load_irbank_json(
-                    candidate_year, self.BALANCE_SHEET_FILE_NAME, allow_download=allow_download
+                bs_by_year[candidate_year] = self._load_irbank_json_with_mode(
+                    candidate_year,
+                    self.BALANCE_SHEET_FILE_NAME,
+                    allow_download=effective_allow_download,
+                    read_only=read_only,
                 )
             if candidate_year not in pl_by_year:
-                pl_by_year[candidate_year] = self._load_irbank_json(
-                    candidate_year, self.PROFIT_AND_LOSS_FILE_NAME, allow_download=allow_download
+                pl_by_year[candidate_year] = self._load_irbank_json_with_mode(
+                    candidate_year,
+                    self.PROFIT_AND_LOSS_FILE_NAME,
+                    allow_download=effective_allow_download,
+                    read_only=read_only,
                 )
 
             bs_data = bs_by_year[candidate_year]
@@ -1054,28 +1117,34 @@ class DataCollector:
         disclosure_lag_days: int = settings.FINANCIAL_DISCLOSURE_LAG_DAYS,
         allow_download: bool = True,
         latest_close: Optional[float] = None,
+        read_only: bool = False,
     ) -> Optional[FinancialModel]:
         """
         指定年度の財務データを収集し、FinancialModelを構築して返す。
         as_of_date 指定時は決算期末月末日 + disclosure_lag_days で開示判定を行い、
         未開示またはデータ欠損の場合は最大2期分遡って利用可能な年度データを採用する。
         latest_close が指定された場合は内部で OHLCV を再取得せず、その終値を用いて PER / PBR を算出する。
+        read_only=True の場合はダウンロードや破損JSON削除・OHLCV更新を行わない。
         """
         code = self._parse_symbol(symbol)
         target_year = fiscal_year if fiscal_year is not None else (as_of_date or date.today()).year
         logger.info(f"実財務データをキャッシュ読込中... {symbol}(コード: {code}), 会計年度: {target_year}")
 
+        effective_allow_download = allow_download and not read_only
         bs_cache: Dict[int, Optional[Dict]] = {}
         pl_cache: Dict[int, Optional[Dict]] = {}
-        resolved = self._resolve_disclosed_entry(
-            code=code,
-            target_year=target_year,
-            as_of_date=as_of_date,
-            disclosure_lag_days=disclosure_lag_days,
-            bs_by_year=bs_cache,
-            pl_by_year=pl_cache,
-            allow_download=allow_download,
-        )
+        resolve_kwargs: Dict[str, Any] = {
+            "code": code,
+            "target_year": target_year,
+            "as_of_date": as_of_date,
+            "disclosure_lag_days": disclosure_lag_days,
+            "bs_by_year": bs_cache,
+            "pl_by_year": pl_cache,
+            "allow_download": effective_allow_download,
+        }
+        if read_only:
+            resolve_kwargs["read_only"] = True
+        resolved = self._resolve_disclosed_entry(**resolve_kwargs)
         if resolved is None:
             logger.warning(f"コード {code} の開示済み財務データが {target_year}年度（遡及含む）で見つかりませんでした。")
             return None
@@ -1107,7 +1176,12 @@ class DataCollector:
             y_pl = (
                 pl_cache.get(y)
                 if y in pl_cache
-                else self._load_irbank_json(y, self.PROFIT_AND_LOSS_FILE_NAME, allow_download=allow_download)
+                else self._load_irbank_json_with_mode(
+                    y,
+                    self.PROFIT_AND_LOSS_FILE_NAME,
+                    allow_download=effective_allow_download,
+                    read_only=read_only,
+                )
             )
             if y_pl and code in y_pl.get("item", {}):
                 history_pl[y] = y_pl["item"][code]
@@ -1157,15 +1231,17 @@ class DataCollector:
             resolved_close = latest_close
             if resolved_close is None:
                 ohlcv_end_date = as_of_date or date.today()
-                if as_of_date is None:
-                    ohlcv_list = self.collect_ohlcv_data(symbol, date(adopted_year, 1, 1), ohlcv_end_date)
-                else:
-                    ohlcv_list = self.collect_ohlcv_data(
-                        symbol,
-                        date(adopted_year, 1, 1),
-                        ohlcv_end_date,
-                        as_of_date=as_of_date,
-                    )
+                ohlcv_kwargs: Dict[str, Any] = {}
+                if as_of_date is not None:
+                    ohlcv_kwargs["as_of_date"] = as_of_date
+                if read_only:
+                    ohlcv_kwargs["read_only"] = True
+                ohlcv_list = self.collect_ohlcv_data(
+                    symbol,
+                    date(adopted_year, 1, 1),
+                    ohlcv_end_date,
+                    **ohlcv_kwargs,
+                )
                 if ohlcv_list:
                     resolved_close = ohlcv_list[-1].close
             if resolved_close is not None and resolved_close > 0:
@@ -1275,10 +1351,17 @@ def collect_ohlcv_data(
     start_date: date,
     end_date: date,
     as_of_date: Optional[date] = None,
+    read_only: bool = False,
 ) -> List[OhlcvModel]:
+    if not read_only:
+        if as_of_date is None:
+            return data_collector.collect_ohlcv_data(symbol, start_date, end_date)
+        return data_collector.collect_ohlcv_data(symbol, start_date, end_date, as_of_date=as_of_date)
     if as_of_date is None:
-        return data_collector.collect_ohlcv_data(symbol, start_date, end_date)
-    return data_collector.collect_ohlcv_data(symbol, start_date, end_date, as_of_date=as_of_date)
+        return data_collector.collect_ohlcv_data(symbol, start_date, end_date, read_only=True)
+    return data_collector.collect_ohlcv_data(
+        symbol, start_date, end_date, as_of_date=as_of_date, read_only=True
+    )
 
 
 def prefetch_ohlcv_batch(
@@ -1309,19 +1392,23 @@ def collect_financial_data(
     disclosure_lag_days: int = 60,
     allow_download: bool = True,
     latest_close: Optional[float] = None,
+    read_only: bool = False,
 ) -> Optional[FinancialModel]:
     if (
         as_of_date is None
         and disclosure_lag_days == 60
         and allow_download
         and latest_close is None
+        and not read_only
     ):
         return data_collector.collect_financial_data(symbol, fiscal_year)
-    return data_collector.collect_financial_data(
-        symbol,
-        fiscal_year=fiscal_year,
-        as_of_date=as_of_date,
-        disclosure_lag_days=disclosure_lag_days,
-        allow_download=allow_download,
-        latest_close=latest_close,
-    )
+    kwargs: Dict[str, Any] = {
+        "fiscal_year": fiscal_year,
+        "as_of_date": as_of_date,
+        "disclosure_lag_days": disclosure_lag_days,
+        "allow_download": allow_download,
+        "latest_close": latest_close,
+    }
+    if read_only:
+        kwargs["read_only"] = True
+    return data_collector.collect_financial_data(symbol, **kwargs)
