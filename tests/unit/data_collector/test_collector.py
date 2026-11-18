@@ -9,6 +9,7 @@ import os
 from src.common.storage import StorageManager
 from src.data_collector.collector import (
     DataCollector,
+    OHLCV_READ_COLUMNS,
     collect_ohlcv_data,
     collect_financial_data,
     prefetch_ohlcv_batch,
@@ -1230,6 +1231,152 @@ class TestDataCollector(unittest.TestCase):
         self.assertEqual(summary_io["batch_updated"], 2)  # BAD_READ.T と GOOD.T は保存成功
         self.assertEqual(summary_io["failed"], 1)
         self.assertEqual(summary_io["failed_symbols"], ["BAD_SAVE.T"])
+
+    def test_collect_ohlcv_uses_column_pruning_and_preserves_native_types(self):
+        """collect_ohlcv_data が列限定読込と model_construct によるネイティブ Python 型を返す"""
+        df = pd.DataFrame({
+            "date": [date(2025, 1, 6), date(2025, 1, 7)],
+            "open": [100.0, 102.0],
+            "high": [105.0, 107.0],
+            "low": [99.0, 101.0],
+            "close": [104.0, 106.0],
+            "volume": [1000, 1500],
+            "dividends": [0.0, 20.0],
+            "stock_splits": [0.0, 0.0],
+        })
+        self.collector.storage.save_parquet(df, f"price/{self.symbol}.parquet")
+
+        orig_load = self.collector.storage.load_parquet
+        with patch.object(
+            self.collector.storage, "load_parquet", side_effect=orig_load
+        ) as spy_load:
+            res = self.collector.collect_ohlcv_data(
+                self.symbol, date(2025, 1, 6), date(2025, 1, 7)
+            )
+
+        spy_load.assert_called_once_with(
+            f"price/{self.symbol}.parquet", columns=OHLCV_READ_COLUMNS
+        )
+        self.assertEqual(len(res), 2)
+        bar = res[0]
+        self.assertIs(type(bar.symbol), str)
+        self.assertIs(type(bar.date), date)
+        self.assertIs(type(bar.open), float)
+        self.assertIs(type(bar.high), float)
+        self.assertIs(type(bar.low), float)
+        self.assertIs(type(bar.close), float)
+        self.assertIs(type(bar.volume), int)
+        # OhlcvModel(...) の通常バリデーション構築と完全一致
+        expected = OhlcvModel(
+            symbol=self.symbol,
+            date=date(2025, 1, 6),
+            open=100.0,
+            high=105.0,
+            low=99.0,
+            close=104.0,
+            volume=1000,
+        )
+        self.assertEqual(bar.model_dump(), expected.model_dump())
+
+    def test_collect_ohlcv_legacy_single_arg_load_parquet_mock_fallback(self):
+        """1引数のみ受け付ける load_parquet モックでも TypeError フォールバックで動作する"""
+        sample_df = pd.DataFrame({
+            "date": [date(2025, 1, 6)],
+            "open": [100.0],
+            "high": [105.0],
+            "low": [99.0],
+            "close": [104.0],
+            "volume": [1000],
+        })
+
+        def single_arg_load(path):
+            return sample_df
+
+        with patch.object(self.collector.storage, "load_parquet", side_effect=single_arg_load):
+            res = self.collector.collect_ohlcv_data(
+                self.symbol, date(2025, 1, 6), date(2025, 1, 6)
+            )
+        self.assertEqual(len(res), 1)
+        self.assertEqual(res[0].close, 104.0)
+
+    def test_collect_ohlcv_cleanses_nan_rows_and_volume(self):
+        """Parquet 内の NaN 行除外および volume の丸め int64 化を検証"""
+        dirty_df = pd.DataFrame({
+            "date": [date(2025, 1, 6), None, date(2025, 1, 8), date(2025, 1, 9)],
+            "open": [100.0, 101.0, float("nan"), 103.0],
+            "high": [105.0, 106.0, 107.0, 108.0],
+            "low": [99.0, 100.0, 101.0, 102.0],
+            "close": [104.0, 105.0, 106.0, 107.0],
+            "volume": [float("nan"), 1100.0, 1200.0, 1300.6],
+        })
+        self.collector.storage.save_parquet(dirty_df, f"price/{self.symbol}.parquet")
+
+        res = self.collector.collect_ohlcv_data(
+            self.symbol, date(2025, 1, 6), date(2025, 1, 9)
+        )
+        self.assertEqual([r.date for r in res], [date(2025, 1, 6), date(2025, 1, 9)])
+        self.assertEqual(res[0].volume, 0)
+        self.assertIs(type(res[0].volume), int)
+        self.assertEqual(res[1].volume, 1301)
+
+    def test_collect_ohlcv_cleanses_inf_values_in_price_and_volume(self):
+        """価格列や volume に inf / -inf が混入しても IntCastingNaNError にならず安全にクレンジングされる"""
+        inf_df = pd.DataFrame({
+            "date": [date(2025, 1, 6), date(2025, 1, 7), date(2025, 1, 8)],
+            "open": [100.0, float("inf"), 102.0],
+            "high": [105.0, 106.0, 107.0],
+            "low": [99.0, 100.0, float("-inf")],
+            "close": [104.0, 105.0, 106.0],
+            "volume": [float("inf"), 1100.0, float("-inf")],
+        })
+        self.collector.storage.save_parquet(inf_df, f"price/{self.symbol}.parquet")
+
+        res = self.collector.collect_ohlcv_data(
+            self.symbol, date(2025, 1, 6), date(2025, 1, 8)
+        )
+        # 1/7 (open=inf) と 1/8 (low=-inf) は除外され、1/6 (volume=inf -> 0) のみ残る
+        self.assertEqual([r.date for r in res], [date(2025, 1, 6)])
+        self.assertEqual(res[0].volume, 0)
+        self.assertIs(type(res[0].volume), int)
+
+    @patch("yfinance.Ticker")
+    def test_collect_ohlcv_need_fetch_preserves_dividends_and_stock_splits(self, mock_ticker):
+        """need_fetch=True で再保存する際に既存 Parquet の dividends / stock_splits 列を失わない"""
+        existing_df = pd.DataFrame({
+            "date": [date(2025, 1, 6), date(2025, 1, 7)],
+            "open": [100.0, 101.0],
+            "high": [105.0, 106.0],
+            "low": [99.0, 100.0],
+            "close": [104.0, 105.0],
+            "volume": [1000, 1100],
+            "dividends": [0.0, 25.0],
+            "stock_splits": [0.0, 2.0],
+        })
+        self.collector.storage.save_parquet(existing_df, f"price/{self.symbol}.parquet")
+
+        new_history = pd.DataFrame({
+            "Open": [102.0],
+            "High": [108.0],
+            "Low": [101.0],
+            "Close": [107.0],
+            "Volume": [1200],
+            "Dividends": [0.0],
+            "Stock Splits": [0.0],
+        }, index=pd.to_datetime(["2025-01-08"]))
+        mock_ticker.return_value.history.return_value = new_history
+
+        res = self.collector.collect_ohlcv_data(
+            self.symbol, date(2025, 1, 6), date(2025, 1, 8)
+        )
+        self.assertEqual(len(res), 3)
+
+        saved_full = self.collector.storage.load_parquet(f"price/{self.symbol}.parquet")
+        self.assertIsNotNone(saved_full)
+        self.assertIn("dividends", saved_full.columns)
+        self.assertIn("stock_splits", saved_full.columns)
+        row_jan7 = saved_full[saved_full["date"] == date(2025, 1, 7)].iloc[0]
+        self.assertAlmostEqual(float(row_jan7["dividends"]), 25.0)
+        self.assertAlmostEqual(float(row_jan7["stock_splits"]), 2.0)
 
 if __name__ == '__main__':
     unittest.main()

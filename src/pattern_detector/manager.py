@@ -1,10 +1,12 @@
 
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Sequence
 from datetime import date
 
+from src.common.indexing import resolve_evaluation_targets, supports_target_indices
 from src.model.data_models import OhlcvModel, IndicatorSetModel, PatternSetModel, PatternResultModel
 from src.pattern_detector.registry import pattern_registry
 from src.pattern_detector.interfaces import IPattern
+
 
 class PatternManager:
     def __init__(self):
@@ -14,14 +16,27 @@ class PatternManager:
         self,
         ohlcv_data: List[OhlcvModel],
         indicator_data: List[IndicatorSetModel],
-        pattern_ids: Optional[List[str]] = None
+        pattern_ids: Optional[List[str]] = None,
+        latest_only: bool = False,
+        target_indices: Optional[Sequence[int]] = None,
     ) -> List[PatternSetModel]:
         """
         指定された入力データに基づいてチャートパターンを検出し、結果のリストを返す。
         pattern_idsが指定された場合は、そのパターンのみを検出する。
+        latest_only=True または target_indices 指定時は全履歴を参照しつつ対象日のみ評価する。
         """
-        if not ohlcv_data:
+        eval_len = min(len(ohlcv_data), len(indicator_data)) if indicator_data else len(ohlcv_data)
+        if eval_len == 0:
             print("警告: OHLCVデータが不足しているため、パターンを検出できません。")
+            return []
+
+        ohlcv_eval = ohlcv_data[:eval_len]
+        ind_eval = indicator_data[:eval_len] if indicator_data else []
+
+        resolved_targets, target_dates = resolve_evaluation_targets(
+            ohlcv_eval, latest_only=latest_only, target_indices=target_indices
+        )
+        if resolved_targets is not None and not resolved_targets:
             return []
 
         all_pattern_sets: Dict[date, List[PatternResultModel]] = {}
@@ -31,17 +46,23 @@ class PatternManager:
             for p_id in pattern_ids:
                 patterns_to_detect.append(self.registry.get_pattern(p_id))
         else:
-            # 全てのパターンを取得 (registry.pyのlist_patternsをIPatternインスタンスで返すように修正が必要かも)
             # 登録されている全てのパターンを取得して追加
             for pattern_info in self.registry.list_patterns():
                 patterns_to_detect.append(self.registry.get_pattern(pattern_info["pattern_id"]))
 
         for pattern_instance in patterns_to_detect:
             print(f"パターン {pattern_instance.pattern_name} を検出中...")
-            pattern_results = pattern_instance.detect(ohlcv_data, indicator_data)
+            if resolved_targets is not None and supports_target_indices(pattern_instance.detect):
+                pattern_results = pattern_instance.detect(
+                    ohlcv_eval, ind_eval, target_indices=resolved_targets
+                )
+            else:
+                pattern_results = pattern_instance.detect(ohlcv_eval, ind_eval)
             for result in pattern_results:
                 if result.metadata and "date" in result.metadata:
                     result_date = result.metadata["date"]
+                    if target_dates is not None and result_date not in target_dates:
+                        continue
                     if result_date not in all_pattern_sets:
                         all_pattern_sets[result_date] = []
                     all_pattern_sets[result_date].append(result)
@@ -67,6 +88,14 @@ pattern_manager = PatternManager()
 def detect_patterns(
     ohlcv_data: List[OhlcvModel],
     indicator_data: List[IndicatorSetModel],
-    pattern_ids: Optional[List[str]] = None
+    pattern_ids: Optional[List[str]] = None,
+    latest_only: bool = False,
+    target_indices: Optional[Sequence[int]] = None,
 ) -> List[PatternSetModel]:
-    return pattern_manager.detect_patterns(ohlcv_data, indicator_data, pattern_ids)
+    return pattern_manager.detect_patterns(
+        ohlcv_data,
+        indicator_data,
+        pattern_ids,
+        latest_only=latest_only,
+        target_indices=target_indices,
+    )

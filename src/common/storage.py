@@ -4,7 +4,7 @@
 
 import json
 from pathlib import Path
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Optional, Sequence, Union
 import pandas as pd
 
 from src.common.exceptions import DataCollectionError
@@ -44,8 +44,33 @@ class StorageManager:
             logger.error(f"Parquetファイルの保存に失敗しました ({file_path}): {e}")
             raise DataCollectionError(f"Failed to save parquet: {e}")
 
-    def load_parquet(self, file_path: Union[str, Path]) -> Optional[pd.DataFrame]:
-        """ParquetファイルからDataFrameを読み込む"""
+    @staticmethod
+    def _is_missing_column_error(exc: Exception) -> bool:
+        """
+        指定列が Parquet スキーマに存在しないことによる例外かを判定する。
+        （pyarrow.lib.ArrowInvalid の 'No match for FieldRef' や KeyError 等を対象とし、
+        ファイル破損等による ArrowInvalid / OSError はフォールバックさせない）
+        """
+        if isinstance(exc, KeyError):
+            return True
+        msg = str(exc).lower()
+        return (
+            "no match for fieldref" in msg
+            or "not in index" in msg
+            or "not present in" in msg
+            or ("column" in msg and ("not found" in msg or "does not exist" in msg))
+        )
+
+    def load_parquet(
+        self,
+        file_path: Union[str, Path],
+        columns: Optional[Sequence[str]] = None,
+    ) -> Optional[pd.DataFrame]:
+        """
+        ParquetファイルからDataFrameを読み込む。
+        - columns 指定時は列限定読込を行い、一部不在列によるエラー時のみ全列読込へフォールバックする。
+        - columns に空シーケンス（[]）が指定された場合は（ファイルが存在すれば）空の DataFrame を返す。
+        """
         try:
             path = Path(file_path)
             if not path.is_absolute():
@@ -53,7 +78,23 @@ class StorageManager:
             if not path.exists():
                 logger.debug(f"Parquetファイルが存在しません: {path}")
                 return None
-            df = pd.read_parquet(path)
+
+            if columns is not None:
+                cols_list = list(columns)
+                if not cols_list:
+                    return pd.DataFrame(columns=[])
+                try:
+                    df = pd.read_parquet(path, columns=cols_list)
+                except Exception as col_err:
+                    if not self._is_missing_column_error(col_err):
+                        raise
+                    logger.debug(
+                        f"Parquet列限定読込に一部不在列が含まれるため全列読込へフォールバックします ({path}): {col_err}"
+                    )
+                    df = pd.read_parquet(path)
+            else:
+                df = pd.read_parquet(path)
+
             logger.info(f"Parquetファイルを読み込みました: {path}")
             return df
         except Exception as e:

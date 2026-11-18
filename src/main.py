@@ -219,6 +219,7 @@ def run_full_pipeline(
             prefetch_ohlcv_batch(target_symbols, effective_start, fetch_end)
         timings_sec["ohlcv_collection"] += time.perf_counter() - t_prefetch
 
+    latest_only_eval = bool(config.screener.latest_only_per_symbol)
     for symbol in target_symbols:
         print(f"\n--- [{symbol}] 処理開始 ---")
         try:
@@ -309,13 +310,19 @@ def run_full_pipeline(
                 feature_ids=None,
                 use_cache=use_cache and use_feature_cache,
                 cache_key_suffix=cache_key_suffix,
+                latest_only=latest_only_eval,
             )
             timings_sec["feature_calculation"] += time.perf_counter() - t_feat
             print(f"  特徴量計算成功: {len(feature_sets)} 件の日付データ")
 
             # 5. パターン検出
             t_pat = time.perf_counter()
-            pattern_sets = detect_patterns(analysis_ohlcv, indicator_sets, pattern_ids=None)
+            pattern_sets = detect_patterns(
+                analysis_ohlcv,
+                indicator_sets,
+                pattern_ids=None,
+                latest_only=latest_only_eval,
+            )
             timings_sec["pattern_detection"] += time.perf_counter() - t_pat
             print(f"  パターン検出成功: {len(pattern_sets)} 件の日付データ")
 

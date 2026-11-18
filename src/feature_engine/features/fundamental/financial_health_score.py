@@ -1,5 +1,6 @@
-from typing import List, Optional
+from typing import List, Optional, Sequence
 
+from src.common.indexing import resolve_target_indices
 from src.feature_engine.interfaces import IFeature
 from src.model.data_models import OhlcvModel, IndicatorSetModel, FinancialModel, FeatureResultModel
 from src.feature_engine.registry import feature_registry
@@ -13,14 +14,16 @@ class FinancialHealthScore(IFeature):
         self,
         ohlcv_data: List[OhlcvModel],
         indicator_data: List[IndicatorSetModel],
-        financial_data: Optional[FinancialModel] = None
+        financial_data: Optional[FinancialModel] = None,
+        target_indices: Optional[Sequence[int]] = None,
     ) -> List[FeatureResultModel]:
         
         if not indicator_data:
             return []
 
         results: List[FeatureResultModel] = []
-        for i, ind_set in enumerate(indicator_data):
+        for i in resolve_target_indices(len(indicator_data), target_indices):
+            ind_set = indicator_data[i]
             metadata = {}
             
             if financial_data is None:

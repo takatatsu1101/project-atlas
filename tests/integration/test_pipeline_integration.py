@@ -910,6 +910,148 @@ class TestPipelineIntegration(unittest.TestCase):
                 mock_download.assert_not_called()
                 mock_ticker.assert_not_called()
 
+    def test_latest_only_per_symbol_propagates_and_matches_full_evaluation(self):
+        """
+        latest_only_per_symbol=True 時の最適化パス（latest_only=True 伝播）と
+        全日付計算後 Screener 抽出（従来パス）、および latest_only_per_symbol=False の伝播を検証し、
+        最終ランキングとフォワード評価結果が一致することを確認する。
+        """
+        screen_7203 = _build_uptrend_breakout_ohlcv("7203.T", days=90)
+        screen_9984 = _build_uptrend_breakout_ohlcv("9984.T", days=90)
+        as_of = screen_7203[-1].date
+
+        # evaluate モード検証用のフォワードバーを追加
+        def append_forward(bars):
+            last = bars[-1]
+            fwd = []
+            for i in range(1, 7):
+                c = last.close * (1.0 + 0.01 * i)
+                fwd.append(
+                    OhlcvModel(
+                        symbol=last.symbol,
+                        date=last.date + timedelta(days=i),
+                        open=c - 2.0,
+                        high=c + 5.0,
+                        low=c - 5.0,
+                        close=c,
+                        volume=250_000,
+                    )
+                )
+            return bars + fwd
+
+        full_7203 = append_forward(screen_7203)
+        full_9984 = append_forward(screen_9984)
+        fin_map = {
+            "7203.T": _build_sample_financial("7203.T"),
+            "9984.T": _build_sample_financial("9984.T"),
+        }
+        masters = [
+            StockMasterModel(code="7203", symbol="7203.T", name="トヨタ自動車", market="プライム", sector_33="輸送用機器"),
+            StockMasterModel(code="9984", symbol="9984.T", name="ソフトバンクG", market="プライム", sector_33="情報・通信業"),
+        ]
+        ohlcv_by_sym = {"7203.T": full_7203, "9984.T": full_9984}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            cfg_true_path = tmp_path / "cfg_true.yaml"
+            cfg_false_path = tmp_path / "cfg_false.yaml"
+            cfg_true_path.write_text(
+                "screener:\n  latest_only_per_symbol: true\n", encoding="utf-8"
+            )
+            cfg_false_path.write_text(
+                "screener:\n  latest_only_per_symbol: false\n", encoding="utf-8"
+            )
+
+            # 1. latest_only_per_symbol=True（最適化パス: latest_only=True が伝播）
+            with patch("src.main.MasterManager") as mock_master_cls, \
+                 patch("src.main.prefetch_ohlcv_batch"), \
+                 patch("src.main.collect_ohlcv_data", side_effect=lambda sym, *a, **kw: ohlcv_by_sym[sym]), \
+                 patch("src.main.collect_financial_data", side_effect=lambda sym, *a, **kw: fin_map[sym]), \
+                 patch("src.main.calculate_features", wraps=calculate_features) as spy_feat_opt, \
+                 patch("src.main.detect_patterns", wraps=detect_patterns) as spy_pat_opt:
+                mock_master_cls.return_value.load_master.return_value = masters
+                res_opt = run_full_pipeline(
+                    symbols=["7203.T", "9984.T"],
+                    start_date=screen_7203[0].date,
+                    end_date=None,
+                    fiscal_year=2025,
+                    as_of_date=as_of,
+                    config_path=cfg_true_path,
+                    export_reports=False,
+                    mode="evaluate",
+                    horizons=[5],
+                    use_cache=False,
+                )
+                self.assertEqual(spy_feat_opt.call_count, 2)
+                self.assertEqual(spy_pat_opt.call_count, 2)
+                for c in spy_feat_opt.call_args_list:
+                    self.assertIs(c.kwargs.get("latest_only"), True)
+                for c in spy_pat_opt.call_args_list:
+                    self.assertIs(c.kwargs.get("latest_only"), True)
+
+            # 2. 従来動作相当（全日付計算してから Screener(latest_only_per_symbol=True) で最新日抽出）
+            def full_calc_feat(ohlcv_data, indicator_data, financial_data=None, **kwargs):
+                kwargs["latest_only"] = False
+                return calculate_features(ohlcv_data, indicator_data, financial_data, **kwargs)
+
+            def full_det_pat(ohlcv_data, indicator_data, **kwargs):
+                kwargs["latest_only"] = False
+                return detect_patterns(ohlcv_data, indicator_data, **kwargs)
+
+            with patch("src.main.MasterManager") as mock_master_cls, \
+                 patch("src.main.prefetch_ohlcv_batch"), \
+                 patch("src.main.collect_ohlcv_data", side_effect=lambda sym, *a, **kw: ohlcv_by_sym[sym]), \
+                 patch("src.main.collect_financial_data", side_effect=lambda sym, *a, **kw: fin_map[sym]), \
+                 patch("src.main.calculate_features", side_effect=full_calc_feat), \
+                 patch("src.main.detect_patterns", side_effect=full_det_pat):
+                mock_master_cls.return_value.load_master.return_value = masters
+                res_full_legacy = run_full_pipeline(
+                    symbols=["7203.T", "9984.T"],
+                    start_date=screen_7203[0].date,
+                    end_date=None,
+                    fiscal_year=2025,
+                    as_of_date=as_of,
+                    config_path=cfg_true_path,
+                    export_reports=False,
+                    mode="evaluate",
+                    horizons=[5],
+                    use_cache=False,
+                )
+
+            # 最終ランキングと評価結果が完全一致すること
+            self.assertEqual(len(res_opt["score_results"]), 2)
+            self.assertGreater(len(res_full_legacy["score_results"]), 2)
+            self.assertEqual(
+                [r.model_dump() for r in res_opt["analysis_results"]],
+                [r.model_dump() for r in res_full_legacy["analysis_results"]],
+            )
+            self.assertEqual(
+                res_opt["evaluation_summary"].model_dump(),
+                res_full_legacy["evaluation_summary"].model_dump(),
+            )
+
+            # 3. latest_only_per_symbol=False の場合は latest_only=False が伝播する
+            with patch("src.main.MasterManager") as mock_master_cls, \
+                 patch("src.main.prefetch_ohlcv_batch"), \
+                 patch("src.main.collect_ohlcv_data", side_effect=lambda sym, *a, **kw: ohlcv_by_sym[sym]), \
+                 patch("src.main.collect_financial_data", side_effect=lambda sym, *a, **kw: fin_map[sym]), \
+                 patch("src.main.calculate_features", wraps=calculate_features) as spy_feat_false, \
+                 patch("src.main.detect_patterns", wraps=detect_patterns) as spy_pat_false:
+                mock_master_cls.return_value.load_master.return_value = masters
+                res_false = run_full_pipeline(
+                    symbols=["7203.T"],
+                    start_date=screen_7203[0].date,
+                    end_date=as_of,
+                    fiscal_year=2025,
+                    as_of_date=as_of,
+                    config_path=cfg_false_path,
+                    export_reports=False,
+                    use_cache=False,
+                )
+                self.assertIs(spy_feat_false.call_args.kwargs.get("latest_only"), False)
+                self.assertIs(spy_pat_false.call_args.kwargs.get("latest_only"), False)
+                self.assertGreater(len(res_false["score_results"]), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

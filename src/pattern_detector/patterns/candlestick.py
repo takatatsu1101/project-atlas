@@ -1,7 +1,8 @@
 
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional, Sequence
 import pandas as pd
 
+from src.common.indexing import resolve_target_indices
 from src.pattern_detector.interfaces import IPattern
 from src.model.data_models import OhlcvModel, IndicatorSetModel, PatternResultModel
 from src.pattern_detector.registry import pattern_registry
@@ -14,14 +15,15 @@ class HammerPattern(IPattern):
     def detect(
         self,
         ohlcv_data: List[OhlcvModel],
-        indicator_data: List[IndicatorSetModel]
+        indicator_data: List[IndicatorSetModel],
+        target_indices: Optional[Sequence[int]] = None,
     ) -> List[PatternResultModel]:
         
         results: List[PatternResultModel] = []
         if len(ohlcv_data) < 1:
             return results
         
-        for i in range(len(ohlcv_data)):
+        for i in resolve_target_indices(len(ohlcv_data), target_indices):
             current_ohlcv = ohlcv_data[i]
 
             # ハンマーの検出ロジック

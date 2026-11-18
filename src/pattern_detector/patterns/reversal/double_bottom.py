@@ -1,7 +1,8 @@
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional, Sequence
 
 from src.pattern_detector.interfaces import IPattern
 from src.model.data_models import OhlcvModel, IndicatorSetModel, PatternResultModel
+from src.pattern_detector.patterns.reversal._common import find_double_reversal_candidates
 from src.pattern_detector.registry import pattern_registry
 
 class DoubleBottomPattern(IPattern):
@@ -12,61 +13,20 @@ class DoubleBottomPattern(IPattern):
     def detect(
         self,
         ohlcv_data: List[OhlcvModel],
-        indicator_data: List[IndicatorSetModel]
+        indicator_data: List[IndicatorSetModel],
+        target_indices: Optional[Sequence[int]] = None,
     ) -> List[PatternResultModel]:
-        
+        candidates = find_double_reversal_candidates(
+            ohlcv_data,
+            mode="bottom",
+            target_indices=target_indices,
+        )
         results: List[PatternResultModel] = []
-        if len(ohlcv_data) < 15: # 最低限の期間が必要
-            return results
-
-        # 各日 i においてダブルボトムが成立・形成されているかを検知
-        for i in range(10, len(ohlcv_data)):
-            current_close = ohlcv_data[i].close
-
-            # 過去の安値極小点（谷）を走査して見つける
-            # 谷の判定: 前後2日間で最も安値が低い点
-            troughs = []
-            for j in range(2, i - 2):
-                low_j = ohlcv_data[j].low
-                if (low_j < ohlcv_data[j-1].low and 
-                    low_j < ohlcv_data[j-2].low and 
-                    low_j < ohlcv_data[j+1].low and 
-                    low_j < ohlcv_data[j+2].low):
-                    troughs.append(j)
-
-            # 直近の2つの谷があるか確認
-            if len(troughs) < 2:
-                continue
-
-            v1_idx = troughs[-2] # 1つ目の谷
-            v2_idx = troughs[-1] # 2つ目の谷（直近）
-
-            v1_low = ohlcv_data[v1_idx].low
-            v2_low = ohlcv_data[v2_idx].low
-
-            # 2つの谷の価格差が2.5%以内であること（底値の整合性）
-            price_diff_rate = abs(v1_low - v2_low) / v1_low
-            if price_diff_rate > 0.025:
-                continue
-
-            # 2つの谷の間にある最高値（ネックライン）を検出
-            neck_idx = v1_idx + 1
-            for j in range(v1_idx + 1, v2_idx):
-                if ohlcv_data[j].high > ohlcv_data[neck_idx].high:
-                    neck_idx = j
-
-            neck_high = ohlcv_data[neck_idx].high
-
-            # パターン判定
-            # 今日の終値が、直近の谷の安値を下回っている場合はサポート割れで不成立
-            if current_close < min(v1_low, v2_low):
-                continue
-
-            # 信頼度の計算
+        for cand in candidates:
             confidence = self._calculate_confidence({
-                "close": current_close,
-                "v2_low": v2_low,
-                "neck_high": neck_high
+                "close": cand.close,
+                "v2_low": cand.e2_val,
+                "neck_high": cand.neck_val,
             })
 
             if confidence >= 40.0:
@@ -75,15 +35,15 @@ class DoubleBottomPattern(IPattern):
                     pattern_name=self.pattern_name,
                     confidence=confidence,
                     metadata={
-                        "date": ohlcv_data[i].date,
-                        "v1_date": ohlcv_data[v1_idx].date,
-                        "v2_date": ohlcv_data[v2_idx].date,
-                        "neck_date": ohlcv_data[neck_idx].date,
-                        "v1_low": v1_low,
-                        "v2_low": v2_low,
-                        "neck_high": neck_high,
-                        "close": current_close
-                    }
+                        "date": ohlcv_data[cand.index].date,
+                        "v1_date": ohlcv_data[cand.e1_idx].date,
+                        "v2_date": ohlcv_data[cand.e2_idx].date,
+                        "neck_date": ohlcv_data[cand.neck_idx].date,
+                        "v1_low": cand.e1_val,
+                        "v2_low": cand.e2_val,
+                        "neck_high": cand.neck_val,
+                        "close": cand.close,
+                    },
                 ))
 
         return results

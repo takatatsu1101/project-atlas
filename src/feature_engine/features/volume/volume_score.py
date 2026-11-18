@@ -1,5 +1,6 @@
-from typing import List, Optional
+from typing import List, Optional, Sequence
 
+from src.common.indexing import resolve_target_indices
 from src.feature_engine.interfaces import IFeature
 from src.model.data_models import OhlcvModel, IndicatorSetModel, FinancialModel, FeatureResultModel
 from src.feature_engine.registry import feature_registry
@@ -13,14 +14,16 @@ class VolumeScore(IFeature):
         self,
         ohlcv_data: List[OhlcvModel],
         indicator_data: List[IndicatorSetModel],
-        financial_data: Optional[FinancialModel] = None
+        financial_data: Optional[FinancialModel] = None,
+        target_indices: Optional[Sequence[int]] = None,
     ) -> List[FeatureResultModel]:
         
         if not ohlcv_data:
             return []
 
         results: List[FeatureResultModel] = []
-        for i, ind_set in enumerate(indicator_data):
+        for i in resolve_target_indices(len(indicator_data), target_indices):
+            ind_set = indicator_data[i]
             close_price = ohlcv_data[i].close if i < len(ohlcv_data) else None
             open_price = ohlcv_data[i].open if i < len(ohlcv_data) else None
             volume_today = ohlcv_data[i].volume if i < len(ohlcv_data) else None
@@ -34,20 +37,22 @@ class VolumeScore(IFeature):
             vma5 = None
             vma25 = None
 
-            if i >= min_past_days:
+            if i >= min_past_days and i < len(ohlcv_data):
                 # 過去25日間（今日を含む）の平均出来高
                 start_idx = max(0, i - max_past_days + 1)
-                end_idx = i + 1
-                volumes_25 = [ohlcv_data[j].volume for j in range(start_idx, end_idx) if ohlcv_data[j].volume is not None]
-                if volumes_25:
-                    avg_volume_25 = sum(volumes_25) / len(volumes_25)
-                    vma25 = avg_volume_25
+                end_idx = min(i + 1, len(ohlcv_data))
+                if start_idx < end_idx:
+                    volumes_25 = [ohlcv_data[j].volume for j in range(start_idx, end_idx) if ohlcv_data[j].volume is not None]
+                    if volumes_25:
+                        avg_volume_25 = sum(volumes_25) / len(volumes_25)
+                        vma25 = avg_volume_25
 
-                # 過去5日間の平均出来高
-                start_idx_5 = max(0, i - 5 + 1)
-                volumes_5 = [ohlcv_data[j].volume for j in range(start_idx_5, end_idx) if ohlcv_data[j].volume is not None]
-                if volumes_5:
-                    vma5 = sum(volumes_5) / len(volumes_5)
+                    # 過去5日間の平均出来高
+                    start_idx_5 = max(0, i - 5 + 1)
+                    if start_idx_5 < end_idx:
+                        volumes_5 = [ohlcv_data[j].volume for j in range(start_idx_5, end_idx) if ohlcv_data[j].volume is not None]
+                        if volumes_5:
+                            vma5 = sum(volumes_5) / len(volumes_5)
 
             metadata = {
                 "volume": volume_today,
