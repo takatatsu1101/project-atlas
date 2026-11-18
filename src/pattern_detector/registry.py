@@ -1,6 +1,9 @@
 
 from typing import Dict, Type, List
+from src.common.logger import get_logger
 from src.pattern_detector.interfaces import IPattern
+
+logger = get_logger(__name__)
 
 class PatternRegistry:
     def __init__(self):
@@ -13,7 +16,7 @@ class PatternRegistry:
         if not issubclass(pattern_class, IPattern):
             raise ValueError("登録できるのはIPatternを実装したクラスのみです。")
         self._patterns[pattern_class.pattern_id] = pattern_class
-        print(f"Pattern \'{pattern_class.pattern_name}\' ({pattern_class.pattern_id}) を登録しました。")
+        logger.debug(f"Pattern '{pattern_class.pattern_name}' ({pattern_class.pattern_id}) を登録しました。")
 
     def get_pattern(self, pattern_id: str) -> IPattern:
         """

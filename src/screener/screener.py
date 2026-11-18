@@ -162,10 +162,7 @@ class Screener:
 
             filtered_results.append(result)
 
-        logger.info(
-            f"スクリーニングが完了しました。{len(filtered_results)} 件の銘柄が抽出されました。"
-        )
-        print(
+        logger.debug(
             f"スクリーニングが完了しました。{len(filtered_results)} 件の銘柄が抽出されました。"
         )
         return filtered_results

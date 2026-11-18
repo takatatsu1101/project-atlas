@@ -1,4 +1,7 @@
+from contextlib import redirect_stdout
 from datetime import date, timedelta
+import io
+import logging
 from pathlib import Path
 import tempfile
 import unittest
@@ -6,6 +9,11 @@ from unittest.mock import patch
 
 import pandas as pd
 
+from src.common.logger import (
+    get_logger,
+    restore_project_log_levels,
+    set_project_log_level,
+)
 from src.common.storage import StorageManager
 from src.config.screening_config import AtlasScreeningConfig
 from src.pipeline_worker import (
@@ -119,6 +127,152 @@ class TestPipelineWorker(unittest.TestCase):
             self.assertEqual(sorted(res_batch["per_date_outputs"].keys()), [dates[-10], dates[-1]])
             # 読取専用のため cache/ 配下へ JSON ファイルは一切書き込まれない
             self.assertEqual(list((tmp_path / "cache").glob("*.json")), [])
+
+    def test_init_pipeline_worker_verbose_controls_debug_logs_and_output(self):
+        """init_pipeline_worker の verbose=True/False で DEBUG ログと詳細出力が切り替わる"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            storage = StorageManager(base_dir=tmp_path)
+            start = date(2025, 1, 1)
+            dates = [start + timedelta(days=i) for i in range(90)]
+            df = pd.DataFrame(
+                [
+                    {
+                        "date": d,
+                        "open": 1000.0 + i * 2.0,
+                        "high": 1010.0 + i * 2.0,
+                        "low": 995.0 + i * 2.0,
+                        "close": 1005.0 + i * 2.0,
+                        "volume": 300_000,
+                    }
+                    for i, d in enumerate(dates)
+                ]
+            )
+            storage.save_parquet(df, "price/7203.T.parquet")
+            storage.save_json(
+                {"item": {"7203": ["2025/03", "90000", "0", "0", "0", "0", "0", "1200.0", "45.0"]}},
+                "financial/0025-fy-balance-sheet.json",
+            )
+            storage.save_json(
+                {"item": {"7203": ["2025/03", "50000000000", "5000000000", "5200000000", "3500000000", "150.0", "15.0", "8.0"]}},
+                "financial/0025-fy-profit-and-loss.json",
+            )
+
+            irbank_local = tmp_path / "irbank_local"
+            irbank_user = tmp_path / "irbank_user"
+            irbank_local.mkdir(parents=True, exist_ok=True)
+            irbank_user.mkdir(parents=True, exist_ok=True)
+            config = AtlasScreeningConfig()
+
+            feat_logger = get_logger("FeatureManager")
+            storage_logger = get_logger("src.common.storage")
+            orig_feat_level = feat_logger.level
+            orig_storage_level = storage_logger.level
+
+            # 1. verbose=False の場合は INFO のままで、標準出力も静か
+            quiet_buf = io.StringIO()
+            with redirect_stdout(quiet_buf):
+                init_pipeline_worker(
+                    config.model_dump(mode="json"),
+                    storage_base_dir=str(tmp_path),
+                    irbank_cache_dir=str(tmp_path / "cache"),
+                    local_irbank_dir=str(irbank_local),
+                    user_irbank_dir=str(irbank_user),
+                    verbose=False,
+                )
+                self.assertEqual(feat_logger.level, orig_feat_level)
+                self.assertEqual(storage_logger.level, orig_storage_level)
+                process_symbol_task(
+                    {
+                        "symbol": "7203.T",
+                        "effective_start": dates[0],
+                        "fetch_end": dates[-1],
+                        "fetch_as_of": dates[-1],
+                        "as_of_date": dates[-1],
+                        "effective_fiscal_year": 2025,
+                        "should_check_liquidity": False,
+                        "use_bulk_eval_ohlcv": False,
+                        "use_cache": True,
+                        "use_feature_cache": True,
+                        "cache_key_suffix": f"asof_{dates[-1].isoformat()}",
+                    }
+                )
+                process_batch_symbol_task(
+                    {
+                        "symbol": "7203.T",
+                        "symbol_dates": [dates[-1]],
+                        "global_start": dates[0],
+                        "global_eval_end": dates[-1],
+                        "fiscal_year": 2025,
+                        "lookback_days": 365,
+                        "should_check_liquidity": False,
+                        "use_cache": True,
+                        "use_feature_cache": True,
+                    }
+                )
+            self.assertEqual(quiet_buf.getvalue(), "")
+
+            # 2. verbose=True の場合はワーカー内 DEBUG ログが有効化され、詳細出力が出る
+            #    終了後は既存テストへ影響しないよう元のログレベルへ復元する
+            pre_snapshot = set_project_log_level(logging.INFO)
+            debug_buf = io.StringIO()
+            debug_handler = logging.StreamHandler(debug_buf)
+            debug_handler.setLevel(logging.DEBUG)
+            feat_logger.addHandler(debug_handler)
+            storage_logger.addHandler(debug_handler)
+            verb_buf = io.StringIO()
+            try:
+                with redirect_stdout(verb_buf):
+                    init_pipeline_worker(
+                        config.model_dump(mode="json"),
+                        storage_base_dir=str(tmp_path),
+                        irbank_cache_dir=str(tmp_path / "cache"),
+                        local_irbank_dir=str(irbank_local),
+                        user_irbank_dir=str(irbank_user),
+                        verbose=True,
+                    )
+                    self.assertEqual(feat_logger.level, logging.DEBUG)
+                    self.assertEqual(storage_logger.level, logging.DEBUG)
+
+                    process_symbol_task(
+                        {
+                            "symbol": "7203.T",
+                            "effective_start": dates[0],
+                            "fetch_end": dates[-1],
+                            "fetch_as_of": dates[-1],
+                            "as_of_date": dates[-1],
+                            "effective_fiscal_year": 2025,
+                            "should_check_liquidity": False,
+                            "use_bulk_eval_ohlcv": False,
+                            "use_cache": True,
+                            "use_feature_cache": True,
+                            "cache_key_suffix": f"asof_{dates[-1].isoformat()}",
+                        }
+                    )
+                    process_batch_symbol_task(
+                        {
+                            "symbol": "7203.T",
+                            "symbol_dates": [dates[-1]],
+                            "global_start": dates[0],
+                            "global_eval_end": dates[-1],
+                            "fiscal_year": 2025,
+                            "lookback_days": 365,
+                            "should_check_liquidity": False,
+                            "use_cache": True,
+                            "use_feature_cache": True,
+                        }
+                    )
+            finally:
+                feat_logger.removeHandler(debug_handler)
+                storage_logger.removeHandler(debug_handler)
+                restore_project_log_levels(pre_snapshot)
+
+            self.assertEqual(feat_logger.level, orig_feat_level)
+            self.assertEqual(storage_logger.level, orig_storage_level)
+            self.assertIn("--- [7203.T] 処理開始 ---", verb_buf.getvalue())
+            self.assertIn("全期間指標計算・基準日断面評価完了", verb_buf.getvalue())
+            self.assertIn("を計算中...", debug_buf.getvalue())
+            self.assertIn("Parquetファイルを読み込みました", debug_buf.getvalue())
 
 
 if __name__ == "__main__":

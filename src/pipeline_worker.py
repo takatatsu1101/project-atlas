@@ -4,11 +4,12 @@
 
 from bisect import bisect_left, bisect_right
 from datetime import date, datetime, timedelta
+import logging
 from pathlib import Path
 import time
 from typing import Any, Callable, Dict, List, Optional, Union
 
-from src.common.logger import get_logger
+from src.common.logger import get_logger, set_project_log_level
 from src.common.storage import StorageManager
 from src.config.screening_config import AtlasScreeningConfig
 from src.data_collector.collector import DataCollector
@@ -43,11 +44,15 @@ def init_pipeline_worker(
     irbank_cache_dir: Optional[Union[str, Path]] = None,
     local_irbank_dir: Optional[Union[str, Path]] = None,
     user_irbank_dir: Optional[Union[str, Path]] = None,
+    verbose: bool = False,
 ) -> None:
     """
     ProcessPoolExecutor ワーカープロセス初期化関数（spawn 方式対応）。
     全レジストリを初期化し、ワーカープロセス固有の読取共有コンポーネントを1回だけ構築する。
     """
+    if verbose:
+        set_project_log_level(logging.DEBUG)
+
     import src.feature_engine  # noqa: F401
     import src.pattern_detector  # noqa: F401
     import src.score_engine  # noqa: F401
@@ -85,6 +90,7 @@ def init_pipeline_worker(
             "score_manager": score_manager,
             "pre_screener": pre_screener,
             "config": config,
+            "verbose": bool(verbose),
         }
     )
 
@@ -345,7 +351,7 @@ def process_symbol_task(task: Dict[str, Any]) -> Dict[str, Any]:
         score_calc_fn=score_manager.calculate_scores,
         pre_screener=pre_screener,
         read_only=True,
-        verbose=False,
+        verbose=bool(_WORKER_STATE.get("verbose", False)),
     )
 
 
@@ -369,6 +375,7 @@ def evaluate_symbol_across_dates(
     score_calc_fn: Callable[..., List[ScoreResultModel]],
     pre_screener: PreScreener,
     read_only: bool = False,
+    verbose: bool = False,
 ) -> Dict[str, Any]:
     """
     複数基準日バックテスト向けの共通単一銘柄評価ヘルパー。
@@ -378,6 +385,9 @@ def evaluate_symbol_across_dates(
     ohlcv_elapsed = 0.0
     eval_elapsed = 0.0
     latest_only_eval = bool(config.screener.latest_only_per_symbol)
+
+    if verbose:
+        print(f"\n--- [{symbol}] 処理開始 ({len(symbol_dates)}基準日) ---")
 
     try:
         # 1. 全期間 OHLCV を1回だけ読込
@@ -392,7 +402,12 @@ def evaluate_symbol_across_dates(
         full_ohlcv.sort(key=lambda b: normalize_bar_date(b.date))
         ohlcv_elapsed = time.perf_counter() - t_ohlcv
 
+        if verbose:
+            print(f"  全期間OHLCV取得件数: {len(full_ohlcv)} 件")
+
         if not full_ohlcv:
+            if verbose:
+                print(f"  警告: {symbol} のOHLCVデータが存在しないためスキップします。")
             return {
                 "symbol": symbol,
                 "ok": False,
@@ -492,6 +507,12 @@ def evaluate_symbol_across_dates(
             }
 
         eval_elapsed = time.perf_counter() - t_eval
+        if verbose:
+            print(
+                f"  [{symbol}] 全期間指標計算・基準日断面評価完了: "
+                f"{len(per_date_outputs)}/{len(symbol_dates)}日通過 "
+                f"(OHLCV={ohlcv_elapsed:.2f}s, 評価={eval_elapsed:.2f}s)"
+            )
         return {
             "symbol": symbol,
             "ok": True,
@@ -503,6 +524,8 @@ def evaluate_symbol_across_dates(
             "eval_elapsed": eval_elapsed,
         }
     except Exception as e:
+        if verbose:
+            print(f"  エラー [{symbol}]: {e}")
         return {
             "symbol": symbol,
             "ok": False,
@@ -559,4 +582,5 @@ def process_batch_symbol_task(task: Dict[str, Any]) -> Dict[str, Any]:
         score_calc_fn=score_manager.calculate_scores,
         pre_screener=pre_screener,
         read_only=True,
+        verbose=bool(_WORKER_STATE.get("verbose", False)),
     )

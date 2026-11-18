@@ -13,6 +13,7 @@ import requests
 from src.model.data_models import OhlcvModel, FinancialModel
 from src.config.settings import load_settings
 from src.common.logger import get_logger
+from src.common.progress import ProgressTracker
 from src.common.exceptions import DataCollectionError
 from src.common.storage import StorageManager
 from src.data_collector.market_calendar import (
@@ -217,7 +218,7 @@ class DataCollector:
         """
         Yahoo FinanceからOHLCVデータを取得する。
         """
-        logger.info(f"Yahoo Financeから {symbol} のOHLCVデータを取得中... ({start_date} - {end_date})")
+        logger.debug(f"Yahoo Financeから {symbol} のOHLCVデータを取得中... ({start_date} - {end_date})")
         try:
             norm_df = self._fetch_ticker_history_df(symbol, start_date, end_date)
             if norm_df.empty:
@@ -517,7 +518,7 @@ class DataCollector:
         )
         group_min_start = min(r[0] for r in sym_ranges.values())
         group_max_end = max(r[1] for r in sym_ranges.values())
-        logger.info(
+        logger.debug(
             f"OHLCVバッチ取得開始 [{group_name}]: {len(sorted_symbols)}銘柄 "
             f"({group_min_start} - {group_max_end}, chunk_size={chunk_size})"
         )
@@ -526,6 +527,11 @@ class DataCollector:
         retried_updated = 0
         retry_targets: List[str] = []
         attempted_chunk_ranges: Dict[str, Tuple[date, date]] = {}
+        chunk_tracker = ProgressTracker(
+            label=f"OHLCV取得[{group_name}]",
+            total=len(sorted_symbols),
+        )
+        processed_count = 0
 
         for idx in range(0, len(sorted_symbols), chunk_size):
             chunk = sorted_symbols[idx : idx + chunk_size]
@@ -533,6 +539,8 @@ class DataCollector:
             chunk_end = max(sym_ranges[s][1] for s in chunk)
             yf_end = (chunk_end + timedelta(days=1)).strftime("%Y-%m-%d")
 
+            raw_df: Optional[pd.DataFrame] = None
+            chunk_failed = False
             try:
                 raw_df = yf.download(
                     tickers=chunk,
@@ -548,54 +556,73 @@ class DataCollector:
                     f"yf.download チャンク取得に失敗したため個別リトライへ回します ({len(chunk)}銘柄): {e}"
                 )
                 retry_targets.extend(chunk)
-                continue
+                chunk_failed = True
 
-            if raw_df is None or raw_df.empty:
+            if not chunk_failed and (raw_df is None or raw_df.empty):
                 logger.warning(
                     f"yf.download の戻り値が空のため個別リトライへ回します ({len(chunk)}銘柄)"
                 )
                 retry_targets.extend(chunk)
-                continue
+                chunk_failed = True
 
-            for sym in chunk:
-                sub_df = self._extract_symbol_df_from_download(raw_df, sym, len(chunk))
-                norm_df = self._normalize_ohlcv_df(sub_df, max_date=chunk_end)
-                if not norm_df.empty and "date" in norm_df.columns:
-                    norm_df = norm_df[
-                        (norm_df["date"] >= chunk_start) & (norm_df["date"] <= chunk_end)
-                    ]
-                if norm_df.empty:
-                    retry_targets.append(sym)
-                    continue
+            if not chunk_failed:
+                for sym in chunk:
+                    sub_df = self._extract_symbol_df_from_download(raw_df, sym, len(chunk))
+                    norm_df = self._normalize_ohlcv_df(sub_df, max_date=chunk_end)
+                    if not norm_df.empty and "date" in norm_df.columns:
+                        norm_df = norm_df[
+                            (norm_df["date"] >= chunk_start) & (norm_df["date"] <= chunk_end)
+                        ]
+                    if norm_df.empty:
+                        retry_targets.append(sym)
+                        continue
 
-                attempted_chunk_ranges[sym] = (chunk_start, chunk_end)
-                try:
-                    self._merge_and_save_ohlcv(sym, cached_dfs.get(sym), norm_df)
-                    batch_updated += 1
-                except Exception as e:
-                    logger.warning(f"{sym} のOHLCV Parquet保存に失敗しました: {e}")
-                    failed_symbols.append(sym)
+                    attempted_chunk_ranges[sym] = (chunk_start, chunk_end)
+                    try:
+                        self._merge_and_save_ohlcv(sym, cached_dfs.get(sym), norm_df)
+                        batch_updated += 1
+                    except Exception as e:
+                        logger.warning(f"{sym} のOHLCV Parquet保存に失敗しました: {e}")
+                        failed_symbols.append(sym)
+
+            processed_count += len(chunk)
+            chunk_tracker.update(
+                processed_count,
+                detail=f"バッチ更新={batch_updated}, リトライ予定={len(retry_targets)}",
+            )
 
         # バッチ成功銘柄には実際に取得したチャンク範囲を記録する
         for sym, chunk_range in attempted_chunk_ranges.items():
             self._attempted_fetch_ranges[sym] = chunk_range
 
         # 欠損・失敗銘柄を1銘柄ずつ個別リトライし、実際に試みた sym_ranges[sym] を記録する
-        for sym in retry_targets:
-            sym_start, sym_end = sym_ranges[sym]
-            try:
-                retry_df = self._get_ohlcv_from_yfinance(sym, sym_start, sym_end)
-                if retry_df is not None and not retry_df.empty:
-                    self._merge_and_save_ohlcv(sym, cached_dfs.get(sym), retry_df)
-                    retried_updated += 1
-                else:
-                    logger.warning(f"個別リトライでも {sym} のOHLCVデータが取得できませんでした。")
+        if retry_targets:
+            retry_tracker = ProgressTracker(
+                label=f"OHLCV個別リトライ[{group_name}]",
+                total=len(retry_targets),
+            )
+            retried_failed = 0
+            for r_idx, sym in enumerate(retry_targets, start=1):
+                sym_start, sym_end = sym_ranges[sym]
+                try:
+                    retry_df = self._get_ohlcv_from_yfinance(sym, sym_start, sym_end)
+                    if retry_df is not None and not retry_df.empty:
+                        self._merge_and_save_ohlcv(sym, cached_dfs.get(sym), retry_df)
+                        retried_updated += 1
+                    else:
+                        logger.warning(f"個別リトライでも {sym} のOHLCVデータが取得できませんでした。")
+                        failed_symbols.append(sym)
+                        retried_failed += 1
+                except Exception as e:
+                    logger.warning(f"個別リトライ中に {sym} の取得または保存が失敗しました: {e}")
                     failed_symbols.append(sym)
-            except Exception as e:
-                logger.warning(f"個別リトライ中に {sym} の取得または保存が失敗しました: {e}")
-                failed_symbols.append(sym)
-            finally:
-                self._attempted_fetch_ranges[sym] = (sym_start, sym_end)
+                    retried_failed += 1
+                finally:
+                    self._attempted_fetch_ranges[sym] = (sym_start, sym_end)
+                retry_tracker.update(
+                    r_idx,
+                    detail=f"更新={retried_updated}, 失敗={retried_failed}",
+                )
 
         return batch_updated, retried_updated
 
@@ -624,8 +651,12 @@ class DataCollector:
                 total=len(unique_symbols),
                 skipped=len(unique_symbols),
             )
-            logger.info(
+            logger.debug(
                 f"OHLCVバッチプリフェッチ完了（早期終了）: 対象={summary['total']}件, スキップ={summary['skipped']}件"
+            )
+            print(
+                f"OHLCVキャッシュ確認完了: 対象={summary['total']}件, スキップ={summary['skipped']}件",
+                flush=True,
             )
             return summary
 
@@ -636,9 +667,14 @@ class DataCollector:
                 total=len(unique_symbols),
                 skipped=len(unique_symbols),
             )
-            logger.info(
+            logger.debug(
                 f"OHLCVバッチプリフェッチ完了（対象期間内に完了営業日なし）: "
                 f"対象={summary['total']}件, スキップ={summary['skipped']}件"
+            )
+            print(
+                f"OHLCVキャッシュ確認完了（対象期間内に完了営業日なし）: "
+                f"対象={summary['total']}件, スキップ={summary['skipped']}件",
+                flush=True,
             )
             return summary
 
@@ -691,6 +727,14 @@ class DataCollector:
         )
 
         # 4. グループごとにチャンク並列バッチ取得と失敗分の個別リトライを実行
+        total_fetch_targets = sum(len(sym_ranges) for _, sym_ranges in fetch_groups)
+        if total_fetch_targets > 0:
+            print(
+                f"OHLCVバッチ取得開始: 更新対象={total_fetch_targets}銘柄 "
+                f"(キャッシュ済={len(skipped_symbols)}銘柄)",
+                flush=True,
+            )
+
         batch_updated = 0
         retried_updated = 0
         failed_symbols: List[str] = []
@@ -713,12 +757,13 @@ class DataCollector:
             failed_symbols=failed_symbols,
             market_latest_date=market_latest_date,
         )
-        logger.info(
+        summary_msg = (
             f"OHLCVバッチプリフェッチ完了: 対象={summary['total']}件, "
-            f"スキップ={summary['skipped']}件, バッチ更新={summary['batch_updated']}件, "
-            f"個別リトライ更新={summary['retried_updated']}件, 失敗={summary['failed']}件, "
-            f"市場最新完了営業日={market_latest_date}"
+            f"キャッシュ済={summary['skipped']}件, バッチ更新={summary['batch_updated']}件, "
+            f"個別リトライ更新={summary['retried_updated']}件, 失敗={summary['failed']}件"
         )
+        logger.debug(f"{summary_msg}, 市場最新完了営業日={market_latest_date}")
+        print(summary_msg, flush=True)
         return summary
 
     def collect_ohlcv_data(
@@ -761,7 +806,7 @@ class DataCollector:
             need_fetch = False
         elif self._is_cache_sufficient(cached_df, req_start, req_end):
             need_fetch = False
-            logger.info(f"{symbol} のOHLCVデータをParquetストレージからロードしました。")
+            logger.debug(f"{symbol} のOHLCVデータをParquetストレージからロードしました。")
         else:
             expected_start, expected_end = self._resolve_expected_range(req_start, req_end)
             attempted = self._attempted_fetch_ranges.get(symbol)
@@ -778,7 +823,7 @@ class DataCollector:
                         start_covered = True
                 if start_covered and att_end >= expected_end:
                     need_fetch = False
-                    logger.info(f"{symbol} はバッチ取得試行済みのため再通信をスキップします。")
+                    logger.debug(f"{symbol} はバッチ取得試行済みのため再通信をスキップします。")
 
             if need_fetch and cached_df is not None and not cached_df.empty and "date" in cached_df.columns:
                 min_date = cached_df["date"].min()
@@ -918,7 +963,7 @@ class DataCollector:
             'Accept': 'application/json, text/plain, */*',
         }
         url = f"{self.URL_IRBANK_FILES}{year_suffix}/{fy_type}"
-        logger.info(f"IR BANK からダウンロード中...: {url}")
+        logger.debug(f"IR BANK からダウンロード中...: {url}")
         
         # 負荷分散のためのランダムスリープ
         time.sleep(random.randint(1, 3))
@@ -930,7 +975,7 @@ class DataCollector:
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
         with open(save_path, 'wb') as f:
             f.write(response.content)
-        logger.info(f"ダウンロード完了: {save_path}")
+        logger.debug(f"ダウンロード完了: {save_path}")
 
     def _load_irbank_json(
         self,
@@ -994,9 +1039,19 @@ class DataCollector:
         並列ワーカー起動前に親プロセス側で指定年度群の BS / PL JSON を事前にロード・ダウンロードする。
         """
         unique_years = sorted({int(y) for y in fiscal_years if not isinstance(y, bool)})
+        if not unique_years:
+            return
+        print(
+            f"IR BANK 財務キャッシュ準備中: {unique_years[0]}〜{unique_years[-1]}年度 ({len(unique_years)}期分)...",
+            flush=True,
+        )
         for year in unique_years:
             self._load_irbank_json(year, self.BALANCE_SHEET_FILE_NAME, allow_download=allow_download)
             self._load_irbank_json(year, self.PROFIT_AND_LOSS_FILE_NAME, allow_download=allow_download)
+        print(
+            f"IR BANK 財務キャッシュ準備完了 ({len(unique_years)}期分)",
+            flush=True,
+        )
 
     @staticmethod
     def _to_float(val: Any) -> float:
@@ -1128,7 +1183,7 @@ class DataCollector:
         """
         code = self._parse_symbol(symbol)
         target_year = fiscal_year if fiscal_year is not None else (as_of_date or date.today()).year
-        logger.info(f"実財務データをキャッシュ読込中... {symbol}(コード: {code}), 会計年度: {target_year}")
+        logger.debug(f"実財務データをキャッシュ読込中... {symbol}(コード: {code}), 会計年度: {target_year}")
 
         effective_allow_download = allow_download and not read_only
         bs_cache: Dict[int, Optional[Dict]] = {}
@@ -1275,7 +1330,7 @@ class DataCollector:
             equity_ratio=equity_ratio,
         )
 
-        logger.info(f"実財務データの取得に成功しました。({symbol})")
+        logger.debug(f"実財務データの取得に成功しました。({symbol})")
         return financial_model
 
     def load_financial_snapshot(

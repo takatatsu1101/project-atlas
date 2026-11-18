@@ -510,7 +510,7 @@ class Presenter:
         with open(target_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2, default=str)
 
-        logger.info(f"JSONレポートを出力しました: {target_path}")
+        logger.debug(f"JSONレポートを出力しました: {target_path}")
         return target_path
 
     def export_markdown(
@@ -773,7 +773,7 @@ class Presenter:
             lines.extend(self._build_evaluation_markdown_lines(evaluation_summary))
 
         target_path.write_text("\n".join(lines), encoding="utf-8")
-        logger.info(f"Markdownレポートを出力しました: {target_path}")
+        logger.debug(f"Markdownレポートを出力しました: {target_path}")
         return target_path
 
     def _build_horizon_markdown_tables(
@@ -1041,7 +1041,7 @@ class Presenter:
                 }
                 with open(target_path, "w", encoding="utf-8") as f:
                     json.dump(payload, f, ensure_ascii=False, indent=2, default=str)
-                logger.info(f"一括バックテストJSONレポートを出力しました: {target_path}")
+                logger.debug(f"一括バックテストJSONレポートを出力しました: {target_path}")
                 exported["json"] = target_path
             elif norm_fmt in ("markdown", "md"):
                 target_path = out_dir / f"{report_prefix}_{start_str}_{end_str}.md"
@@ -1107,7 +1107,7 @@ class Presenter:
                         )
                     lines.append("")
                 target_path.write_text("\n".join(lines), encoding="utf-8")
-                logger.info(
+                logger.debug(
                     f"一括バックテストMarkdownレポートを出力しました: {target_path}"
                 )
                 exported["markdown"] = target_path

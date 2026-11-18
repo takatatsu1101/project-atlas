@@ -1,3 +1,5 @@
+from contextlib import redirect_stdout
+import io
 import tempfile
 import unittest
 from datetime import date, datetime
@@ -1488,6 +1490,46 @@ class TestDataCollector(unittest.TestCase):
             unittest.mock.call(2025, collector.PROFIT_AND_LOSS_FILE_NAME, allow_download=False),
         ]
         self.assertEqual(mock_load.call_args_list, expected_calls)
+
+    def test_prefetch_ohlcv_batch_and_warmup_progress_output(self):
+        """prefetch_ohlcv_batch のチャンク進捗・開始/完了サマリーと warmup_irbank_cache のサマリー出力を検証"""
+        symbols = [f"{7000 + i}.T" for i in range(10)]
+        dates = pd.to_datetime(["2025-01-06", "2025-01-07"])
+
+        def fake_yf_download(tickers, **kwargs):
+            cols = pd.MultiIndex.from_product(
+                [tickers, ["Open", "High", "Low", "Close", "Volume"]]
+            )
+            data = {}
+            for sym in tickers:
+                data[(sym, "Open")] = [100.0, 101.0]
+                data[(sym, "High")] = [105.0, 106.0]
+                data[(sym, "Low")] = [99.0, 100.0]
+                data[(sym, "Close")] = [104.0, 105.0]
+                data[(sym, "Volume")] = [10000, 12000]
+            return pd.DataFrame(data, index=dates, columns=cols)
+
+        buf = io.StringIO()
+        with patch("src.data_collector.collector.yf.download", side_effect=fake_yf_download), \
+             patch.object(self.collector, "_load_irbank_json", return_value={"item": {}}), \
+             redirect_stdout(buf):
+            summary = self.collector.prefetch_ohlcv_batch(
+                symbols=symbols,
+                start_date=date(2025, 1, 6),
+                end_date=date(2025, 1, 7),
+                chunk_size=5,
+                precheck_market=False,
+            )
+            self.collector.warmup_irbank_cache([2024, 2025], allow_download=False)
+
+        self.assertEqual(summary["batch_updated"], 10)
+        out = buf.getvalue()
+        self.assertIn("OHLCVバッチ取得開始: 更新対象=10銘柄", out)
+        self.assertIn("[進行度] OHLCV取得[full_or_head_missing]: 5/10 (50.0%)", out)
+        self.assertIn("[進行度] OHLCV取得[full_or_head_missing]: 10/10 (100.0%)", out)
+        self.assertIn("OHLCVバッチプリフェッチ完了:", out)
+        self.assertIn("IR BANK 財務キャッシュ準備中: 2024〜2025年度 (2期分)...", out)
+        self.assertIn("IR BANK 財務キャッシュ準備完了 (2期分)", out)
 
 if __name__ == '__main__':
     unittest.main()

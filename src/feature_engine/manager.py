@@ -78,7 +78,7 @@ class FeatureManager:
                     and meta.get("financial_signature") == expected_fin_sig
                     and isinstance(items, list)
                 ):
-                    logger.info(f"{symbol} の特徴量をキャッシュからロードしました。")
+                    logger.debug(f"{symbol} の特徴量をキャッシュからロードしました。")
                     cached_sets = [FeatureSetModel(**item) for item in items]
                     if target_dates is not None:
                         return [fs for fs in cached_sets if fs.date in target_dates]
@@ -96,7 +96,7 @@ class FeatureManager:
                 features_to_calculate.append(self.registry.get_feature(feature_info["feature_id"]))
 
         for feature_instance in features_to_calculate:
-            logger.info(f"特徴量 {feature_instance.feature_name} を計算中...")
+            logger.debug(f"特徴量 {feature_instance.feature_name} を計算中...")
             if resolved_targets is not None and supports_target_indices(feature_instance.calculate):
                 feature_results = feature_instance.calculate(
                     ohlcv_eval,
@@ -140,9 +140,9 @@ class FeatureManager:
             except Exception as e:
                 logger.warning(f"特徴量キャッシュの保存に失敗しました: {e}")
 
-            logger.info(f"{symbol} の特徴量計算・キャッシュが完了しました。")
+            logger.debug(f"{symbol} の特徴量計算・キャッシュが完了しました。")
         else:
-            logger.info(f"{symbol} の特徴量計算が完了しました（キャッシュ保存なし）。")
+            logger.debug(f"{symbol} の特徴量計算が完了しました（キャッシュ保存なし）。")
         return final_feature_sets
 
 # モジュールレベルでインスタンス化

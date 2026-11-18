@@ -81,7 +81,7 @@ class PreScreener:
 
             filtered.append(stock)
 
-        logger.info(f"ユニバース事前スクリーニング完了: {len(master_stocks)}件 -> {len(filtered)}件")
+        logger.debug(f"ユニバース事前スクリーニング完了: {len(master_stocks)}件 -> {len(filtered)}件")
         return filtered
 
     def check_liquidity(

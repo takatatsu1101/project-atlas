@@ -1,6 +1,9 @@
 import inspect
 from typing import Any, Dict, List, Optional, Type
+from src.common.logger import get_logger
 from src.score_engine.interfaces import IScoreCalculator
+
+logger = get_logger(__name__)
 
 
 class ScoreRegistry:
@@ -14,7 +17,7 @@ class ScoreRegistry:
         if not issubclass(score_class, IScoreCalculator):
             raise ValueError("登録できるのはIScoreCalculatorを実装したクラスのみです。")
         self._scores[score_class.score_id] = score_class
-        print(f"Score '{score_class.score_name}' ({score_class.score_id}) を登録しました。")
+        logger.debug(f"Score '{score_class.score_name}' ({score_class.score_id}) を登録しました。")
 
     def get_score_calculator(
         self, score_id: str, config: Optional[Any] = None
