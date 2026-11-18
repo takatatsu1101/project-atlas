@@ -25,6 +25,9 @@ logger = get_logger("DataCollector")
 # 設定をロード
 settings = load_settings()
 
+# collect_ohlcv_data 用の Parquet 列限定読込対象
+OHLCV_READ_COLUMNS: Tuple[str, ...] = ("date", "open", "high", "low", "close", "volume")
+
 class DataCollector:
     def __init__(self):
         self.storage = StorageManager()
@@ -726,8 +729,11 @@ class DataCollector:
 
         parquet_path = f"price/{symbol}.parquet"
 
-        # 1. 既存のParquetデータをロード
-        cached_df = self.storage.load_parquet(parquet_path)
+        # 1. 既存のParquetデータを列限定でロード（モック互換のため TypeError 時は1引数フォールバック）
+        try:
+            cached_df = self.storage.load_parquet(parquet_path, columns=OHLCV_READ_COLUMNS)
+        except TypeError:
+            cached_df = self.storage.load_parquet(parquet_path)
         if cached_df is not None and not cached_df.empty and "date" in cached_df.columns:
             cached_df = self._normalize_date_column(cached_df)
             cached_df = cached_df[cached_df["date"].notna()]
@@ -771,7 +777,21 @@ class DataCollector:
             else:
                 if "date" in new_df.columns:
                     new_df = self._normalize_date_column(new_df)
-                cached_df = self._merge_and_save_ohlcv(symbol, cached_df, new_df)
+                # 保存し直す場合は既存の dividends / stock_splits 列を失わないよう不足時のみ全列を読み直してマージする
+                merge_base_df = cached_df
+                if cached_df is not None and not {"dividends", "stock_splits"}.issubset(
+                    cached_df.columns
+                ):
+                    full_cached_df = self.storage.load_parquet(parquet_path)
+                    if (
+                        full_cached_df is not None
+                        and not full_cached_df.empty
+                        and "date" in full_cached_df.columns
+                    ):
+                        full_cached_df = self._normalize_date_column(full_cached_df)
+                        full_cached_df = full_cached_df[full_cached_df["date"].notna()]
+                        merge_base_df = full_cached_df
+                cached_df = self._merge_and_save_ohlcv(symbol, merge_base_df, new_df)
                 df_filtered = cached_df[(cached_df["date"] >= req_start) & (cached_df["date"] <= req_end)]
         else:
             if cached_df is None or cached_df.empty or "date" not in cached_df.columns:
@@ -781,18 +801,67 @@ class DataCollector:
         if df_filtered is None or df_filtered.empty:
             return []
 
-        ohlcv_data = []
-        for _, row in df_filtered.iterrows():
-            ohlcv_data.append(OhlcvModel(
+        required_price_cols = ("open", "high", "low", "close")
+        if "date" not in df_filtered.columns or not all(
+            col in df_filtered.columns for col in required_price_cols
+        ):
+            return []
+
+        date_series = df_filtered["date"]
+        if pd.api.types.is_datetime64_any_dtype(date_series) or any(
+            type(v) is not date for v in date_series.tolist()
+        ):
+            date_series = self._normalize_date_column(df_filtered[["date"]])["date"]
+
+        inf_values = [float("inf"), float("-inf")]
+        nan_val = float("nan")
+        open_s = pd.to_numeric(df_filtered["open"], errors="coerce").replace(inf_values, nan_val)
+        high_s = pd.to_numeric(df_filtered["high"], errors="coerce").replace(inf_values, nan_val)
+        low_s = pd.to_numeric(df_filtered["low"], errors="coerce").replace(inf_values, nan_val)
+        close_s = pd.to_numeric(df_filtered["close"], errors="coerce").replace(inf_values, nan_val)
+
+        valid_mask = (
+            date_series.notna()
+            & open_s.notna()
+            & high_s.notna()
+            & low_s.notna()
+            & close_s.notna()
+        )
+        if not bool(valid_mask.any()):
+            return []
+
+        if "volume" in df_filtered.columns:
+            vol_s = (
+                pd.to_numeric(df_filtered.loc[valid_mask, "volume"], errors="coerce")
+                .replace(inf_values, nan_val)
+                .fillna(0)
+                .round()
+                .astype("int64")
+            )
+            volumes = vol_s.tolist()
+        else:
+            volumes = [0] * int(valid_mask.sum())
+
+        dates = date_series[valid_mask].tolist()
+        opens = open_s[valid_mask].astype("float64").tolist()
+        highs = high_s[valid_mask].astype("float64").tolist()
+        lows = low_s[valid_mask].astype("float64").tolist()
+        closes = close_s[valid_mask].astype("float64").tolist()
+
+        return [
+            OhlcvModel.model_construct(
                 symbol=symbol,
-                date=row["date"],
-                open=row["open"],
-                high=row["high"],
-                low=row["low"],
-                close=row["close"],
-                volume=row["volume"]
-            ))
-        return ohlcv_data
+                date=dt,
+                open=op,
+                high=hi,
+                low=lo,
+                close=cl,
+                volume=vol,
+            )
+            for dt, op, hi, lo, cl, vol in zip(
+                dates, opens, highs, lows, closes, volumes
+            )
+        ]
 
     def _get_irbank_file_path(self, year_suffix: str, file_name: str) -> str:
         """

@@ -1,5 +1,7 @@
+import math
+import time
 import unittest
-from datetime import date
+from datetime import date, timedelta
 
 from src.pattern_detector.patterns.reversal.double_bottom import DoubleBottomPattern
 from src.model.data_models import OhlcvModel, IndicatorSetModel, PatternResultModel
@@ -122,6 +124,206 @@ class TestDoubleBottomPattern(unittest.TestCase):
         # 15日未満のデータ
         results = self.pattern_detector.detect(self.ohlcv_data_insufficient if hasattr(self, 'ohlcv_data_insufficient') else [], [])
         self.assertEqual(len(results), 0)
+
+    def _naive_double_bottom_detect(self, ohlcv_data):
+        """旧 O(N^2) アルゴリズムと同等の参照実装（全日付一致検証用）"""
+        results = []
+        if len(ohlcv_data) < 15:
+            return results
+        for i in range(10, len(ohlcv_data)):
+            current_close = ohlcv_data[i].close
+            troughs = []
+            for j in range(2, i - 2):
+                low_j = ohlcv_data[j].low
+                if (
+                    low_j < ohlcv_data[j - 1].low
+                    and low_j < ohlcv_data[j - 2].low
+                    and low_j < ohlcv_data[j + 1].low
+                    and low_j < ohlcv_data[j + 2].low
+                ):
+                    troughs.append(j)
+            if len(troughs) < 2:
+                continue
+            v1_idx, v2_idx = troughs[-2], troughs[-1]
+            v1_low, v2_low = ohlcv_data[v1_idx].low, ohlcv_data[v2_idx].low
+            if abs(v1_low - v2_low) / v1_low > 0.025:
+                continue
+            neck_idx = v1_idx + 1
+            for j in range(v1_idx + 1, v2_idx):
+                if ohlcv_data[j].high > ohlcv_data[neck_idx].high:
+                    neck_idx = j
+            neck_high = ohlcv_data[neck_idx].high
+            if current_close < min(v1_low, v2_low):
+                continue
+            confidence = self.pattern_detector._calculate_confidence({
+                "close": current_close,
+                "v2_low": v2_low,
+                "neck_high": neck_high,
+            })
+            if confidence >= 40.0:
+                results.append(PatternResultModel(
+                    pattern_id=self.pattern_detector.pattern_id,
+                    pattern_name=self.pattern_detector.pattern_name,
+                    confidence=confidence,
+                    metadata={
+                        "date": ohlcv_data[i].date,
+                        "v1_date": ohlcv_data[v1_idx].date,
+                        "v2_date": ohlcv_data[v2_idx].date,
+                        "neck_date": ohlcv_data[neck_idx].date,
+                        "v1_low": v1_low,
+                        "v2_low": v2_low,
+                        "neck_high": neck_high,
+                        "close": current_close,
+                    },
+                ))
+        return results
+
+    def test_matches_naive_reference_all_dates_and_target_indices(self):
+        """O(N) 実装が旧アルゴリズムと全日付一致し、target_indices とも一致する"""
+        bars = []
+        base = date(2024, 1, 1)
+        for i in range(120):
+            wave = 100.0 + 10.0 * math.sin(i * 0.45)
+            bars.append(
+                OhlcvModel(
+                    symbol=self.symbol,
+                    date=base + timedelta(days=i),
+                    open=wave,
+                    high=wave + 3.0,
+                    low=wave - 3.0,
+                    close=wave + 1.0,
+                    volume=1000,
+                )
+            )
+        ind = [IndicatorSetModel(symbol=self.symbol, date=b.date, indicators={}) for b in bars]
+
+        expected = self._naive_double_bottom_detect(bars)
+        actual = self.pattern_detector.detect(bars, ind)
+        self.assertGreater(len(expected), 0)
+        self.assertEqual(len(actual), len(expected))
+        for a, e in zip(actual, expected):
+            self.assertEqual(a.pattern_id, e.pattern_id)
+            self.assertAlmostEqual(a.confidence, e.confidence, places=12)
+            self.assertEqual(a.metadata, e.metadata)
+
+        # target_indices（負インデックス・重複・範囲外含む）で全日付結果の該当分と一致
+        detected_dates = {r.metadata["date"] for r in actual}
+        target_idx = [-1, 30, 50, -1, 999, -999]
+        target_dates = {bars[119].date, bars[30].date, bars[50].date}
+        partial = self.pattern_detector.detect(bars, ind, target_indices=target_idx)
+        expected_partial = [r for r in actual if r.metadata["date"] in target_dates]
+        self.assertEqual(len(partial), len(expected_partial))
+        self.assertEqual({r.metadata["date"] for r in partial}, detected_dates & target_dates)
+
+    def test_long_series_2000_days_performance(self):
+        """2000日系列を O(N) で高速に処理できる"""
+        bars = []
+        base = date(2018, 1, 1)
+        for i in range(2000):
+            wave = 1000.0 + 20.0 * math.sin(i * 0.4)
+            bars.append(
+                OhlcvModel(
+                    symbol=self.symbol,
+                    date=base + timedelta(days=i),
+                    open=wave,
+                    high=wave + 5.0,
+                    low=wave - 5.0,
+                    close=wave + 2.0,
+                    volume=1000,
+                )
+            )
+        ind = [IndicatorSetModel(symbol=self.symbol, date=b.date, indicators={}) for b in bars]
+        t0 = time.perf_counter()
+        results = self.pattern_detector.detect(bars, ind)
+        elapsed = time.perf_counter() - t0
+        self.assertGreater(len(results), 0)
+        self.assertLess(elapsed, 0.5)
+
+    def test_edge_cases_boundaries_tie_break_flat_and_zero_price(self):
+        """14日以下・同値ネックライン・2.5%境界・フラット極値・e1_val==0 境界を検証"""
+        base = date(2025, 2, 1)
+
+        def to_bars(rows):
+            bars = [
+                OhlcvModel(
+                    symbol=self.symbol,
+                    date=base + timedelta(days=idx),
+                    open=o,
+                    high=h,
+                    low=l,
+                    close=c,
+                    volume=1000,
+                )
+                for idx, (o, h, l, c) in enumerate(rows)
+            ]
+            inds = [IndicatorSetModel(symbol=self.symbol, date=b.date, indicators={}) for b in bars]
+            return bars, inds
+
+        # 1. len == 14 (< 15) は空
+        b14, i14 = to_bars([(100, 102, 98, 100)] * 14)
+        self.assertEqual(self.pattern_detector.detect(b14, i14), [])
+
+        # 2. 同値ネックライン（複数日の high が同値 100.0 のとき最初の日が採用される）
+        tie_rows = [
+            (100, 102, 98, 99),
+            (95, 97, 92, 93),
+            (90, 92, 85, 86),
+            (82, 85, 80, 81),    # 谷1 (idx 3)
+            (88, 95, 84, 90),
+            (95, 100, 90, 97),   # ネック同値1 (idx 5)
+            (95, 100, 90, 96),   # ネック同値2 (idx 6)
+            (92, 96, 89, 93),
+            (88, 92, 84, 85),
+            (81, 84, 80.5, 83),  # 谷2 (idx 9)
+            (85, 90, 82, 89),
+            (90, 95, 88, 94),
+            (95, 100, 93, 98),
+            (100, 103, 99, 102),
+            (101, 104, 99, 103),
+        ]
+        b_tie, i_tie = to_bars(tie_rows)
+        res_tie = self.pattern_detector.detect(b_tie, i_tie)
+        self.assertGreater(len(res_tie), 0)
+        self.assertEqual(res_tie[-1].metadata["neck_date"], b_tie[5].date)
+
+        # 3. 価格差 2.5% 境界（2.5% ちょうどは採用、2.51% は除外）
+        rows_exact_25 = [
+            (120, 122, 120, 121),
+            (116, 118, 115, 116),
+            (111, 113, 110, 111),
+            (102, 105, 100.0, 101),  # 谷1 (idx 3)
+            (109, 111, 108, 110),
+            (113, 115, 112, 114),    # ネック (idx 5, high=115)
+            (111, 113, 110, 111),
+            (109, 111, 108, 109),
+            (106, 108, 105, 106),
+            (99, 101, 97.5, 100),    # 谷2 (idx 9): |100 - 97.5| / 100 = 0.025
+            (103, 105, 102, 104),
+            (109, 111, 108, 110),
+            (113, 115, 112, 114),
+            (116, 118, 115, 117),
+            (117, 120, 116, 118),
+        ]
+        b_ok, i_ok = to_bars(rows_exact_25)
+        self.assertGreater(len(self.pattern_detector.detect(b_ok, i_ok)), 0)
+
+        rows_over_25 = list(rows_exact_25)
+        rows_over_25[9] = (99, 101, 97.49, 100)  # 0.0251 > 0.025
+        b_ng, i_ng = to_bars(rows_over_25)
+        self.assertEqual(self.pattern_detector.detect(b_ng, i_ng), [])
+
+        # 4. フラット極値（連続同値は厳密 < のため谷にならず未検出）
+        flat_rows = list(tie_rows)
+        flat_rows[3] = (82, 85, 80.0, 81)
+        flat_rows[4] = (82, 85, 80.0, 81)
+        b_flat, i_flat = to_bars(flat_rows)
+        self.assertEqual(self.pattern_detector.detect(b_flat, i_flat), [])
+
+        # 5. e1_val == 0 でも ZeroDivisionError にならずスキップされる
+        zero_rows = list(tie_rows)
+        zero_rows[3] = (82, 85, 0.0, 81)
+        b_zero, i_zero = to_bars(zero_rows)
+        self.assertEqual(self.pattern_detector.detect(b_zero, i_zero), [])
 
 if __name__ == '__main__':
     unittest.main()

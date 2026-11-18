@@ -1,5 +1,6 @@
-from typing import List, Optional
+from typing import List, Optional, Sequence
 
+from src.common.indexing import resolve_target_indices
 from src.feature_engine.interfaces import IFeature
 from src.model.data_models import OhlcvModel, IndicatorSetModel, FinancialModel, FeatureResultModel
 from src.feature_engine.registry import feature_registry
@@ -13,14 +14,16 @@ class BreakoutScore(IFeature):
         self,
         ohlcv_data: List[OhlcvModel],
         indicator_data: List[IndicatorSetModel],
-        financial_data: Optional[FinancialModel] = None
+        financial_data: Optional[FinancialModel] = None,
+        target_indices: Optional[Sequence[int]] = None,
     ) -> List[FeatureResultModel]:
         
         if not ohlcv_data:
             return []
 
         results: List[FeatureResultModel] = []
-        for i, ind_set in enumerate(indicator_data):
+        for i in resolve_target_indices(len(indicator_data), target_indices):
+            ind_set = indicator_data[i]
             close_price = ohlcv_data[i].close if i < len(ohlcv_data) else None
 
             # 過去N日間（ここでは20日間。前日からさかのぼる）の最高値を取得
@@ -29,19 +32,21 @@ class BreakoutScore(IFeature):
             max_past_days = 20
 
             highest_high = None
+            past_days_calculated = i if i < max_past_days else max_past_days
             if i >= min_past_days:
                 past_start_idx = max(0, i - max_past_days)
-                past_end_idx = i # 今日（インデックス i）は含めない過去の最高値
-                
-                # 過去のOHLCVデータから最高値(high)を計算
-                past_highs = [ohlcv_data[j].high for j in range(past_start_idx, past_end_idx)]
-                if past_highs:
-                    highest_high = max(past_highs)
+                past_end_idx = min(i, len(ohlcv_data)) # 今日（インデックス i）は含めない過去の最高値
+                past_days_calculated = max(0, past_end_idx - past_start_idx)
+                if past_start_idx < past_end_idx:
+                    # 過去のOHLCVデータから最高値(high)を計算
+                    past_highs = [ohlcv_data[j].high for j in range(past_start_idx, past_end_idx)]
+                    if past_highs:
+                        highest_high = max(past_highs)
 
             metadata = {
                 "close": close_price,
                 "highest_high": highest_high,
-                "past_days_calculated": i if i < max_past_days else max_past_days
+                "past_days_calculated": past_days_calculated
             }
 
             # 必要なデータが揃っていない場合は中立（データ不足評価）

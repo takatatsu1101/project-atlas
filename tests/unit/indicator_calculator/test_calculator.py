@@ -1,7 +1,8 @@
 
+import math
 import tempfile
 import unittest
-from datetime import date
+from datetime import date, timedelta
 import pandas as pd
 import numpy as np
 
@@ -209,6 +210,82 @@ class TestIndicatorCalculator(unittest.TestCase):
             self.assertTrue(expected_path.exists())
         finally:
             calc_mod.indicator_calculator.storage = orig_storage
+
+    def test_vectorized_calculate_indicators_matches_individual_methods_all_dates(self):
+        """一括ベクトル版 calculate_indicators と個別メソッドが全日付・全9指標で完全一致する"""
+        bars = []
+        base = date(2025, 1, 1)
+        for i in range(100):
+            close = 1000.0 + (i % 7) * 5.0 + i * 2.0
+            bars.append(
+                OhlcvModel(
+                    symbol="VEC",
+                    date=base + timedelta(days=i),
+                    open=close - 3.0,
+                    high=close + 6.0,
+                    low=close - 6.0,
+                    close=close,
+                    volume=0 if i == 0 else 1000 + i * 50,
+                )
+            )
+
+        ind_sets = self.calculator.calculate_indicators(bars, use_cache=True)
+        self.assertEqual(len(ind_sets), len(bars))
+
+        sma5 = self.calculator.calculate_sma(bars, 5)
+        sma25 = self.calculator.calculate_sma(bars, 25)
+        sma75 = self.calculator.calculate_sma(bars, 75)
+        rsi14 = self.calculator.calculate_rsi(bars, 14)
+        macd = self.calculator.calculate_macd(bars)
+        hh20 = self.calculator.calculate_highest_high(bars, 20)
+        ll20 = self.calculator.calculate_lowest_low(bars, 20)
+        atr14 = self.calculator.calculate_atr(bars, 14)
+        vr20 = self.calculator.calculate_volume_ratio(bars, 20)
+
+        for i, ind_set in enumerate(ind_sets):
+            ind = ind_set.indicators
+            for key, arr in (
+                ("SMA5", sma5),
+                ("SMA25", sma25),
+                ("SMA75", sma75),
+                ("RSI14", rsi14),
+                ("HIGHEST_HIGH_20", hh20),
+                ("LOWEST_LOW_20", ll20),
+                ("ATR14", atr14),
+            ):
+                if math.isnan(arr[i]):
+                    self.assertNotIn(key, ind)
+                else:
+                    self.assertIs(type(ind[key]), float)
+                    self.assertAlmostEqual(ind[key], arr[i], places=12)
+
+            self.assertEqual(set(ind["MACD"].keys()), {"macd", "signal", "histogram"})
+            for m_key in ("macd", "signal", "histogram"):
+                self.assertIs(type(ind["MACD"][m_key]), float)
+                self.assertAlmostEqual(ind["MACD"][m_key], macd[i][m_key], places=12)
+
+            if vr20[i] is None:
+                self.assertNotIn("VOLUME_RATIO", ind)
+            else:
+                self.assertIs(type(ind["VOLUME_RATIO"]), float)
+                self.assertAlmostEqual(ind["VOLUME_RATIO"], vr20[i], places=12)
+
+        # キャッシュ再読込でも全日付・全9指標・型が一致することを確認
+        cached_sets = self.calculator.calculate_indicators(bars, use_cache=True)
+        self.assertEqual(len(cached_sets), len(ind_sets))
+        for orig, cached in zip(ind_sets, cached_sets):
+            self.assertEqual(cached.symbol, orig.symbol)
+            self.assertEqual(cached.date, orig.date)
+            self.assertEqual(set(cached.indicators.keys()), set(orig.indicators.keys()))
+            for k, orig_val in orig.indicators.items():
+                cached_val = cached.indicators[k]
+                if k == "MACD":
+                    for m_key in ("macd", "signal", "histogram"):
+                        self.assertIs(type(cached_val[m_key]), float)
+                        self.assertAlmostEqual(cached_val[m_key], orig_val[m_key], places=12)
+                else:
+                    self.assertIs(type(cached_val), float)
+                    self.assertAlmostEqual(cached_val, orig_val, places=12)
 
 if __name__ == '__main__':
     unittest.main()

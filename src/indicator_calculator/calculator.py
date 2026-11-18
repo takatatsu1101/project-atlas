@@ -1,4 +1,5 @@
 
+import math
 from typing import List, Dict, Optional
 import pandas as pd
 
@@ -11,117 +12,181 @@ logger = get_logger("IndicatorCalculator")
 class IndicatorCalculator:
     def __init__(self):
         self.storage = StorageManager()
+
+    @staticmethod
+    def _compute_sma(close_series: pd.Series, period: int) -> List[float]:
+        """終値 Series から単純移動平均 (SMA) をベクトル計算する。"""
+        if close_series.empty:
+            return []
+        return close_series.rolling(window=period).mean().tolist()
+
+    @staticmethod
+    def _compute_rsi(close_series: pd.Series, period: int) -> List[float]:
+        """終値 Series から相対力指数 (RSI) をベクトル計算する。"""
+        if close_series.empty:
+            return []
+        delta = close_series.diff()
+        gain = delta.where(delta > 0, 0)
+        loss = -delta.where(delta < 0, 0)
+
+        avg_gain = gain.rolling(window=period, min_periods=1).mean()
+        avg_loss = loss.rolling(window=period, min_periods=1).mean()
+
+        rs = avg_gain / avg_loss.replace(0, 1e-9)  # 0除算対策
+        rsi = 100 - (100 / (1 + rs))
+        return rsi.tolist()
+
+    @staticmethod
+    def _compute_macd(
+        close_series: pd.Series,
+        fast_period: int = 12,
+        slow_period: int = 26,
+        signal_period: int = 9,
+    ) -> List[Dict[str, float]]:
+        """終値 Series から MACD (macd / signal / histogram) をベクトル計算する。"""
+        if close_series.empty:
+            return []
+        ema_fast = close_series.ewm(span=fast_period, adjust=False).mean()
+        ema_slow = close_series.ewm(span=slow_period, adjust=False).mean()
+        macd = ema_fast - ema_slow
+        signal = macd.ewm(span=signal_period, adjust=False).mean()
+        histogram = macd - signal
+
+        return [
+            {"macd": m, "signal": s, "histogram": h}
+            for m, s, h in zip(macd.tolist(), signal.tolist(), histogram.tolist())
+        ]
+
+    @staticmethod
+    def _compute_highest_high(high_series: pd.Series, period: int = 20) -> List[float]:
+        """高値 Series から直近 period 営業日の最高値 (HIGHEST_HIGH) をベクトル計算する。"""
+        if high_series.empty:
+            return []
+        return high_series.rolling(window=period, min_periods=1).max().tolist()
+
+    @staticmethod
+    def _compute_lowest_low(low_series: pd.Series, period: int = 20) -> List[float]:
+        """安値 Series から直近 period 営業日の最安値 (LOWEST_LOW) をベクトル計算する。"""
+        if low_series.empty:
+            return []
+        return low_series.rolling(window=period, min_periods=1).min().tolist()
+
+    @staticmethod
+    def _compute_atr(
+        high_series: pd.Series,
+        low_series: pd.Series,
+        close_series: pd.Series,
+        period: int = 14,
+    ) -> List[float]:
+        """高値・安値・終値 Series から True Range の単純移動平均 (ATR) をベクトル計算する。"""
+        if close_series.empty:
+            return []
+        prev_close = close_series.shift(1)
+        tr = pd.concat(
+            [
+                high_series - low_series,
+                (high_series - prev_close).abs(),
+                (low_series - prev_close).abs(),
+            ],
+            axis=1,
+        ).max(axis=1)
+        return tr.rolling(window=period, min_periods=1).mean().tolist()
+
+    @staticmethod
+    def _compute_volume_ratio(
+        volume_series: pd.Series, period: int = 20
+    ) -> List[Optional[float]]:
+        """出来高 Series から当日出来高 ÷ 直近 period 日平均出来高をベクトル計算する。"""
+        if volume_series.empty:
+            return []
+        avg_volume = volume_series.rolling(window=period, min_periods=1).mean()
+        ratios: List[Optional[float]] = []
+        for vol, avg_vol in zip(volume_series.tolist(), avg_volume.tolist()):
+            if math.isnan(vol) or math.isnan(avg_vol) or avg_vol == 0:
+                ratios.append(None)
+            else:
+                ratios.append(float(vol / avg_vol))
+        return ratios
+
     def calculate_sma(self, ohlcv_data: List[OhlcvModel], period: int) -> List[float]:
         """
         単純移動平均 (SMA) を計算する。
         """
-        df = pd.DataFrame([o.model_dump() for o in ohlcv_data])
-        if df.empty:
+        if not ohlcv_data:
             return []
-        df["close"] = pd.to_numeric(df["close"])
-        sma = df["close"].rolling(window=period).mean().tolist()
-        return sma
+        close_series = pd.Series([o.close for o in ohlcv_data], dtype="float64")
+        return self._compute_sma(close_series, period)
 
     def calculate_rsi(self, ohlcv_data: List[OhlcvModel], period: int) -> List[float]:
         """
         相対力指数 (RSI) を計算する。
         """
-        df = pd.DataFrame([o.model_dump() for o in ohlcv_data])
-        if df.empty:
+        if not ohlcv_data:
             return []
-        df["close"] = pd.to_numeric(df["close"])
-        delta = df["close"].diff()
-        gain = delta.where(delta > 0, 0)
-        loss = -delta.where(delta < 0, 0)
-        
-        avg_gain = gain.rolling(window=period, min_periods=1).mean()
-        avg_loss = loss.rolling(window=period, min_periods=1).mean()
+        close_series = pd.Series([o.close for o in ohlcv_data], dtype="float64")
+        return self._compute_rsi(close_series, period)
 
-        rs = avg_gain / avg_loss.replace(0, 1e-9) # 0除算対策
-        rsi = 100 - (100 / (1 + rs))
-        return rsi.tolist()
-
-    def calculate_macd(self, ohlcv_data: List[OhlcvModel], fast_period: int = 12, slow_period: int = 26, signal_period: int = 9) -> List[Dict[str, float]]:
+    def calculate_macd(
+        self,
+        ohlcv_data: List[OhlcvModel],
+        fast_period: int = 12,
+        slow_period: int = 26,
+        signal_period: int = 9,
+    ) -> List[Dict[str, float]]:
         """
         MACD (Moving Average Convergence Divergence) を計算する。
         """
-        df = pd.DataFrame([o.model_dump() for o in ohlcv_data])
-        if df.empty:
+        if not ohlcv_data:
             return []
-        df["close"] = pd.to_numeric(df["close"])
+        close_series = pd.Series([o.close for o in ohlcv_data], dtype="float64")
+        return self._compute_macd(close_series, fast_period, slow_period, signal_period)
 
-        ema_fast = df["close"].ewm(span=fast_period, adjust=False).mean()
-        ema_slow = df["close"].ewm(span=slow_period, adjust=False).mean()
-        macd = ema_fast - ema_slow
-        signal = macd.ewm(span=signal_period, adjust=False).mean()
-        histogram = macd - signal
-
-        result = []
-        for i in range(len(macd)):
-            result.append({"macd": macd.iloc[i], "signal": signal.iloc[i], "histogram": histogram.iloc[i]})
-        return result
-
-    def calculate_highest_high(self, ohlcv_data: List[OhlcvModel], period: int = 20) -> List[float]:
+    def calculate_highest_high(
+        self, ohlcv_data: List[OhlcvModel], period: int = 20
+    ) -> List[float]:
         """
         当日を含む直近 period 営業日のレンジ最高値（HIGHEST_HIGH）を計算する。
         （※ ブレイクアウト判定用の前日以前高値は P002_BreakoutScore 側で別途算出される）
         """
-        df = pd.DataFrame([o.model_dump() for o in ohlcv_data])
-        if df.empty:
+        if not ohlcv_data:
             return []
-        df["high"] = pd.to_numeric(df["high"])
-        return [float(v) for v in df["high"].rolling(window=period, min_periods=1).max().tolist()]
+        high_series = pd.Series([o.high for o in ohlcv_data], dtype="float64")
+        return self._compute_highest_high(high_series, period)
 
-    def calculate_lowest_low(self, ohlcv_data: List[OhlcvModel], period: int = 20) -> List[float]:
+    def calculate_lowest_low(
+        self, ohlcv_data: List[OhlcvModel], period: int = 20
+    ) -> List[float]:
         """
         当日を含む直近 period 営業日のレンジ最安値（LOWEST_LOW）を計算する。
         """
-        df = pd.DataFrame([o.model_dump() for o in ohlcv_data])
-        if df.empty:
+        if not ohlcv_data:
             return []
-        df["low"] = pd.to_numeric(df["low"])
-        return [float(v) for v in df["low"].rolling(window=period, min_periods=1).min().tolist()]
+        low_series = pd.Series([o.low for o in ohlcv_data], dtype="float64")
+        return self._compute_lowest_low(low_series, period)
 
-    def calculate_atr(self, ohlcv_data: List[OhlcvModel], period: int = 14) -> List[float]:
+    def calculate_atr(
+        self, ohlcv_data: List[OhlcvModel], period: int = 14
+    ) -> List[float]:
         """
         True Range の period 日単純移動平均（ATR）を計算する。
         """
-        df = pd.DataFrame([o.model_dump() for o in ohlcv_data])
-        if df.empty:
+        if not ohlcv_data:
             return []
-        high = pd.to_numeric(df["high"])
-        low = pd.to_numeric(df["low"])
-        close = pd.to_numeric(df["close"])
-        prev_close = close.shift(1)
+        high_series = pd.Series([o.high for o in ohlcv_data], dtype="float64")
+        low_series = pd.Series([o.low for o in ohlcv_data], dtype="float64")
+        close_series = pd.Series([o.close for o in ohlcv_data], dtype="float64")
+        return self._compute_atr(high_series, low_series, close_series, period)
 
-        tr = pd.concat(
-            [
-                high - low,
-                (high - prev_close).abs(),
-                (low - prev_close).abs(),
-            ],
-            axis=1,
-        ).max(axis=1)
-        atr = tr.rolling(window=period, min_periods=1).mean()
-        return [float(v) for v in atr.tolist()]
-
-    def calculate_volume_ratio(self, ohlcv_data: List[OhlcvModel], period: int = 20) -> List[Optional[float]]:
+    def calculate_volume_ratio(
+        self, ohlcv_data: List[OhlcvModel], period: int = 20
+    ) -> List[Optional[float]]:
         """
         当日出来高 ÷ 直近 period 日平均出来高を計算する（0除算時は None）。
         """
-        df = pd.DataFrame([o.model_dump() for o in ohlcv_data])
-        if df.empty:
+        if not ohlcv_data:
             return []
-        volume = pd.to_numeric(df["volume"])
-        avg_volume = volume.rolling(window=period, min_periods=1).mean()
-
-        ratios: List[Optional[float]] = []
-        for vol, avg_vol in zip(volume.tolist(), avg_volume.tolist()):
-            if pd.isna(vol) or pd.isna(avg_vol) or avg_vol == 0:
-                ratios.append(None)
-            else:
-                ratios.append(float(vol / avg_vol))
-        return ratios
+        volume_series = pd.Series([o.volume for o in ohlcv_data], dtype="float64")
+        return self._compute_volume_ratio(volume_series, period)
 
     def calculate_indicators(
         self,
@@ -161,35 +226,72 @@ class IndicatorCalculator:
                 logger.info(f"{symbol} のテクニカル指標をキャッシュからロードしました。")
                 return [IndicatorSetModel(**item) for item in cached_data]
 
-        # SMA(5, 25, 75)、RSI(14)、MACD、および高値/安値・ATR14・出来高倍率を計算
-        sma_5 = self.calculate_sma(ohlcv_data, 5)
-        sma_25 = self.calculate_sma(ohlcv_data, 25)
-        sma_75 = self.calculate_sma(ohlcv_data, 75)
-        rsi_14 = self.calculate_rsi(ohlcv_data, 14)
-        macd_data = self.calculate_macd(ohlcv_data)
-        highest_high_20 = self.calculate_highest_high(ohlcv_data, 20)
-        lowest_low_20 = self.calculate_lowest_low(ohlcv_data, 20)
-        atr_14 = self.calculate_atr(ohlcv_data, 14)
-        volume_ratio = self.calculate_volume_ratio(ohlcv_data, 20)
+        # high, low, close, volume を1回だけ抽出し全9指標を一括ベクトル計算する
+        high_series = pd.Series([o.high for o in ohlcv_data], dtype="float64")
+        low_series = pd.Series([o.low for o in ohlcv_data], dtype="float64")
+        close_series = pd.Series([o.close for o in ohlcv_data], dtype="float64")
+        volume_series = pd.Series([o.volume for o in ohlcv_data], dtype="float64")
+
+        sma_5 = self._compute_sma(close_series, 5)
+        sma_25 = self._compute_sma(close_series, 25)
+        sma_75 = self._compute_sma(close_series, 75)
+        rsi_14 = self._compute_rsi(close_series, 14)
+        macd_data = self._compute_macd(close_series)
+        highest_high_20 = self._compute_highest_high(high_series, 20)
+        lowest_low_20 = self._compute_lowest_low(low_series, 20)
+        atr_14 = self._compute_atr(high_series, low_series, close_series, 14)
+        volume_ratio = self._compute_volume_ratio(volume_series, 20)
 
         indicator_sets: List[IndicatorSetModel] = []
-        for i, ohlcv in enumerate(ohlcv_data):
-            indicators = {
-                "SMA5": sma_5[i] if i < len(sma_5) and not pd.isna(sma_5[i]) else None,
-                "SMA25": sma_25[i] if i < len(sma_25) and not pd.isna(sma_25[i]) else None,
-                "SMA75": sma_75[i] if i < len(sma_75) and not pd.isna(sma_75[i]) else None,
-                "RSI14": rsi_14[i] if i < len(rsi_14) and not pd.isna(rsi_14[i]) else None,
-                "MACD": macd_data[i] if i < len(macd_data) else None,
-                "HIGHEST_HIGH_20": highest_high_20[i] if i < len(highest_high_20) and not pd.isna(highest_high_20[i]) else None,
-                "LOWEST_LOW_20": lowest_low_20[i] if i < len(lowest_low_20) and not pd.isna(lowest_low_20[i]) else None,
-                "ATR14": atr_14[i] if i < len(atr_14) and not pd.isna(atr_14[i]) else None,
-                "VOLUME_RATIO": volume_ratio[i] if i < len(volume_ratio) else None,
-            }
-            indicator_sets.append(IndicatorSetModel(
-                symbol=ohlcv.symbol,
-                date=ohlcv.date,
-                indicators={k: v for k, v in indicators.items() if v is not None}
-            ))
+        for (
+            ohlcv,
+            s5,
+            s25,
+            s75,
+            r14,
+            macd_item,
+            hh20,
+            ll20,
+            a14,
+            vr,
+        ) in zip(
+            ohlcv_data,
+            sma_5,
+            sma_25,
+            sma_75,
+            rsi_14,
+            macd_data,
+            highest_high_20,
+            lowest_low_20,
+            atr_14,
+            volume_ratio,
+        ):
+            indicators: Dict[str, object] = {}
+            if not math.isnan(s5):
+                indicators["SMA5"] = s5
+            if not math.isnan(s25):
+                indicators["SMA25"] = s25
+            if not math.isnan(s75):
+                indicators["SMA75"] = s75
+            if not math.isnan(r14):
+                indicators["RSI14"] = r14
+            indicators["MACD"] = macd_item
+            if not math.isnan(hh20):
+                indicators["HIGHEST_HIGH_20"] = hh20
+            if not math.isnan(ll20):
+                indicators["LOWEST_LOW_20"] = ll20
+            if not math.isnan(a14):
+                indicators["ATR14"] = a14
+            if vr is not None:
+                indicators["VOLUME_RATIO"] = vr
+
+            indicator_sets.append(
+                IndicatorSetModel.model_construct(
+                    symbol=ohlcv.symbol,
+                    date=ohlcv.date,
+                    indicators=indicators,
+                )
+            )
         
         # 結果をJSONキャッシュとして保存
         if use_cache:

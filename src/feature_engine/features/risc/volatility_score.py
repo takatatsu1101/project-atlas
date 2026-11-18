@@ -1,5 +1,6 @@
-from typing import List, Optional
+from typing import List, Optional, Sequence
 
+from src.common.indexing import resolve_target_indices
 from src.feature_engine.interfaces import IFeature
 from src.model.data_models import OhlcvModel, IndicatorSetModel, FinancialModel, FeatureResultModel
 from src.feature_engine.registry import feature_registry
@@ -13,14 +14,16 @@ class VolatilityScore(IFeature):
         self,
         ohlcv_data: List[OhlcvModel],
         indicator_data: List[IndicatorSetModel],
-        financial_data: Optional[FinancialModel] = None
+        financial_data: Optional[FinancialModel] = None,
+        target_indices: Optional[Sequence[int]] = None,
     ) -> List[FeatureResultModel]:
         
         if not ohlcv_data:
             return []
 
         results: List[FeatureResultModel] = []
-        for i, ind_set in enumerate(indicator_data):
+        for i in resolve_target_indices(len(indicator_data), target_indices):
+            ind_set = indicator_data[i]
             close_price = ohlcv_data[i].close if i < len(ohlcv_data) else None
 
             # ATRの簡易計算
@@ -31,21 +34,24 @@ class VolatilityScore(IFeature):
             avg_atr = None
             tr_today = None
 
-            if i >= min_past_days:
-                # 過去の各日のTrue Rangeを計算
-                true_ranges: List[float] = []
-                for j in range(max(0, i - max_past_days), i + 1):
-                    high = ohlcv_data[j].high
-                    low = ohlcv_data[j].low
-                    close_prev = ohlcv_data[j - 1].close if j > 0 else low
-                    
-                    if high is not None and low is not None:
-                        tr = max(high - low, abs(high - close_prev), abs(low - close_prev))
-                        true_ranges.append(tr)
+            if i >= min_past_days and i < len(ohlcv_data):
+                start_j = max(0, i - max_past_days)
+                end_j = min(i + 1, len(ohlcv_data))
+                if start_j < end_j:
+                    # 過去の各日のTrue Rangeを計算
+                    true_ranges: List[float] = []
+                    for j in range(start_j, end_j):
+                        high = ohlcv_data[j].high
+                        low = ohlcv_data[j].low
+                        close_prev = ohlcv_data[j - 1].close if j > 0 else low
+                        
+                        if high is not None and low is not None:
+                            tr = max(high - low, abs(high - close_prev), abs(low - close_prev))
+                            true_ranges.append(tr)
 
-                if true_ranges:
-                    tr_today = true_ranges[-1] # 今日のTrue Range
-                    avg_atr = sum(true_ranges) / len(true_ranges) # 過去平均ATR
+                    if true_ranges:
+                        tr_today = true_ranges[-1] # 今日のTrue Range
+                        avg_atr = sum(true_ranges) / len(true_ranges) # 過去平均ATR
 
             metadata = {
                 "close": close_price,
