@@ -1378,5 +1378,116 @@ class TestDataCollector(unittest.TestCase):
         self.assertAlmostEqual(float(row_jan7["dividends"]), 25.0)
         self.assertAlmostEqual(float(row_jan7["stock_splits"]), 2.0)
 
+    def test_collect_ohlcv_read_only_uses_cache_only_and_never_fetches_or_saves(self):
+        """read_only=True 時はキャッシュ不足でも yfinance 通信・Parquet 保存せずキャッシュ部分のみ返し、未存在時は [] を返す"""
+        # 1. キャッシュ未存在時は []
+        with patch("yfinance.Ticker") as mock_ticker, \
+             patch.object(self.collector.storage, "save_parquet") as mock_save:
+            res_missing = self.collector.collect_ohlcv_data(
+                self.symbol, date(2025, 1, 6), date(2025, 1, 10), read_only=True
+            )
+        self.assertEqual(res_missing, [])
+        mock_ticker.assert_not_called()
+        mock_save.assert_not_called()
+
+        # 2. キャッシュが部分期間（1/6〜1/7のみ）しかなくても 1/6〜1/10 要求時に通信・保存せず 1/6〜1/7 を返す
+        partial_df = pd.DataFrame({
+            "date": [date(2025, 1, 6), date(2025, 1, 7)],
+            "open": [100.0, 101.0],
+            "high": [105.0, 106.0],
+            "low": [99.0, 100.0],
+            "close": [104.0, 105.0],
+            "volume": [1000, 1100],
+        })
+        self.collector.storage.save_parquet(partial_df, f"price/{self.symbol}.parquet")
+
+        with patch("yfinance.Ticker") as mock_ticker, \
+             patch.object(self.collector.storage, "save_parquet") as mock_save:
+            res_partial = self.collector.collect_ohlcv_data(
+                self.symbol, date(2025, 1, 6), date(2025, 1, 10), read_only=True
+            )
+        self.assertEqual([b.date for b in res_partial], [date(2025, 1, 6), date(2025, 1, 7)])
+        mock_ticker.assert_not_called()
+        mock_save.assert_not_called()
+
+        # 3. モジュールレベルラッパーも read_only=True を伝播する
+        with patch("src.data_collector.collector.data_collector") as mock_dc:
+            mock_dc.collect_ohlcv_data.return_value = []
+            collect_ohlcv_data(
+                self.symbol,
+                date(2025, 1, 6),
+                date(2025, 1, 10),
+                as_of_date=date(2025, 1, 10),
+                read_only=True,
+            )
+            mock_dc.collect_ohlcv_data.assert_called_once_with(
+                self.symbol,
+                date(2025, 1, 6),
+                date(2025, 1, 10),
+                as_of_date=date(2025, 1, 10),
+                read_only=True,
+            )
+
+    def test_load_irbank_json_read_only_prevents_download_and_corrupt_removal(self):
+        """read_only=True の _load_irbank_json と collect_financial_data は DL も破損JSON削除も行わない"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            collector = DataCollector()
+            collector.storage = StorageManager(base_dir=tmpdir)
+            collector.local_irbank_dir = os.path.join(tmpdir, "local_irbank")
+            collector.user_irbank_dir = os.path.join(tmpdir, "user_irbank")
+            os.makedirs(collector.local_irbank_dir, exist_ok=True)
+            os.makedirs(collector.user_irbank_dir, exist_ok=True)
+
+            # 1. 未存在ファイルに対して allow_download=True でも read_only=True なら DL しない
+            with patch.object(collector, "_download_irbank_file") as mock_dl:
+                res_missing = collector._load_irbank_json(
+                    2095, collector.BALANCE_SHEET_FILE_NAME, allow_download=True, read_only=True
+                )
+            self.assertIsNone(res_missing)
+            mock_dl.assert_not_called()
+
+            # 2. 破損 JSON が存在しても read_only=True 時は os.remove しない
+            corrupt_path = collector.storage.financial_dir / "0096-fy-balance-sheet.json"
+            corrupt_path.write_text("{corrupt json", encoding="utf-8")
+            with patch.object(collector, "_download_irbank_file") as mock_dl:
+                res_corrupt = collector._load_irbank_json(
+                    2096, collector.BALANCE_SHEET_FILE_NAME, allow_download=True, read_only=True
+                )
+            self.assertIsNone(res_corrupt)
+            mock_dl.assert_not_called()
+            self.assertTrue(corrupt_path.exists())
+
+            # 3. collect_financial_data(..., read_only=True) も DL・破損削除しない
+            corrupt_pl = collector.storage.financial_dir / "0096-fy-profit-and-loss.json"
+            corrupt_pl.write_text("{corrupt json", encoding="utf-8")
+            with patch.object(collector, "_download_irbank_file") as mock_dl:
+                fin = collector.collect_financial_data(
+                    "7203.T",
+                    fiscal_year=2096,
+                    allow_download=True,
+                    latest_close=1000.0,
+                    read_only=True,
+                )
+            self.assertIsNone(fin)
+            mock_dl.assert_not_called()
+            self.assertTrue(corrupt_path.exists())
+            self.assertTrue(corrupt_pl.exists())
+
+    def test_warmup_irbank_cache_preloads_bs_and_pl_for_unique_years(self):
+        """warmup_irbank_cache が重複排除した全年度の BS / PL JSON を事前ロードする"""
+        collector = DataCollector()
+        with patch.object(collector, "_load_irbank_json", return_value={"item": {}}) as mock_load:
+            collector.warmup_irbank_cache([2025, 2023, 2025, 2024], allow_download=False)
+
+        expected_calls = [
+            unittest.mock.call(2023, collector.BALANCE_SHEET_FILE_NAME, allow_download=False),
+            unittest.mock.call(2023, collector.PROFIT_AND_LOSS_FILE_NAME, allow_download=False),
+            unittest.mock.call(2024, collector.BALANCE_SHEET_FILE_NAME, allow_download=False),
+            unittest.mock.call(2024, collector.PROFIT_AND_LOSS_FILE_NAME, allow_download=False),
+            unittest.mock.call(2025, collector.BALANCE_SHEET_FILE_NAME, allow_download=False),
+            unittest.mock.call(2025, collector.PROFIT_AND_LOSS_FILE_NAME, allow_download=False),
+        ]
+        self.assertEqual(mock_load.call_args_list, expected_calls)
+
 if __name__ == '__main__':
     unittest.main()

@@ -6,6 +6,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Union
 from src.common.logger import get_logger
 from src.model.data_models import (
     AnalysisResultModel,
+    BatchBacktestSummaryModel,
     EvaluationSummaryModel,
     HorizonSummaryModel,
 )
@@ -368,32 +369,29 @@ class Presenter:
                     )
         print("==============================")
 
-    def _display_evaluation_cli(self, evaluation_summary: EvaluationSummaryModel) -> None:
-        """フォワードリターン検証サマリーおよび銘柄別リターンをCLI出力する。"""
-        print("\n=== フォワードリターン検証サマリー ===")
-        print(
-            f"基準日: {evaluation_summary.as_of_date.isoformat()} | "
-            f"エントリー基準: {evaluation_summary.entry_price_mode} | "
-            f"検証対象: {evaluation_summary.total_candidates} 件 | "
-            f"ホライズン: {evaluation_summary.horizons}"
+    def _format_best_worst(self, summary: HorizonSummaryModel) -> str:
+        best_str = (
+            f"{summary.best_symbol} ({self._fmt_pct(summary.best_return_pct, signed=True)})"
+            if summary.best_symbol is not None
+            else "-"
         )
+        worst_str = (
+            f"{summary.worst_symbol} ({self._fmt_pct(summary.worst_return_pct, signed=True)})"
+            if summary.worst_symbol is not None
+            else "-"
+        )
+        return f"最高={best_str}, 最低={worst_str}"
 
-        def _format_best_worst(summary: HorizonSummaryModel) -> str:
-            best_str = (
-                f"{summary.best_symbol} ({self._fmt_pct(summary.best_return_pct, signed=True)})"
-                if summary.best_symbol is not None
-                else "-"
-            )
-            worst_str = (
-                f"{summary.worst_symbol} ({self._fmt_pct(summary.worst_return_pct, signed=True)})"
-                if summary.worst_symbol is not None
-                else "-"
-            )
-            return f"最高={best_str}, 最低={worst_str}"
-
+    def _display_horizon_summaries_cli(
+        self,
+        horizons: Sequence[int],
+        overall_summary: Dict[int, HorizonSummaryModel],
+        strategy_summary: Dict[str, Dict[int, HorizonSummaryModel]],
+    ) -> None:
+        """全体集計および戦略別集計をCLI出力する共通ヘルパー。"""
         print("\n[全体集計]")
-        for h in evaluation_summary.horizons:
-            hs = evaluation_summary.overall_summary.get(h)
+        for h in horizons:
+            hs = overall_summary.get(h)
             if hs is None:
                 continue
             print(
@@ -403,15 +401,15 @@ class Presenter:
                 f"| 中央値={self._fmt_pct(hs.median_return_pct, signed=True)} "
                 f"| 平均MFE={self._fmt_pct(hs.avg_mfe_pct, signed=True)} "
                 f"| 平均MAE={self._fmt_pct(hs.avg_mae_pct, signed=True)} "
-                f"| {_format_best_worst(hs)}"
+                f"| {self._format_best_worst(hs)}"
             )
 
-        if evaluation_summary.strategy_summary:
+        if strategy_summary:
             print("\n[戦略別集計]")
-            for strat, h_map in evaluation_summary.strategy_summary.items():
+            for strat, h_map in strategy_summary.items():
                 strat_label = self._strategy_label(strat)
                 print(f"  戦略: {strat_label} ({strat})")
-                for h in evaluation_summary.horizons:
+                for h in horizons:
                     hs = h_map.get(h)
                     if hs is None:
                         continue
@@ -423,6 +421,22 @@ class Presenter:
                         f"| 平均MFE={self._fmt_pct(hs.avg_mfe_pct, signed=True)} "
                         f"| 平均MAE={self._fmt_pct(hs.avg_mae_pct, signed=True)}"
                     )
+
+    def _display_evaluation_cli(self, evaluation_summary: EvaluationSummaryModel) -> None:
+        """フォワードリターン検証サマリーおよび銘柄別リターンをCLI出力する。"""
+        print("\n=== フォワードリターン検証サマリー ===")
+        print(
+            f"基準日: {evaluation_summary.as_of_date.isoformat()} | "
+            f"エントリー基準: {evaluation_summary.entry_price_mode} | "
+            f"検証対象: {evaluation_summary.total_candidates} 件 | "
+            f"ホライズン: {evaluation_summary.horizons}"
+        )
+
+        self._display_horizon_summaries_cli(
+            evaluation_summary.horizons,
+            evaluation_summary.overall_summary,
+            evaluation_summary.strategy_summary,
+        )
 
         print("\n[銘柄別フォワードリターン]")
         if not evaluation_summary.items:
@@ -762,26 +776,22 @@ class Presenter:
         logger.info(f"Markdownレポートを出力しました: {target_path}")
         return target_path
 
-    def _build_evaluation_markdown_lines(
-        self, evaluation_summary: EvaluationSummaryModel
+    def _build_horizon_markdown_tables(
+        self,
+        horizons: Sequence[int],
+        overall_summary: Dict[int, HorizonSummaryModel],
+        strategy_summary: Dict[str, Dict[int, HorizonSummaryModel]],
     ) -> List[str]:
-        """フォワードリターン検証結果の Markdown セクション行を生成する。"""
+        """全体集計および戦略別集計の Markdown テーブル行を生成する共通ヘルパー。"""
         lines: List[str] = [
-            "## フォワードリターン検証サマリー（全体 / 戦略別）",
-            "",
-            f"- 検証基準日: `{evaluation_summary.as_of_date.isoformat()}`",
-            f"- エントリー価格基準: `{evaluation_summary.entry_price_mode}`",
-            f"- 検証対象銘柄数: **{evaluation_summary.total_candidates} 件**",
-            f"- 検証ホライズン: `{evaluation_summary.horizons}`",
-            "",
             "### 全体集計",
             "",
             "| ホライズン | 評価数 / 対象数 | 勝数 | 勝率 | 平均リターン | 中央値リターン | 平均MFE | 平均MAE | 最高銘柄 | 最低銘柄 |",
             "|:---|---:|---:|---:|---:|---:|---:|---:|:---|:---|",
         ]
 
-        for h in evaluation_summary.horizons:
-            hs = evaluation_summary.overall_summary.get(h)
+        for h in horizons:
+            hs = overall_summary.get(h)
             if hs is None:
                 continue
             best_str = (
@@ -816,7 +826,7 @@ class Presenter:
 
         lines.append("### 戦略別集計")
         lines.append("")
-        if not evaluation_summary.strategy_summary:
+        if not strategy_summary:
             lines.append("戦略別の検証対象はありません。")
             lines.append("")
         else:
@@ -826,9 +836,9 @@ class Presenter:
                     "|:---|:---|---:|---:|---:|---:|---:|---:|---:|",
                 ]
             )
-            for strat, h_map in evaluation_summary.strategy_summary.items():
+            for strat, h_map in strategy_summary.items():
                 strat_label = f"{self._strategy_label(strat)} ({strat})"
-                for h in evaluation_summary.horizons:
+                for h in horizons:
                     hs = h_map.get(h)
                     if hs is None:
                         continue
@@ -850,6 +860,28 @@ class Presenter:
                         + " |"
                     )
             lines.append("")
+        return lines
+
+    def _build_evaluation_markdown_lines(
+        self, evaluation_summary: EvaluationSummaryModel
+    ) -> List[str]:
+        """フォワードリターン検証結果の Markdown セクション行を生成する。"""
+        lines: List[str] = [
+            "## フォワードリターン検証サマリー（全体 / 戦略別）",
+            "",
+            f"- 検証基準日: `{evaluation_summary.as_of_date.isoformat()}`",
+            f"- エントリー価格基準: `{evaluation_summary.entry_price_mode}`",
+            f"- 検証対象銘柄数: **{evaluation_summary.total_candidates} 件**",
+            f"- 検証ホライズン: `{evaluation_summary.horizons}`",
+            "",
+        ]
+        lines.extend(
+            self._build_horizon_markdown_tables(
+                evaluation_summary.horizons,
+                evaluation_summary.overall_summary,
+                evaluation_summary.strategy_summary,
+            )
+        )
 
         lines.append("## 銘柄別フォワードリターン詳細")
         lines.append("")
@@ -929,6 +961,156 @@ class Presenter:
                     evaluation_summary=evaluation_summary,
                     report_prefix=report_prefix,
                 )
+            else:
+                logger.warning(f"未対応のレポートフォーマットが指定されました: {fmt}")
+        return exported
+
+    def display_batch_backtest_results(
+        self, batch_summary: BatchBacktestSummaryModel
+    ) -> None:
+        """複数基準日一括バックテストの横断集計結果をCLIへ出力する。"""
+        date_range_str = (
+            f"{batch_summary.as_of_dates[0].isoformat()} 〜 {batch_summary.as_of_dates[-1].isoformat()}"
+            if batch_summary.as_of_dates
+            else "-"
+        )
+        print("\n=== Project Atlas 一括バックテスト横断検証サマリー ===")
+        print(
+            f"対象基準日数: {batch_summary.total_dates} 日 ({date_range_str}) | "
+            f"エントリー基準: {batch_summary.entry_price_mode} | "
+            f"総候補数: {batch_summary.total_candidates} 件 | "
+            f"ホライズン: {batch_summary.horizons}"
+        )
+
+        self._display_horizon_summaries_cli(
+            batch_summary.horizons,
+            batch_summary.aggregated_overall_summary,
+            batch_summary.aggregated_strategy_summary,
+        )
+
+        if batch_summary.per_date_summaries:
+            print("\n[基準日別サマリー]")
+            for dt in batch_summary.as_of_dates:
+                es = batch_summary.per_date_summaries.get(dt)
+                if es is None:
+                    continue
+                h_parts: List[str] = []
+                for h in batch_summary.horizons:
+                    hs = es.overall_summary.get(h)
+                    if hs is None:
+                        continue
+                    h_parts.append(
+                        f"+{h}日: 勝率={self._fmt_pct(hs.win_rate_pct)}, "
+                        f"平均={self._fmt_pct(hs.avg_return_pct, signed=True)}"
+                    )
+                detail_str = " / ".join(h_parts) if h_parts else "-"
+                print(
+                    f"  {dt.isoformat()}: 候補={es.total_candidates}件 | {detail_str}"
+                )
+        print("==================================================")
+
+    def export_batch_backtest_reports(
+        self,
+        batch_summary: BatchBacktestSummaryModel,
+        output_dir: Union[str, Path] = "./output",
+        formats: Iterable[str] = ("json", "markdown"),
+        metadata: Optional[Dict[str, Any]] = None,
+        report_prefix: str = "batch_backtest_report",
+    ) -> Dict[str, Path]:
+        """複数基準日一括バックテストの横断集計レポート（JSON / Markdown）を出力する。"""
+        out_dir = Path(output_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        if batch_summary.as_of_dates:
+            start_str = batch_summary.as_of_dates[0].isoformat()
+            end_str = batch_summary.as_of_dates[-1].isoformat()
+        else:
+            today_str = date.today().isoformat()
+            start_str = today_str
+            end_str = today_str
+
+        exported: Dict[str, Path] = {}
+        for fmt in formats:
+            norm_fmt = str(fmt).strip().lower()
+            if norm_fmt == "json":
+                target_path = out_dir / f"{report_prefix}_{start_str}_{end_str}.json"
+                payload: Dict[str, Any] = {
+                    "generated_at": datetime.now().isoformat(timespec="seconds"),
+                    "metadata": metadata or {},
+                    **batch_summary.model_dump(mode="json"),
+                }
+                with open(target_path, "w", encoding="utf-8") as f:
+                    json.dump(payload, f, ensure_ascii=False, indent=2, default=str)
+                logger.info(f"一括バックテストJSONレポートを出力しました: {target_path}")
+                exported["json"] = target_path
+            elif norm_fmt in ("markdown", "md"):
+                target_path = out_dir / f"{report_prefix}_{start_str}_{end_str}.md"
+                lines: List[str] = [
+                    f"# Project Atlas 一括バックテスト横断検証レポート ({start_str} 〜 {end_str})",
+                    "",
+                    f"- 対象期間: `{start_str}` 〜 `{end_str}`（全 **{batch_summary.total_dates} 基準日**）",
+                    f"- 生成日時: `{datetime.now().isoformat(timespec='seconds')}`",
+                    f"- エントリー価格基準: `{batch_summary.entry_price_mode}`",
+                    f"- 総抽出候補数: **{batch_summary.total_candidates} 件**",
+                    f"- 検証ホライズン: `{batch_summary.horizons}`",
+                ]
+                if metadata:
+                    meta_items = ", ".join(f"{k}={v}" for k, v in metadata.items())
+                    lines.append(f"- 実行メタ情報: {meta_items}")
+                lines.append("")
+                lines.append("## 全期間横断検証サマリー（全体 / 戦略別）")
+                lines.append("")
+                lines.extend(
+                    self._build_horizon_markdown_tables(
+                        batch_summary.horizons,
+                        batch_summary.aggregated_overall_summary,
+                        batch_summary.aggregated_strategy_summary,
+                    )
+                )
+                lines.append("## 基準日別サマリー")
+                lines.append("")
+                if not batch_summary.per_date_summaries:
+                    lines.append("基準日別の検証結果はありません。")
+                    lines.append("")
+                else:
+                    h_cols = [
+                        f"+{h}日勝率 / 平均リターン" for h in batch_summary.horizons
+                    ]
+                    lines.append(
+                        "| 基準日 | 候補数 | " + " | ".join(h_cols) + " |"
+                    )
+                    lines.append(
+                        "|:---|---:|"
+                        + "|".join(["---:" for _ in batch_summary.horizons])
+                        + "|"
+                    )
+                    for dt in batch_summary.as_of_dates:
+                        es = batch_summary.per_date_summaries.get(dt)
+                        if es is None:
+                            continue
+                        cells: List[str] = []
+                        for h in batch_summary.horizons:
+                            hs = es.overall_summary.get(h)
+                            if hs is None or hs.evaluated_count == 0:
+                                cells.append("-")
+                            else:
+                                cells.append(
+                                    f"{self._fmt_pct(hs.win_rate_pct)} / "
+                                    f"{self._fmt_pct(hs.avg_return_pct, signed=True)}"
+                                )
+                        lines.append(
+                            "| "
+                            + " | ".join(
+                                [dt.isoformat(), str(es.total_candidates), *cells]
+                            )
+                            + " |"
+                        )
+                    lines.append("")
+                target_path.write_text("\n".join(lines), encoding="utf-8")
+                logger.info(
+                    f"一括バックテストMarkdownレポートを出力しました: {target_path}"
+                )
+                exported["markdown"] = target_path
             else:
                 logger.warning(f"未対応のレポートフォーマットが指定されました: {fmt}")
         return exported

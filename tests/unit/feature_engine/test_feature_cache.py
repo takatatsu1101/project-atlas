@@ -234,6 +234,52 @@ class TestFeatureCache(unittest.TestCase):
         finally:
             feature_manager.storage = orig_storage
 
+    def test_write_cache_false_reads_existing_cache_without_writing(self):
+        """write_cache=False 時はキャッシュ未存在時に保存せず、既存キャッシュは読み込む"""
+        cache_rel = "cache/features_7203.T_F001_ProfitabilityScore_ro_feat.json"
+        cache_file = self.storage.base_dir / cache_rel
+
+        with patch.object(self.storage, "save_json", wraps=self.storage.save_json) as spy_save:
+            res = self.manager.calculate_features(
+                self.ohlcv,
+                self.indicators,
+                financial_data=self.fin,
+                feature_ids=["F001_ProfitabilityScore"],
+                use_cache=True,
+                cache_key_suffix="ro_feat",
+                write_cache=False,
+            )
+        self.assertEqual(len(res), len(self.ohlcv))
+        self.assertFalse(cache_file.exists())
+        spy_save.assert_not_called()
+
+        # 事前にキャッシュを書き込んだ後、write_cache=False で読み込めること
+        self.manager.calculate_features(
+            self.ohlcv,
+            self.indicators,
+            financial_data=self.fin,
+            feature_ids=["F001_ProfitabilityScore"],
+            use_cache=True,
+            cache_key_suffix="ro_feat",
+            write_cache=True,
+        )
+        self.assertTrue(cache_file.exists())
+
+        with patch.object(self.storage, "save_json", wraps=self.storage.save_json) as spy_save2, \
+             patch.object(self.storage, "load_json", wraps=self.storage.load_json) as spy_load:
+            res_cached = self.manager.calculate_features(
+                self.ohlcv,
+                self.indicators,
+                financial_data=self.fin,
+                feature_ids=["F001_ProfitabilityScore"],
+                use_cache=True,
+                cache_key_suffix="ro_feat",
+                write_cache=False,
+            )
+        self.assertEqual(len(res_cached), len(self.ohlcv))
+        spy_load.assert_called_once_with(cache_rel)
+        spy_save2.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

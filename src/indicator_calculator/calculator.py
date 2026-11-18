@@ -10,8 +10,8 @@ from src.common.logger import get_logger
 logger = get_logger("IndicatorCalculator")
 
 class IndicatorCalculator:
-    def __init__(self):
-        self.storage = StorageManager()
+    def __init__(self, storage: Optional[StorageManager] = None):
+        self.storage = storage if storage is not None else StorageManager()
 
     @staticmethod
     def _compute_sma(close_series: pd.Series, period: int) -> List[float]:
@@ -193,10 +193,12 @@ class IndicatorCalculator:
         ohlcv_data: List[OhlcvModel],
         use_cache: bool = True,
         cache_key_suffix: Optional[str] = None,
+        write_cache: bool = True,
     ) -> List[IndicatorSetModel]:
         """
         OHLCVデータリストからテクニカル指標のセットを計算して返す（キャッシュ対応）。
         use_cache=False の場合はキャッシュの読み込み・保存をスキップする。
+        write_cache=False の場合は既存キャッシュの読込のみ行い、新規キャッシュ保存を行わない。
         cache_key_suffix を指定した場合はサフィックス付きのキャッシュキーを使用する。
         """
         if not ohlcv_data:
@@ -293,8 +295,8 @@ class IndicatorCalculator:
                 )
             )
         
-        # 結果をJSONキャッシュとして保存
-        if use_cache:
+        # 結果をJSONキャッシュとして保存（write_cache=False 時は保存抑止）
+        if use_cache and write_cache:
             try:
                 self.storage.save_json([model.model_dump(mode="json") for model in indicator_sets], cache_path)
             except Exception as e:
@@ -302,7 +304,7 @@ class IndicatorCalculator:
 
             logger.info(f"{symbol} のテクニカル指標を計算・キャッシュしました。")
         else:
-            logger.info(f"{symbol} のテクニカル指標を計算しました（キャッシュ無効）。")
+            logger.info(f"{symbol} のテクニカル指標を計算しました（キャッシュ保存なし）。")
         return indicator_sets
 
 # モジュールレベルでインスタンス化
@@ -312,9 +314,11 @@ def calculate_indicators(
     ohlcv_data: List[OhlcvModel],
     use_cache: bool = True,
     cache_key_suffix: Optional[str] = None,
+    write_cache: bool = True,
 ) -> List[IndicatorSetModel]:
     return indicator_calculator.calculate_indicators(
         ohlcv_data,
         use_cache=use_cache,
         cache_key_suffix=cache_key_suffix,
+        write_cache=write_cache,
     )

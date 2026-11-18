@@ -287,5 +287,40 @@ class TestIndicatorCalculator(unittest.TestCase):
                     self.assertIs(type(cached_val), float)
                     self.assertAlmostEqual(cached_val, orig_val, places=12)
 
+    def test_write_cache_false_reads_existing_cache_without_writing(self):
+        """write_cache=False の場合、キャッシュ未存在時は保存せず、既存キャッシュがあれば読み込む"""
+        cache_path = (
+            self.calculator.storage.base_dir
+            / f"cache/indicators_{self.symbol}_ro_test.json"
+        )
+        res_no_write = self.calculator.calculate_indicators(
+            self.ohlcv_data,
+            use_cache=True,
+            cache_key_suffix="ro_test",
+            write_cache=False,
+        )
+        self.assertEqual(len(res_no_write), len(self.ohlcv_data))
+        self.assertFalse(cache_path.exists())
+
+        # 既存キャッシュ（判別しやすいダミー値）を配置すると write_cache=False でも読み込む
+        fake_cache = [
+            {
+                "symbol": self.symbol,
+                "date": o.date.isoformat(),
+                "indicators": {"SMA5": 7777.0, "LOWEST_LOW_20": 7777.0},
+            }
+            for o in self.ohlcv_data
+        ]
+        self.calculator.storage.save_json(
+            fake_cache, f"cache/indicators_{self.symbol}_ro_test.json"
+        )
+        res_read = self.calculator.calculate_indicators(
+            self.ohlcv_data,
+            use_cache=True,
+            cache_key_suffix="ro_test",
+            write_cache=False,
+        )
+        self.assertEqual(res_read[-1].indicators["SMA5"], 7777.0)
+
 if __name__ == '__main__':
     unittest.main()

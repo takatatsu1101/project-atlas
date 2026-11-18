@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from src.model.data_models import (
     AnalysisResultModel,
+    BatchBacktestSummaryModel,
     EvaluationSummaryModel,
     FeatureResultModel,
     ForwardEvaluationItemModel,
@@ -390,6 +391,113 @@ class TestPresenter(unittest.TestCase):
             )
             self.assertEqual(custom_paths["json"].name, "custom_eval_2026-02-15.json")
             self.assertEqual(custom_paths["markdown"].name, "custom_eval_2026-02-15.md")
+
+    def _sample_batch_summary(self) -> BatchBacktestSummaryModel:
+        es1 = self._sample_evaluation_summary()
+        d2 = date(2026, 3, 15)
+        es2 = EvaluationSummaryModel(
+            as_of_date=d2,
+            horizons=[5, 20],
+            entry_price_mode="signal_close",
+            total_candidates=1,
+            overall_summary={
+                5: HorizonSummaryModel(
+                    horizon_days=5,
+                    total_candidates=1,
+                    evaluated_count=1,
+                    win_count=0,
+                    win_rate_pct=0.0,
+                    avg_return_pct=-2.0,
+                    median_return_pct=-2.0,
+                    avg_mfe_pct=1.0,
+                    avg_mae_pct=-3.0,
+                    best_symbol="6758.T",
+                    best_return_pct=-2.0,
+                    worst_symbol="6758.T",
+                    worst_return_pct=-2.0,
+                ),
+                20: HorizonSummaryModel(horizon_days=20, total_candidates=1, evaluated_count=0, win_count=0),
+            },
+            strategy_summary={},
+            items=[],
+        )
+        return BatchBacktestSummaryModel(
+            as_of_dates=[date(2026, 2, 15), d2],
+            horizons=[5, 20],
+            entry_price_mode="signal_close",
+            total_dates=2,
+            total_candidates=2,
+            aggregated_overall_summary={
+                5: HorizonSummaryModel(
+                    horizon_days=5,
+                    total_candidates=2,
+                    evaluated_count=2,
+                    win_count=1,
+                    win_rate_pct=50.0,
+                    avg_return_pct=1.25,
+                    median_return_pct=1.25,
+                    avg_mfe_pct=3.6,
+                    avg_mae_pct=-2.05,
+                    best_symbol="7203.T",
+                    best_return_pct=4.5,
+                    worst_symbol="6758.T",
+                    worst_return_pct=-2.0,
+                ),
+                20: HorizonSummaryModel(horizon_days=20, total_candidates=2, evaluated_count=0, win_count=0),
+            },
+            aggregated_strategy_summary={
+                "pullback": {
+                    5: HorizonSummaryModel(
+                        horizon_days=5,
+                        total_candidates=2,
+                        evaluated_count=2,
+                        win_count=1,
+                        win_rate_pct=50.0,
+                        avg_return_pct=1.25,
+                        median_return_pct=1.25,
+                    ),
+                    20: HorizonSummaryModel(horizon_days=20, total_candidates=2, evaluated_count=0, win_count=0),
+                }
+            },
+            per_date_summaries={date(2026, 2, 15): es1, d2: es2},
+        )
+
+    @patch("builtins.print")
+    def test_display_and_export_batch_backtest_reports(self, mock_print):
+        """display_batch_backtest_results と export_batch_backtest_reports が CLI / JSON / Markdown を正しく出力する"""
+        presenter = Presenter()
+        batch_summary = self._sample_batch_summary()
+
+        presenter.display_batch_backtest_results(batch_summary)
+        printed_text = "\n".join(str(c.args[0]) for c in mock_print.call_args_list if c.args)
+        self.assertIn("一括バックテスト横断検証サマリー", printed_text)
+        self.assertIn("2026-02-15", printed_text)
+        self.assertIn("2026-03-15", printed_text)
+        self.assertIn("+1.25%", printed_text)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            paths = presenter.export_batch_backtest_reports(
+                batch_summary,
+                output_dir=tmpdir,
+                formats=("json", "markdown"),
+                metadata={"mode": "backtest", "workers_used": 2},
+            )
+            self.assertEqual(paths["json"].name, "batch_backtest_report_2026-02-15_2026-03-15.json")
+            self.assertEqual(paths["markdown"].name, "batch_backtest_report_2026-02-15_2026-03-15.md")
+
+            payload = json.loads(paths["json"].read_text(encoding="utf-8"))
+            self.assertEqual(payload["total_dates"], 2)
+            self.assertEqual(payload["total_candidates"], 2)
+            self.assertEqual(payload["metadata"]["workers_used"], 2)
+            self.assertEqual(payload["aggregated_overall_summary"]["5"]["win_count"], 1)
+            self.assertIn("2026-02-15", payload["per_date_summaries"])
+            self.assertIn("2026-03-15", payload["per_date_summaries"])
+
+            md_text = paths["markdown"].read_text(encoding="utf-8")
+            self.assertIn("# Project Atlas 一括バックテスト横断検証レポート (2026-02-15 〜 2026-03-15)", md_text)
+            self.assertIn("## 全期間横断検証サマリー（全体 / 戦略別）", md_text)
+            self.assertIn("## 基準日別サマリー", md_text)
+            self.assertIn("+1.25%", md_text)
 
 
 if __name__ == "__main__":

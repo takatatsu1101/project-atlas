@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from src.evaluator import Evaluator, ForwardReturnEvaluator
-from src.model.data_models import AnalysisResultModel, OhlcvModel
+from src.model.data_models import AnalysisResultModel, BatchBacktestSummaryModel, OhlcvModel
 
 
 def _build_candidate(
@@ -366,6 +366,91 @@ class TestForwardReturnEvaluator(unittest.TestCase):
         self.assertNotIsInstance(item.horizons[2].target_date, datetime)
         self.assertAlmostEqual(item.horizons[2].return_pct, 3.0)
         self.assertAlmostEqual(item.horizons[2].mfe_pct, 6.0)
+
+    def test_aggregate_batch_summaries_cross_dates_and_strategies(self):
+        """aggregate_batch_summaries が複数基準日・複数戦略の検証結果を昇順かつ横断で集計する"""
+        evaluator = ForwardReturnEvaluator(collector=MagicMock())
+        d1 = date(2025, 5, 1)
+        d2 = date(2025, 6, 2)
+
+        # d1: pullback (+10%), breakout (-5%)
+        ohlcv_d1 = {
+            "7203.T": _build_bars("7203.T", d1, [1000.0, 1020.0, 1100.0]),
+            "6758.T": _build_bars("6758.T", d1, [1000.0, 980.0, 950.0]),
+        }
+        sum_d1 = evaluator.evaluate(
+            [
+                _build_candidate("7203.T", d1, strategy_type="pullback", close_price=1000.0, rank=1),
+                _build_candidate("6758.T", d1, strategy_type="breakout", close_price=1000.0, rank=2),
+            ],
+            as_of_date=d1,
+            ohlcv_map=ohlcv_d1,
+            horizons=[2],
+        )
+
+        # d2: pullback (+20%)
+        ohlcv_d2 = {
+            "9984.T": _build_bars("9984.T", d2, [1000.0, 1100.0, 1200.0]),
+        }
+        sum_d2 = evaluator.evaluate(
+            [
+                _build_candidate("9984.T", d2, strategy_type="pullback", close_price=1000.0, rank=1),
+            ],
+            as_of_date=d2,
+            ohlcv_map=ohlcv_d2,
+            horizons=[2],
+        )
+
+        # わざと降順で渡しても昇順ソートされて横断集計される
+        batch = ForwardReturnEvaluator.aggregate_batch_summaries(
+            {d2: sum_d2, d1: sum_d1},
+            horizons=[2],
+            entry_price_mode="signal_close",
+        )
+        self.assertIsInstance(batch, BatchBacktestSummaryModel)
+        self.assertEqual(batch.as_of_dates, [d1, d2])
+        self.assertEqual(batch.total_dates, 2)
+        self.assertEqual(batch.total_candidates, 3)
+
+        overall_2 = batch.aggregated_overall_summary[2]
+        self.assertEqual(overall_2.total_candidates, 3)
+        self.assertEqual(overall_2.evaluated_count, 3)
+        self.assertEqual(overall_2.win_count, 2)
+        self.assertAlmostEqual(overall_2.win_rate_pct, 2 / 3 * 100.0)
+        self.assertAlmostEqual(overall_2.avg_return_pct, (10.0 - 5.0 + 20.0) / 3.0)
+        self.assertAlmostEqual(overall_2.median_return_pct, 10.0)
+        self.assertEqual(overall_2.best_symbol, "9984.T")
+        self.assertEqual(overall_2.worst_symbol, "6758.T")
+
+        pullback_2 = batch.aggregated_strategy_summary["pullback"][2]
+        self.assertEqual(pullback_2.evaluated_count, 2)
+        self.assertEqual(pullback_2.win_count, 2)
+        self.assertAlmostEqual(pullback_2.avg_return_pct, 15.0)
+
+        breakout_2 = batch.aggregated_strategy_summary["breakout"][2]
+        self.assertEqual(breakout_2.evaluated_count, 1)
+        self.assertEqual(breakout_2.win_count, 0)
+        self.assertAlmostEqual(breakout_2.avg_return_pct, -5.0)
+
+    def test_evaluate_with_ohlcv_map_respects_eval_end_date(self):
+        """ohlcv_map 指定時でも eval_end_date を超える未来バーは除外して評価する"""
+        evaluator = ForwardReturnEvaluator(collector=MagicMock())
+        as_of = date(2025, 5, 1)
+        # 5日分（5/2〜5/6）のバーがあるが、eval_end_date=5/4 なら 2営業日分しか使えない -> horizon=5 は未到達
+        bars = _build_bars("7203.T", as_of, [1000.0, 1010.0, 1020.0, 1030.0, 1040.0, 1050.0])
+        cand = _build_candidate("7203.T", as_of, close_price=1000.0)
+
+        summary = evaluator.evaluate(
+            [cand],
+            as_of_date=as_of,
+            ohlcv_map={"7203.T": bars},
+            horizons=[2, 5],
+            eval_end_date=date(2025, 5, 4),
+        )
+        item = summary.items[0]
+        self.assertTrue(item.horizons[2].available)
+        self.assertEqual(item.horizons[2].target_date, date(2025, 5, 3))
+        self.assertFalse(item.horizons[5].available)
 
 
 if __name__ == "__main__":

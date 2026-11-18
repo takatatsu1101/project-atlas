@@ -6,6 +6,7 @@ from src.common.logger import get_logger
 from src.data_collector.collector import DataCollector, data_collector
 from src.model.data_models import (
     AnalysisResultModel,
+    BatchBacktestSummaryModel,
     EvaluationSummaryModel,
     ForwardEvaluationItemModel,
     HorizonMetricsModel,
@@ -297,6 +298,13 @@ class ForwardReturnEvaluator:
             symbol = candidate.symbol
             if ohlcv_map is not None and symbol in ohlcv_map:
                 ohlcv_data = ohlcv_map[symbol]
+                if norm_eval_end is not None:
+                    ohlcv_data = [
+                        b
+                        for b in ohlcv_data
+                        if (bar_dt := self._normalize_date(b.date)) is not None
+                        and bar_dt <= norm_eval_end
+                    ]
             else:
                 signal_date = self._normalize_date(candidate.date) or norm_as_of
                 # signal_date が休場日の場合でも直前営業日の終値にフォールバックできるよう過去マージンを設ける
@@ -329,18 +337,9 @@ class ForwardReturnEvaluator:
             )
             items.append(item)
 
-        overall_summary = {
-            h: self._aggregate_horizon_summary(items, h) for h in resolved_horizons
-        }
-
-        strategy_types = list(dict.fromkeys(item.strategy_type for item in items))
-        strategy_summary: Dict[str, Dict[int, HorizonSummaryModel]] = {}
-        for strat in strategy_types:
-            strat_items = [it for it in items if it.strategy_type == strat]
-            strategy_summary[strat] = {
-                h: self._aggregate_horizon_summary(strat_items, h)
-                for h in resolved_horizons
-            }
+        overall_summary, strategy_summary = self._build_summary_maps(
+            items, resolved_horizons
+        )
 
         return EvaluationSummaryModel(
             as_of_date=norm_as_of,
@@ -350,6 +349,70 @@ class ForwardReturnEvaluator:
             overall_summary=overall_summary,
             strategy_summary=strategy_summary,
             items=items,
+        )
+
+    @classmethod
+    def _build_summary_maps(
+        cls,
+        items: Sequence[ForwardEvaluationItemModel],
+        resolved_horizons: Sequence[int],
+    ) -> Tuple[Dict[int, HorizonSummaryModel], Dict[str, Dict[int, HorizonSummaryModel]]]:
+        """候補アイテム一覧から全体集計および戦略別集計マップを構築する。"""
+        overall_summary = {
+            h: cls._aggregate_horizon_summary(items, h) for h in resolved_horizons
+        }
+
+        strategy_types = list(dict.fromkeys(item.strategy_type for item in items))
+        strategy_summary: Dict[str, Dict[int, HorizonSummaryModel]] = {}
+        for strat in strategy_types:
+            strat_items = [it for it in items if it.strategy_type == strat]
+            strategy_summary[strat] = {
+                h: cls._aggregate_horizon_summary(strat_items, h)
+                for h in resolved_horizons
+            }
+        return overall_summary, strategy_summary
+
+    @classmethod
+    def aggregate_batch_summaries(
+        cls,
+        per_date_summaries: Dict[date, EvaluationSummaryModel],
+        horizons: Sequence[int],
+        entry_price_mode: str = "signal_close",
+    ) -> BatchBacktestSummaryModel:
+        """
+        複数基準日の EvaluationSummaryModel 群から、全期間・全候補横断の
+        BatchBacktestSummaryModel を構築する。
+        """
+        resolved_horizons = cls._normalize_horizons(horizons)
+        cls._validate_entry_price_mode(entry_price_mode)
+
+        normalized_per_date: Dict[date, EvaluationSummaryModel] = {}
+        for raw_dt, summary in per_date_summaries.items():
+            norm_dt = cls._normalize_date(raw_dt)
+            if norm_dt is None:
+                continue
+            normalized_per_date[norm_dt] = summary
+
+        sorted_dates = sorted(normalized_per_date.keys())
+        ordered_summaries = {d: normalized_per_date[d] for d in sorted_dates}
+
+        all_items: List[ForwardEvaluationItemModel] = []
+        for d in sorted_dates:
+            all_items.extend(ordered_summaries[d].items)
+
+        aggregated_overall_summary, aggregated_strategy_summary = cls._build_summary_maps(
+            all_items, resolved_horizons
+        )
+
+        return BatchBacktestSummaryModel(
+            as_of_dates=sorted_dates,
+            horizons=resolved_horizons,
+            entry_price_mode=entry_price_mode,
+            total_dates=len(sorted_dates),
+            total_candidates=len(all_items),
+            aggregated_overall_summary=aggregated_overall_summary,
+            aggregated_strategy_summary=aggregated_strategy_summary,
+            per_date_summaries=ordered_summaries,
         )
 
 
