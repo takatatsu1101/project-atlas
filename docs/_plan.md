@@ -150,13 +150,138 @@ Project Atlas は、スイングトレード（数週間〜3ヶ月保有）向�
     - [x] `FEATURE_ENGINE_PARALLEL_PROCESSES` / `--workers` による `ProcessPoolExecutor` 並列化（少銘柄時の閾値制御・ワーカー初期化・読取専用制約）
     - [x] 複数基準日指定バックテスト用の「全期間1回読込・ベクトル指標1回算出・基準日断面厳密分離」一括評価ランナーの実装
 
+### 3.5. フェーズ5: 特徴量充足度改善・検証基盤強化 (未着手・1要件1PR構成)
+
+`docs/reports/feature_improvement_report_2026-11-17.md` の「6. 推奨ネクストステップ」に基づき、検証の切り分けを明確にするため Step 1〜Step 4 を 1 PR ずつ段階的に実装・フォワード検証する。
+
+- [ ] **PR #1 (Step 1): データ修正・検証基盤強化 (`fix/data-integrity-and-quantile-eval`)**
+    - **目的**: 評価の土台となるデータ不整合・計算バグを解消し、全通過銘柄を対象とした特徴量別分位バックテストによってベースラインを定量計測できるようにする。
+    - **対象スコープ**:
+        - [ ] **株式分割による PER/PBR 歪みの補正**: Parquet に保存済みの `stock_splits` を用いて決算期末日（`fiscal_date`）翌日〜基準日（`as_of_date`）の累積分割比率を算出し、EPS/BPS を調整して PER/PBR を再計算（併せて異常値ガードを設定）。
+        - [ ] **成長率欠損の `None` 維持**: `DataCollector.collect_financial_data()` における過去 PL 欠損時の `revenue_growth` / `net_profit_growth`（単年・3年・5年）の `0.0` 初期化を廃止し、`None` のまま格納して `F002_GrowthScore` の欠損中立（25点）判定を有効化。
+        - [ ] **`V001_VolumeScore` の当日除外修正**: `avg_volume_25` の算出範囲から当日 `i` を除外（`t-25 〜 t-1`）し、出来高急増日の倍率圧縮バグを解消。
+        - [ ] **パターン検出バグ・ウィンドウ修正**: `HammerPattern` の `is_close_to_high` 条件式修正、および `DoubleBottomPattern` / `DoubleTopPattern` の谷・山探索期間ウィンドウ制限（直近営業日ウィンドウ導入）。
+        - [ ] **過去日パターンフォールバックの見直し**: `RankingGenerator._lookup_set()` で当日未検出時に過去日パターンへフォールバックする挙動を見直し、当日厳密一致を基本とする設定・制御を導入。
+        - [ ] **ダミー行クレンジング**: `data/price/1301.T.parquet` 先頭5行の `NaN` 混入ダミー行のクレンジング（および読込時除外の整合性確認）。
+        - [ ] **全通過銘柄＆特徴量別分位評価の追加**: `--mode evaluate` / `--mode backtest` で `overall_ranking`（上位 `top_n`）だけでなくスクリーニング全通過銘柄（`filtered_scores`）を対象に、各特徴量スコアの分位別（上位20% vs 下位20%）`+5 / +20 / +60` 営業日勝率・平均リターン・MFE・MAE を集計・出力する機能を追加。
+    - **変更予定ファイル**:
+        - `src/data_collector/collector.py`
+        - `src/feature_engine/features/volume/volume_score.py`
+        - `src/pattern_detector/patterns/candlestick.py`
+        - `src/pattern_detector/patterns/reversal/_common.py`, `double_bottom.py`, `double_top.py`
+        - `src/ranking/generator.py`
+        - `src/evaluator/evaluator.py`, `src/model/data_models.py`, `src/presentation/presenter.py`, `src/main.py`
+        - `src/config/screening_config.py`, `config/screening.yaml`
+        - 関連単体テスト（`tests/unit/`）および仕様書（`docs/specifications/`）
+    - **設計上の決定事項**:
+        - 累積分割比率は `fiscal_date < split_date <= as_of_date` の範囲に限定して乗算し、先読みバイアス（未来の株式分割適用）を厳禁とする。
+        - `DoubleBottom` / `DoubleTop` の $O(N)$ 高速パスと逐次パスでウィンドウ制限後の結果が完全一致するよう共通ロジック化する。
+        - 既存の `evaluation_report_*`（`overall_ranking` 基準）との後方互換を維持しつつ、全通過銘柄サマリーおよび特徴量別分位テーブルを拡張フィールドとして出力する。
+    - **推奨案と確認事項 (Open Questions)**:
+        - **Q1-1（パターンウィンドウ幅）**: `DoubleBottom` / `DoubleTop` の探索ウィンドウ上限は「直近60営業日（推奨）」「直近45営業日」「直近30営業日」のいずれにするか。
+        - **Q1-2（`_lookup_set` のフォールバック方針）**: 当日厳密一致のみ（フォールバック廃止・推奨）をデフォルトとし、設定で旧挙動へ戻せる互換フラグを残す必要があるか。
+        - **Q1-3（分位評価の出力トリガー）**: `--mode evaluate` / `--mode backtest` 実行時はデフォルトで分位評価を出力する（推奨）か、明示フラグ（`--quantile-eval` 等）で切り替えるか。
+    - **完了条件（テストおよびバックテスト検証方法）**:
+        - 各バグ修正・分割調整・分位集計ロジックの単体テストを追加し、全テストがパスすること。
+        - 代表銘柄群・複数基準日での `--mode backtest` を実行し、Step 2 以降の比較基準となるベースライン（+5/+20/+60日勝率、平均リターン、MFE/MAE、特徴量別上位20% vs 下位20%スプレッド）を計測・記録すること。
+
+- [ ] **PR #2 (Step 2): Phase A テクニカル特徴量・スコア改善 (`feat/phase-a-technical-features`)**
+    - **目的**: テクニカル系特徴量の天井飽和・定数化・だまし・高値掴みを解消し、エントリーの「質」と上昇継続性を定量識別できるようにする。
+    - **対象スコープ**:
+        - [ ] **長期・収縮・短期指標の追加（`IndicatorCalculator`）**: `SMA200`、`HIGHEST_HIGH_60`、`HIGHEST_HIGH_250`、`ATR5` / `ATR20`（またはレンジ収縮率）、短期反転オシレーター（`RSI5` 等）のベクトル計算を追加。
+        - [ ] **トレンド連続スコア＆52週高値位置（`M001`, `T001`）**: `SMA25` / `SMA75` の傾き（5日・20日変化率）の連続スコア化、`(close - SMA75) / SMA75` の適正帯評価（+3%〜+18% 高評価、+25%超過熱減点）、52週高値接近度（`close / HIGHEST_HIGH_250`）およびマルチ期間ブレイク判定の導入。
+        - [ ] **プライスアクションの質（`P001`, `P002`）**: CLV（`(close - low) / (high - low)`）とヒゲ比率の導入（ブレイク時は `CLV >= 0.6` 高評価＋上ヒゲだまし減点、押し目時は陽線転換・`close > SMA5`・長い下ヒゲを反発確認として加味）、ギャップアップ過熱（`gap_pct` 過大）ペナルティの導入。
+        - [ ] **VCP 収縮＆定常リスク（`R001`）**: ボラティリティ収縮率（`ATR5 / ATR20` 等）、定常 `ATR%`（`ATR14 / close`）による高ボラ減点、押し目時のリスクリワード余地比評価の導入。
+        - [ ] **出来高の質拡充（`V001`）**: 押し目調整中の売り枯れ→反発出来高増パターン評価（押し目戦略への反映含む）、Up/Down Volume Ratio（過去20〜60日）の導入。
+        - [ ] **オシレーター非線形化（`O001`）**: `RSI14` の単調増加評価を改め、押し目適正帯（40〜60）およびブレイク適正帯（55〜75）のベル型評価（`> 80` 減点）＋短期反転トリガーを導入。
+        - [ ] **スコア統合・重み調整**: `S002_StrategyScore` および `config/screening.yaml` に新指標・新ペナルティ・戦略別重みを反映。
+    - **変更予定ファイル**:
+        - `src/indicator_calculator/calculator.py`
+        - `src/feature_engine/features/moving_average/ma_alignment_score.py`
+        - `src/feature_engine/features/trend.py`（整理・統合対象）
+        - `src/feature_engine/features/price_action/pullback_score.py`, `breakout_score.py`
+        - `src/feature_engine/features/risc/volatility_score.py`
+        - `src/feature_engine/features/volume/volume_score.py`
+        - `src/feature_engine/features/oscillator/momentum_score.py`
+        - `src/score_engine/scores/strategy.py`
+        - `src/config/screening_config.py`, `config/screening.yaml`
+        - 関連単体テストおよび仕様書（`docs/specifications/indicators.md`, `feature_list.md`, `scoreing.md`）
+    - **設計上の決定事項**:
+        - 新規指標は `IndicatorCalculator` の単一 DataFrame ベクトル演算パスへ統合し、`latest_only_per_symbol=True` 時の「全履歴配列参照・対象インデックスのみ評価」契約（`src/common/indexing.py`）と先読みバイアス遮断を維持する。
+        - `M001` / `T001` の連続スコア化に伴い `trend_env_score` の分布が変化するため、第1関門閾値（現行 `min_trend_env_score: 50.0`）との整合を検証して必要に応じ調整する。
+    - **推奨案と確認事項 (Open Questions)**:
+        - **Q2-1（RSI ベル型評価の適用層）**: 押し目とブレイクで理想 RSI14 帯が異なるため、`O001_MomentumScore` は中立指標・メタデータ（`rsi14`, `short_rsi`）を出力し、戦略別のベル型スコアリングは `StrategyScoreCalculator` 側で計算する構成（推奨）でよいか。
+        - **Q2-2（過熱・ギャップ閾値の初期値）**: `(close - SMA75) / SMA75` 適正帯 `+3%〜+18%`（`+25%超` 減点）、ギャップアップ過熱 `+7%超` 減点を初期値として `config/screening.yaml` で外出し設定とする形でよいか。
+        - **Q2-3（レガシー `F001_TrendStrength` の扱い）**: `src/feature_engine/features/trend.py` の `F001_TrendStrength` を `T001_TrendStrengthScore` に統合・廃止する（推奨）か、互換のため残置するか。
+        - **Q2-4（短期反転オシレーターの選定）**: 既存の `_compute_rsi` をそのまま流用できる `RSI5`（推奨）を採用するか、`RCI9` を新規実装するか。
+    - **完了条件（テストおよびバックテスト検証方法）**:
+        - 新規指標・全改修特徴量・`S002_StrategyScore` の単体テスト追加、ベクトル計算と逐次計算の一致確認、および全テストのパス。
+        - Step 1 と同一条件の `--mode backtest` を実行し、+5 / +20 / +60 営業日の勝率・平均リターン・MFE・MAE の改善、および上位20銘柄で `M001` / `T001` が定数化（ユニーク数=1）しないことを定量確認する。
+
+- [ ] **PR #3 (Step 3): Phase A 財務データ拡張・`F004`/`F005` 刷新 (`feat/phase-a-fundamental-expansion`)**
+    - **目的**: ローカルに保存済みのキャッシュフロー・株主還元・BS/PL 未抽出列を活用し、定数化していた `F004` と 3 値離散だった `F005` の識別力を回復する。
+    - **対象スコープ**:
+        - [ ] **財務 JSON・未抽出列の読込拡張（`DataCollector`, `FinancialModel`）**: `0000-fy-cash-flow-statement.json`（営業CF, 投資CF, 財務CF, 設備投資, 現金同等物, 営業CFマージン）、`0015〜0025-fy-stock-dividend.json`（一株配当, 剰余金の配当, 自社株買い, 配当性向, 総還元性向, 純資産配当率）、BS 未抽出列（純資産, 株主資本, 利益剰余金, 短期借入金, 長期借入金）、PL 未抽出列（経常利益）を追加取得。
+        - [ ] **`F004_FinancialHealthScore` 刷新**: ネットキャッシュ比率 `((現金同等物 - 有利子負債) / 総資産)` および自己資本比率水準を連続/多段階で評価し、100点定数化を解消。
+        - [ ] **`F005_EarningsQualityScore` 刷新**: `営業CF / 純利益`（アクルーアルズ）、`フリーCF = 営業CF - 設備投資`、営業CFマージンを導入し、`net_profit / operating_profit` の理想帯を日本の実効税率水準に合わせて補正。
+        - [ ] **株主還元モメンタムのスコア化**: 連続増配傾向・自社株買い実績・総還元性向を評価軸へ追加。
+    - **変更予定ファイル**:
+        - `src/model/data_models.py`
+        - `src/data_collector/collector.py`
+        - `src/feature_engine/features/fundamental/financial_health_score.py`
+        - `src/feature_engine/features/fundamental/earnings_quality_score.py`
+        - （設計確定時）`src/feature_engine/features/fundamental/shareholder_return_score.py`, `src/score_engine/scores/strategy.py`
+        - 関連単体テストおよび仕様書（`docs/specifications/features/feature_list.md`）
+    - **設計上の決定事項**:
+        - 新規 JSON 読込は既存の IR BANK キャッシュ機構（インメモリキャッシュ・ネガティブキャッシュ・`allow_download` / `read_only` 制御・`as_of_date` 開示ラグ判定）に統合し、並列ワーカーの読み取り専用制約を厳守する。
+        - 金融業など CF 項目・借入金項目が欠損する銘柄では例外や 0 点固定にせず、取得可能項目での再配分または中立点フォールバックを適用する。
+    - **推奨案と確認事項 (Open Questions)**:
+        - **Q3-1（株主還元の特徴量構成）**: 新規特徴量 `F006_ShareholderReturnScore` として独立させ `FUNDAMENTAL_FEATURE_IDS` へ追加する（推奨：分位評価で単体寄与を計測可能）か、`F004` / `F005` 内に組み込むか。
+        - **Q3-2（`F004` の配点バランス）**: 「自己資本比率（40点）＋ネットキャッシュ比率（40点）＋有利子負債/利益剰余金健全性（20点）」を推奨案としてよいか。
+        - **Q3-3（`F005` の `net_profit / operating_profit` 理想帯）**: 現行 `0.8〜1.2` から実効税率水準の `0.60〜0.80`（推奨）へ引き下げてよいか。
+    - **完了条件（テストおよびバックテスト検証方法）**:
+        - 拡張財務データのロード（欠損・開示ラグ・`read_only` 含む）および刷新版 `F004` / `F005`（＋必要に応じ `F006`）の単体テスト追加と全テストパス。
+        - `--mode backtest` で Step 2 時点からの勝率・リターン・分位スプレッド改善、および上位20銘柄における `F004` / `F005` の分散回復を確認する。
+
+- [ ] **PR #4 (Step 4): Phase B 相対力（RS）・業種モメンタム・地合いレジーム (`feat/phase-b-relative-strength-and-regime`)**
+    - **目的**: 市場全体（TOPIX）および 33業種（`sector_33`）との相対力、ならびに市場地合いレジーム判定を導入し、市場βによる連れ高除外と地合い悪化局面でのブレイクアウトダマシ抑制を実現する。
+    - **対象スコープ**:
+        - [ ] **市場ベンチマーク（`1306.T`）取得・共有**: 市場全体の 20日/60日/120日リターンおよび `SMA25` / `SMA75` 位置を取得・参照。
+        - [ ] **対 TOPIX 相対力（RS）**: 銘柄リターン − TOPIX リターン（20日/60日/120日）および分析ユニバース内の RS パーセンタイル順位を算出。
+        - [ ] **33業種モメンタム＆業種内相対評価**: `sector_33` ごとに業種平均20日リターン・`SMA25` 上回り銘柄率を集計し、業種モメンタムおよび業種内相対バリュエーション（Zスコア/パーセンタイル）を評価。
+        - [ ] **地合いレジーム（Market Breadth）**: ユニバース全体の `close > SMA25` 比率と TOPIX トレンドから地合いレジームを判定し、悪化時にブレイクアウト閾値を動的引き上げ。
+        - [ ] **（検討）規模区分（`scale`）別正規化**: `StockMasterModel.scale` に応じた出来高・ボラティリティ基準の調整。
+    - **変更予定ファイル**:
+        - `src/model/data_models.py`
+        - `src/data_collector/collector.py`
+        - ユニバース横断コンテキスト算出モジュール（例：`src/score_engine/market_context.py` 等を新設）
+        - `src/score_engine/scores/strategy.py`, `src/screener/screener.py`, `src/main.py`, `src/pipeline_worker.py`
+        - `src/config/screening_config.py`, `config/screening.yaml`
+        - 関連単体テストおよび仕様書
+    - **設計上の決定事項**:
+        - **先読みバイアス防止＆並列ワーカー整合性**: RS ランク・業種モメンタム・Market Breadth は複数銘柄横断の計算となるため、`ProcessPoolExecutor` の個別銘柄ワーカー内では算出せず、親プロセス側で基準日 `d` 以前のデータのみから事前集計した読み取り専用 `MarketContext` を構築し、スコア計算・スクリーニング段階へ注入する。
+        - 少銘柄指定実行（単体テストや少数銘柄検証）時は、ユニバース統計が不安定になるのを防ぐため最小銘柄数ガードを設け、未達時は中立・無補正へ安全にフォールバックする。
+    - **推奨案と確認事項 (Open Questions)**:
+        - **Q4-1（ベンチマーク銘柄）**: 既存の営業日プリチェックでも使用している `1306.T`（TOPIX連動型ETF・推奨）を基準指数として統一使用してよいか。
+        - **Q4-2（地合い悪化時の制御方式）**: Market Breadth 低下時（例：`close > SMA25` 比率 `< 40%` かつ TOPIX `< SMA25`）はブレイクアウトの要求スコア閾値を動的に引き上げる（推奨：例 `+5〜+10` 点）か、ブレイクアウト候補を全面停止するか。
+        - **Q4-3（業種内相対バリュエーションの統合方法）**: `F003_ValuationScore` の絶対評価は維持し、業種内相対 Z スコアは `MarketContext` 経由の補正点として加算する（推奨）か、`F003` 本体を業種相対へ置き換えるか。
+        - **Q4-4（`scale` 規模区分補正の扱い）**: Step 4 に同時実装するか、検証切り分けのため別 PR へ分離するか（推奨：最小限の基準補正のみ含めるか別 PR 分離）。
+    - **完了条件（テストおよびバックテスト検証方法）**:
+        - 基準日厳密分離された `MarketContext` 構築、RS ランク・業種モメンタム・Market Breadth・少銘柄フォールバックの単体テスト追加と全テストパス。
+        - 上昇相場・調整相場を含む複数基準日での `--mode backtest` を実行し、地合い悪化局面でのブレイクアウト勝率・MAE の改善、および RS 上位群の勝率優位性を検証する。
+
 ## 4. 今後のマイルストーン
 - [x] 2026/08/31: フェーズ2の「特徴量・パターン追加およびパイプライン結合」完了
 - [x] 2026/11/15: 要件見直し（v0.2.0）および1要件1PR計画の策定完了（PR #1）
 - [x] 2026/11/16: フェーズ3 PR #2〜#5 の順次実装・検証完了
 - [x] 2026/11/18: フェーズ4 PR #1〜#4（銘柄評価高速化・スケーラビリティ改善）の順次実装・検証完了
+- [ ] フェーズ5 PR #1（Step 1）: データ修正・検証基盤強化＆ベースライン計測
+- [ ] フェーズ5 PR #2（Step 2）: Phase A テクニカル特徴量・スコア改善
+- [ ] フェーズ5 PR #3（Step 3）: Phase A 財務データ拡張・`F004`/`F005` 刷新
+- [ ] フェーズ5 PR #4（Step 4）: Phase B 相対力（RS）・業種モメンタム・地合いレジーム導入
 
 ## 5. 実行ログ (最新の作業のみ記載)
+- 2026/11/18: `docs/reports/feature_improvement_report_2026-11-17.md` の「6. 推奨ネクストステップ（Step 1〜Step 4）」に基づき、フェーズ5（特徴量充足度改善・検証基盤強化）の4 PR 分割実装計画（目的・対象スコープ・変更予定ファイル・設計上の決定事項・Open Questions・完了条件）を策定し、`docs/_plan.md` を更新。
 - 2026/11/18: フェーズ4 PR #4（`perf/multiprocess-and-batch-backtest`）を実施。`src/pipeline_worker.py` を新設して `ProcessPoolExecutor`（macOS `spawn` 対応の `init_pipeline_worker`・3レジストリ初期化・完全読取専用制約・決定的順序結合・1銘柄例外隔離）と少銘柄閾値制御（`DEFAULT_PARALLEL_MIN_SYMBOLS=20`・`FEATURE_ENGINE_PARALLEL_PROCESSES` / `--workers`）を `src/main.py` に統合。さらに複数基準日一括バックテストランナー `run_batch_backtest`（CLI `--mode backtest` / `--as-of-dates`）および `BatchBacktestSummaryModel` / `ForwardReturnEvaluator.aggregate_batch_summaries` / `Presenter` 横断レポート出力を実装し、「全期間1回読込・ベクトル指標1回算出・基準日断面厳密分離（未来バー完全遮断・開示ラグ財務対応）」を実現。全テスト277件のパスおよび2段階レビュー（1次 `atlas-reviewer` 指摘修正後・2次 `gemini-4-argon-high` Approve）を完了。
 - 2026/11/18: フェーズ4 PR #3（`perf/vectorize-and-latest-only-eval`）を実施。`StorageManager.load_parquet(..., columns=...)` による列限定読込（不在列時のみフォールバック）と `DataCollector.collect_ohlcv_data()` の `NaN`/`inf` クレンジング・`iterrows()` 排除（`OhlcvModel.model_construct`）、`IndicatorCalculator` の単一ベクトル演算統合、`DoubleBottomPattern` / `DoubleTopPattern` の 1パス $O(N)$ 化（`src/pattern_detector/patterns/reversal/_common.py`）、および `src/common/indexing.py` を用いた全13特徴量・全3パターン・`FeatureManager` / `PatternManager`・`src/main.py` 向けの「全履歴参照・対象インデックス（`latest_only_per_symbol=True` 時は最新日）のみ評価」モードを実装。全テスト262件のパスおよび2段階レビュー（1次 `atlas-reviewer` 指摘修正後・2次 `gemini-4-argon-high` Approve）を完了。
 - 2026/11/18: フェーズ4 PR #2（`perf/batch-yfinance-and-fetch-check`）を実施。標準ライブラリのみで東証営業日カレンダー（日本の祝日・振替休日・国民の休日・年末年始・JST 15:35 カットオフ判定）を提供する `src/data_collector/market_calendar.py` を新設し、`DataCollector` に開始日休場マージン考慮・`1306.T` 市場最新完了営業日プリチェック（TTL付きキャッシュ）・`yf.download(..., actions=True, threads=True, group_by="ticker")` によるチャンク単位並列取得＋欠損/失敗ティッカー個別リトライを行う `prefetch_ohlcv_batch()` を実装して `src/main.py` に統合。全テスト237件のパスおよび2段階レビュー（1次 `atlas-reviewer` 指摘修正後・2次 `gemini-4-argon-high` Approve）を完了。
