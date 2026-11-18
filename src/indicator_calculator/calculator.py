@@ -225,7 +225,7 @@ class IndicatorCalculator:
                 and isinstance(cached_data[-1].get("indicators"), dict)
                 and "LOWEST_LOW_20" in cached_data[-1].get("indicators", {})
             ):
-                logger.info(f"{symbol} のテクニカル指標をキャッシュからロードしました。")
+                logger.debug(f"{symbol} のテクニカル指標をキャッシュからロードしました。")
                 return [IndicatorSetModel(**item) for item in cached_data]
 
         # high, low, close, volume を1回だけ抽出し全9指標を一括ベクトル計算する
@@ -302,9 +302,9 @@ class IndicatorCalculator:
             except Exception as e:
                 logger.warning(f"指標キャッシュの保存に失敗しました: {e}")
 
-            logger.info(f"{symbol} のテクニカル指標を計算・キャッシュしました。")
+            logger.debug(f"{symbol} のテクニカル指標を計算・キャッシュしました。")
         else:
-            logger.info(f"{symbol} のテクニカル指標を計算しました（キャッシュ保存なし）。")
+            logger.debug(f"{symbol} のテクニカル指標を計算しました（キャッシュ保存なし）。")
         return indicator_sets
 
 # モジュールレベルでインスタンス化

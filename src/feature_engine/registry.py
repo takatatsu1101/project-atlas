@@ -1,6 +1,9 @@
 
 from typing import Dict, Type, List
+from src.common.logger import get_logger
 from src.feature_engine.interfaces import IFeature
+
+logger = get_logger(__name__)
 
 class FeatureRegistry:
     def __init__(self):
@@ -13,7 +16,7 @@ class FeatureRegistry:
         if not issubclass(feature_class, IFeature):
             raise ValueError("登録できるのはIFeatureを実装したクラスのみです。")
         self._features[feature_class.feature_id] = feature_class
-        print(f"Feature \'{feature_class.feature_name}\' ({feature_class.feature_id}) を登録しました。")
+        logger.debug(f"Feature '{feature_class.feature_name}' ({feature_class.feature_id}) を登録しました。")
 
     def get_feature(self, feature_id: str) -> IFeature:
         """

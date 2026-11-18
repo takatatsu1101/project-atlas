@@ -341,8 +341,7 @@ class RankingGenerator:
                 )
             )
 
-        logger.info(f"ランキングを生成しました。{len(analysis_results)} 件の分析結果。")
-        print(f"ランキングを生成しました。{len(analysis_results)} 件の分析結果。")
+        logger.debug(f"ランキングを生成しました。{len(analysis_results)} 件の分析結果。")
         return analysis_results
 
     def generate_ranking(

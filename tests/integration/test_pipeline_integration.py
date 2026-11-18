@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import tempfile
 import unittest
@@ -14,6 +15,7 @@ import pandas as pd
 import src.feature_engine
 import src.pattern_detector
 import src.score_engine
+from src.common.logger import get_logger
 from src.common.storage import StorageManager
 from src.config.screening_config import AtlasScreeningConfig
 from src.data_collector.collector import DataCollector
@@ -1657,6 +1659,400 @@ class TestPipelineIntegration(unittest.TestCase):
             # d1 時点では 7203.T のみ流動性通過、d2 時点では両銘柄通過
             self.assertEqual(res["per_date_results"][d1]["processed_symbols"], ["7203.T"])
             self.assertEqual(res["per_date_results"][d2]["processed_symbols"], ["7203.T", "6758.T"])
+
+    def test_parse_args_verbose_flag(self):
+        """parse_args が -v / --verbose フラグを正しく解釈する"""
+        self.assertFalse(parse_args([]).verbose)
+        self.assertTrue(parse_args(["-v"]).verbose)
+        self.assertTrue(parse_args(["--verbose"]).verbose)
+
+    def test_logging_clean_output_sequential_and_parallel_with_ten_plus_symbols(self):
+        """
+        10銘柄以上の逐次・並列実行において:
+        1) 通常時（verbose=False）は銘柄ごとの詳細ログを抑止し、フェーズ見出し・[進行度]・最終結果・レポート出力先・所要時間を出力すること
+        2) 並列実行でもリアルタイム進捗を出しつつ元銘柄順序の決定性を維持すること
+        3) verbose=True 時は詳細ログと DEBUG ログが出力され、終了後にログレベルが元へ戻ること
+        """
+        symbols = [f"{7200 + i}.T" for i in range(12)]
+        bars_by_symbol = {sym: _build_uptrend_breakout_ohlcv(sym, days=90) for sym in symbols}
+        as_of = bars_by_symbol[symbols[0]][-1].date
+
+        bs_items = {
+            sym.split(".")[0]: ["2025/03", "100000", "0", "0", "0", "0", "0", "1200.0", "45.0"]
+            for sym in symbols
+        }
+        pl_items = {
+            sym.split(".")[0]: [
+                "2025/03",
+                "50000000000",
+                "5000000000",
+                "5200000000",
+                "3500000000",
+                "150.0",
+                "15.0",
+                "8.0",
+            ]
+            for sym in symbols
+        }
+        masters = [
+            StockMasterModel(
+                code=sym.split(".")[0],
+                symbol=sym,
+                name=f"テスト銘柄{i}",
+                market="プライム",
+                sector_33="電気機器",
+            )
+            for i, sym in enumerate(symbols)
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            real_collector = self._write_temp_env(
+                tmpdir,
+                bars_by_symbol,
+                bs_by_year={2025: {"item": bs_items}},
+                pl_by_year={2025: {"item": pl_items}},
+            )
+            out_dir = Path(tmpdir) / "reports"
+
+            with patch("src.data_collector.collector.data_collector", real_collector), \
+                 patch("src.main.data_collector", real_collector), \
+                 patch("src.main.prefetch_ohlcv_batch"), \
+                 patch("src.main.MasterManager") as mock_master_cls:
+                mock_master_cls.return_value.load_master.return_value = masters
+
+                # 1. 通常時（verbose=False）・逐次実行
+                seq_buf = io.StringIO()
+                with redirect_stdout(seq_buf):
+                    res_seq = run_full_pipeline(
+                        symbols=symbols,
+                        start_date=bars_by_symbol[symbols[0]][0].date,
+                        end_date=as_of,
+                        fiscal_year=2025,
+                        as_of_date=as_of,
+                        output_dir=out_dir,
+                        export_reports=True,
+                        use_cache=False,
+                        allow_irbank_download=False,
+                        workers=1,
+                        parallel_min_symbols=10,
+                        verbose=False,
+                    )
+                seq_out = seq_buf.getvalue()
+
+                # 2. 通常時（verbose=False）・並列実行（as_completed でリアルタイム進行度出力）
+                par_buf = io.StringIO()
+                with redirect_stdout(par_buf):
+                    res_par = run_full_pipeline(
+                        symbols=symbols,
+                        start_date=bars_by_symbol[symbols[0]][0].date,
+                        end_date=as_of,
+                        fiscal_year=2025,
+                        as_of_date=as_of,
+                        output_dir=out_dir,
+                        export_reports=True,
+                        use_cache=False,
+                        allow_irbank_download=False,
+                        workers=2,
+                        parallel_min_symbols=10,
+                        verbose=False,
+                    )
+                par_out = par_buf.getvalue()
+
+                for out in (seq_out, par_out):
+                    for phase_marker in ("[1/4]", "[2/4]", "[3/4]", "[4/4]"):
+                        self.assertIn(phase_marker, out)
+                    progress_lines = [
+                        line for line in out.splitlines() if "[進行度] 銘柄評価:" in line
+                    ]
+                    self.assertGreaterEqual(len(progress_lines), 2)
+                    self.assertIn("12/12 (100.0%)", progress_lines[-1])
+                    self.assertIn("=== Project Atlas 分析結果 ===", out)
+                    self.assertIn("レポート出力先:", out)
+                    self.assertIn("フェーズ別所要時間:", out)
+
+                    # 過剰詳細ログが抑止されていること
+                    self.assertNotIn("処理開始 ---", out)
+                    self.assertNotIn("を計算中...", out)
+                    self.assertNotIn("を検出中...", out)
+                    self.assertNotIn("を登録しました", out)
+                    self.assertNotIn("Parquetファイルを読み込みました", out)
+
+                # 並列実行でも順序・結果決定性が逐次実行と一致すること
+                self.assertEqual(res_seq["processed_symbols"], symbols)
+                self.assertEqual(res_par["processed_symbols"], symbols)
+                self.assertEqual(
+                    [r.model_dump() for r in res_par["analysis_results"]],
+                    [r.model_dump() for r in res_seq["analysis_results"]],
+                )
+
+                # 3. verbose=True 時は詳細出力・DEBUG ログが出て、完了後にレベルが復元されること
+                feat_logger = get_logger("FeatureManager")
+                storage_logger = get_logger("src.common.storage")
+                orig_feat_level = feat_logger.level
+                orig_storage_level = storage_logger.level
+
+                debug_buf = io.StringIO()
+                debug_handler = logging.StreamHandler(debug_buf)
+                debug_handler.setLevel(logging.DEBUG)
+                feat_logger.addHandler(debug_handler)
+                storage_logger.addHandler(debug_handler)
+                verb_buf = io.StringIO()
+                try:
+                    with redirect_stdout(verb_buf):
+                        run_full_pipeline(
+                            symbols=symbols[:2],
+                            start_date=bars_by_symbol[symbols[0]][0].date,
+                            end_date=as_of,
+                            fiscal_year=2025,
+                            as_of_date=as_of,
+                            export_reports=False,
+                            use_cache=False,
+                            allow_irbank_download=False,
+                            workers=1,
+                            verbose=True,
+                        )
+                finally:
+                    feat_logger.removeHandler(debug_handler)
+                    storage_logger.removeHandler(debug_handler)
+
+                verb_out = verb_buf.getvalue()
+                debug_log_text = debug_buf.getvalue()
+                self.assertIn(f"--- [{symbols[0]}] 処理開始 ---", verb_out)
+                self.assertIn("を計算中...", debug_log_text)
+                self.assertIn("Parquetファイルを読み込みました", debug_log_text)
+                self.assertEqual(feat_logger.level, orig_feat_level)
+                self.assertEqual(storage_logger.level, orig_storage_level)
+
+    def test_batch_backtest_clean_progress_output(self):
+        """run_batch_backtest の通常時出力に [1/5]〜[5/5] と進行度・最終結果・所要時間が出力される"""
+        symbols = [f"{8200 + i}.T" for i in range(10)]
+        start_dt = date(2025, 2, 1)
+        d1 = date(2025, 5, 15)
+        d2 = date(2025, 6, 15)
+
+        bars_by_symbol: dict[str, list[OhlcvModel]] = {}
+        for sym in symbols:
+            bars: list[OhlcvModel] = []
+            for i in range(150):
+                dt = start_dt + timedelta(days=i)
+                c = 1000.0 + i * 3.0
+                bars.append(
+                    OhlcvModel(
+                        symbol=sym,
+                        date=dt,
+                        open=c - 2.0,
+                        high=c + 8.0,
+                        low=c - 8.0,
+                        close=c,
+                        volume=300_000,
+                    )
+                )
+            bars_by_symbol[sym] = bars
+
+        bs_items = {
+            sym.split(".")[0]: ["2025/03", "100000", "0", "0", "0", "0", "0", "1200.0", "45.0"]
+            for sym in symbols
+        }
+        pl_items = {
+            sym.split(".")[0]: [
+                "2025/03",
+                "50000000000",
+                "5000000000",
+                "5200000000",
+                "3500000000",
+                "150.0",
+                "15.0",
+                "8.0",
+            ]
+            for sym in symbols
+        }
+        masters = [
+            StockMasterModel(
+                code=sym.split(".")[0],
+                symbol=sym,
+                name=f"バックテスト銘柄{i}",
+                market="プライム",
+                sector_33="電気機器",
+            )
+            for i, sym in enumerate(symbols)
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            real_collector = self._write_temp_env(
+                tmpdir,
+                bars_by_symbol,
+                bs_by_year={2025: {"item": bs_items}},
+                pl_by_year={2025: {"item": pl_items}},
+            )
+            out_dir = Path(tmpdir) / "bt_reports"
+            bt_buf = io.StringIO()
+            with patch("src.data_collector.collector.data_collector", real_collector), \
+                 patch("src.main.data_collector", real_collector), \
+                 patch("src.main.prefetch_ohlcv_batch"), \
+                 patch("src.main.MasterManager") as mock_master_cls, \
+                 redirect_stdout(bt_buf):
+                mock_master_cls.return_value.load_master.return_value = masters
+
+                run_batch_backtest(
+                    as_of_dates=[d1, d2],
+                    symbols=symbols,
+                    start_date=start_dt,
+                    end_date=date(2025, 6, 30),
+                    horizons=[5],
+                    output_dir=out_dir,
+                    export_reports=True,
+                    use_cache=False,
+                    allow_irbank_download=False,
+                    workers=2,
+                    parallel_min_symbols=10,
+                    verbose=False,
+                )
+
+            bt_out = bt_buf.getvalue()
+            for phase_marker in ("[1/5]", "[2/5]", "[3/5]", "[4/5]", "[5/5]"):
+                self.assertIn(phase_marker, bt_out)
+            self.assertIn("[進行度] 全期間指標・基準日断面評価:", bt_out)
+            self.assertIn("10/10 (100.0%)", bt_out)
+            self.assertIn("[進行度] 基準日別スクリーニング・検証: 2/2 (100.0%)", bt_out)
+            self.assertIn("=== Project Atlas 一括バックテスト横断検証サマリー ===", bt_out)
+            self.assertIn("レポート出力先:", bt_out)
+            self.assertIn("フェーズ別所要時間:", bt_out)
+            self.assertNotIn("処理開始 ---", bt_out)
+            self.assertNotIn("スクリーニングが完了しました", bt_out)
+            self.assertNotIn("ランキングを生成しました", bt_out)
+
+    def test_run_full_pipeline_verbose_restores_log_level_on_exception(self):
+        """run_full_pipeline(..., verbose=True) 実行中に例外が発生してもログレベルが復元される"""
+        feat_logger = get_logger("FeatureManager")
+        storage_logger = get_logger("src.common.storage")
+        orig_feat_level = feat_logger.level
+        orig_storage_level = storage_logger.level
+
+        observed_levels: list[tuple[int, int]] = []
+
+        def _raising_load_master():
+            observed_levels.append((feat_logger.level, storage_logger.level))
+            raise RuntimeError("simulated pipeline error")
+
+        with patch("src.main.MasterManager") as mock_master_cls, \
+             redirect_stdout(io.StringIO()):
+            mock_master_cls.return_value.load_master.side_effect = _raising_load_master
+            with self.assertRaises(RuntimeError):
+                run_full_pipeline(
+                    symbols=["7203.T"],
+                    export_reports=False,
+                    verbose=True,
+                )
+
+        self.assertEqual(observed_levels, [(logging.DEBUG, logging.DEBUG)])
+        self.assertEqual(feat_logger.level, orig_feat_level)
+        self.assertEqual(storage_logger.level, orig_storage_level)
+
+    def test_batch_backtest_verbose_outputs_details_and_restores_log_level(self):
+        """run_batch_backtest(..., verbose=True) で銘柄処理概要と DEBUG ログが出力され、完了後に復元される"""
+        symbols = ["8301.T", "8302.T"]
+        start_dt = date(2025, 2, 1)
+        d1 = date(2025, 5, 15)
+        d2 = date(2025, 6, 15)
+
+        bars_by_symbol: dict[str, list[OhlcvModel]] = {}
+        for sym in symbols:
+            bars: list[OhlcvModel] = []
+            for i in range(150):
+                dt = start_dt + timedelta(days=i)
+                c = 1000.0 + i * 3.0
+                bars.append(
+                    OhlcvModel(
+                        symbol=sym,
+                        date=dt,
+                        open=c - 2.0,
+                        high=c + 8.0,
+                        low=c - 8.0,
+                        close=c,
+                        volume=300_000,
+                    )
+                )
+            bars_by_symbol[sym] = bars
+
+        bs_items = {
+            sym.split(".")[0]: ["2025/03", "100000", "0", "0", "0", "0", "0", "1200.0", "45.0"]
+            for sym in symbols
+        }
+        pl_items = {
+            sym.split(".")[0]: [
+                "2025/03",
+                "50000000000",
+                "5000000000",
+                "5200000000",
+                "3500000000",
+                "150.0",
+                "15.0",
+                "8.0",
+            ]
+            for sym in symbols
+        }
+        masters = [
+            StockMasterModel(
+                code=sym.split(".")[0],
+                symbol=sym,
+                name=f"バックテスト詳細銘柄{i}",
+                market="プライム",
+                sector_33="電気機器",
+            )
+            for i, sym in enumerate(symbols)
+        ]
+
+        feat_logger = get_logger("FeatureManager")
+        storage_logger = get_logger("src.common.storage")
+        orig_feat_level = feat_logger.level
+        orig_storage_level = storage_logger.level
+
+        debug_buf = io.StringIO()
+        debug_handler = logging.StreamHandler(debug_buf)
+        debug_handler.setLevel(logging.DEBUG)
+        feat_logger.addHandler(debug_handler)
+        storage_logger.addHandler(debug_handler)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            real_collector = self._write_temp_env(
+                tmpdir,
+                bars_by_symbol,
+                bs_by_year={2025: {"item": bs_items}},
+                pl_by_year={2025: {"item": pl_items}},
+            )
+            bt_buf = io.StringIO()
+            try:
+                with patch("src.data_collector.collector.data_collector", real_collector), \
+                     patch("src.main.data_collector", real_collector), \
+                     patch("src.main.prefetch_ohlcv_batch"), \
+                     patch("src.main.MasterManager") as mock_master_cls, \
+                     redirect_stdout(bt_buf):
+                    mock_master_cls.return_value.load_master.return_value = masters
+
+                    run_batch_backtest(
+                        as_of_dates=[d1, d2],
+                        symbols=symbols,
+                        start_date=start_dt,
+                        end_date=date(2025, 6, 30),
+                        horizons=[5],
+                        export_reports=False,
+                        use_cache=False,
+                        allow_irbank_download=False,
+                        workers=1,
+                        verbose=True,
+                    )
+            finally:
+                feat_logger.removeHandler(debug_handler)
+                storage_logger.removeHandler(debug_handler)
+
+        bt_out = bt_buf.getvalue()
+        debug_log_text = debug_buf.getvalue()
+        self.assertIn(f"--- [{symbols[0]}] 処理開始 (2基準日) ---", bt_out)
+        self.assertIn(f"[{symbols[0]}] 全期間指標計算・基準日断面評価完了", bt_out)
+        self.assertIn("を計算中...", debug_log_text)
+        self.assertIn("Parquetファイルを読み込みました", debug_log_text)
+        self.assertEqual(feat_logger.level, orig_feat_level)
+        self.assertEqual(storage_logger.level, orig_storage_level)
 
 
 if __name__ == "__main__":

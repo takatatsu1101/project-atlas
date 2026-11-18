@@ -1,6 +1,7 @@
 import inspect
 from typing import Any, Dict, List, Optional
 
+from src.common.logger import get_logger
 from src.model.data_models import (
     FeatureSetModel,
     IndicatorSetModel,
@@ -10,6 +11,8 @@ from src.model.data_models import (
 )
 from src.score_engine.registry import score_registry
 from src.score_engine.interfaces import IScoreCalculator
+
+logger = get_logger(__name__)
 
 
 class ScoreManager:
@@ -32,7 +35,7 @@ class ScoreManager:
         score_configs が指定された場合は score_id ごとの設定オブジェクトを注入する。
         """
         if not feature_sets and not pattern_sets:
-            print("警告: 特徴量データまたはパターンデータが不足しているため、スコアを計算できません。")
+            logger.warning("特徴量データまたはパターンデータが不足しているため、スコアを計算できません。")
             return []
 
         config_map = score_configs or {}
@@ -52,7 +55,7 @@ class ScoreManager:
 
         all_score_results: List[ScoreResultModel] = []
         for score_calculator_instance in scores_to_calculate:
-            print(f"スコア {score_calculator_instance.score_name} を計算中...")
+            logger.debug(f"スコア {score_calculator_instance.score_name} を計算中...")
             results = self._invoke_calculator(
                 score_calculator_instance,
                 feature_sets,
@@ -62,7 +65,7 @@ class ScoreManager:
             )
             all_score_results.extend(results)
 
-        print(f"{feature_sets[0].symbol if feature_sets else pattern_sets[0].symbol} のスコア計算が完了しました。")
+        logger.debug(f"{feature_sets[0].symbol if feature_sets else pattern_sets[0].symbol} のスコア計算が完了しました。")
         return all_score_results
 
     @staticmethod

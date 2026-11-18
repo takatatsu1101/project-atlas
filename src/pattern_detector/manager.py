@@ -3,9 +3,12 @@ from typing import List, Optional, Dict, Sequence
 from datetime import date
 
 from src.common.indexing import resolve_evaluation_targets, supports_target_indices
+from src.common.logger import get_logger
 from src.model.data_models import OhlcvModel, IndicatorSetModel, PatternSetModel, PatternResultModel
 from src.pattern_detector.registry import pattern_registry
 from src.pattern_detector.interfaces import IPattern
+
+logger = get_logger(__name__)
 
 
 class PatternManager:
@@ -27,7 +30,7 @@ class PatternManager:
         """
         eval_len = min(len(ohlcv_data), len(indicator_data)) if indicator_data else len(ohlcv_data)
         if eval_len == 0:
-            print("警告: OHLCVデータが不足しているため、パターンを検出できません。")
+            logger.warning("OHLCVデータが不足しているため、パターンを検出できません。")
             return []
 
         ohlcv_eval = ohlcv_data[:eval_len]
@@ -51,7 +54,7 @@ class PatternManager:
                 patterns_to_detect.append(self.registry.get_pattern(pattern_info["pattern_id"]))
 
         for pattern_instance in patterns_to_detect:
-            print(f"パターン {pattern_instance.pattern_name} を検出中...")
+            logger.debug(f"パターン {pattern_instance.pattern_name} を検出中...")
             if resolved_targets is not None and supports_target_indices(pattern_instance.detect):
                 pattern_results = pattern_instance.detect(
                     ohlcv_eval, ind_eval, target_indices=resolved_targets
@@ -67,7 +70,7 @@ class PatternManager:
                         all_pattern_sets[result_date] = []
                     all_pattern_sets[result_date].append(result)
                 else:
-                    print(f"警告: パターン検出結果 {pattern_instance.pattern_id} に日付情報がありません。スキップします。")
+                    logger.warning(f"パターン検出結果 {pattern_instance.pattern_id} に日付情報がありません。スキップします。")
         
         final_pattern_sets: List[PatternSetModel] = []
         if ohlcv_data:
@@ -79,7 +82,7 @@ class PatternManager:
                     results=all_pattern_sets[date_key]
                 ))
 
-        print(f"{ohlcv_data[0].symbol} のパターン検出が完了しました。")
+        logger.debug(f"{ohlcv_data[0].symbol} のパターン検出が完了しました。")
         return final_pattern_sets
 
 # モジュールレベルでインスタンス化

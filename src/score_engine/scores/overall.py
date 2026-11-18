@@ -2,9 +2,12 @@
 from typing import List, Dict, Any, Tuple
 import numpy as np
 
+from src.common.logger import get_logger
 from src.score_engine.interfaces import IScoreCalculator
 from src.model.data_models import FeatureSetModel, PatternSetModel, ScoreResultModel, FeatureResultModel, PatternResultModel
 from src.score_engine.registry import score_registry
+
+logger = get_logger(__name__)
 
 class OverallScoreCalculator(IScoreCalculator):
     score_id: str = "S001_OverallScore"
@@ -77,7 +80,7 @@ class OverallScoreCalculator(IScoreCalculator):
                 }
             ))
         
-        print(f"総合スコア計算が完了しました。{len(score_results)} 件のスコア結果を生成しました。")
+        logger.debug(f"総合スコア計算が完了しました。{len(score_results)} 件のスコア結果を生成しました。")
         return score_results
 
     def _normalize_score(self, raw_value: float, min_val: float, max_val: float) -> float:
