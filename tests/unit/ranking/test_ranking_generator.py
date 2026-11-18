@@ -74,7 +74,8 @@ class TestRankingGenerator(unittest.TestCase):
             ),
         ]
 
-        # pattern_sets は当日一致が無いため symbol の最新結果へフォールバックすることを検証
+        # pattern_sets は当日一致が無いため、デフォルト strict_date_match=True では空になり、
+        # strict_date_match=False のときのみ symbol の最新結果へフォールバックすることを検証
         pattern_sets = [
             PatternSetModel(
                 symbol="7203.T",
@@ -111,12 +112,26 @@ class TestRankingGenerator(unittest.TestCase):
             )
         }
 
+        ranking_strict = self.generator.generate_ranking(
+            [score_res],
+            master_map=masters,
+            feature_sets=feature_sets,
+            pattern_sets=pattern_sets,
+            financial_map=financial_map,
+        )
+
+        self.assertEqual(len(ranking_strict), 1)
+        res_strict = ranking_strict[0]
+        self.assertEqual(res_strict.feature_results[0].feature_id, "M001_MAAlignmentScore")
+        self.assertEqual(res_strict.pattern_results, [])
+
         ranking = self.generator.generate_ranking(
             [score_res],
             master_map=masters,
             feature_sets=feature_sets,
             pattern_sets=pattern_sets,
             financial_map=financial_map,
+            strict_date_match=False,
         )
 
         self.assertEqual(len(ranking), 1)
@@ -432,6 +447,63 @@ class TestRankingGenerator(unittest.TestCase):
         spy_master.assert_not_called()
         spy_fin.assert_not_called()
         spy_set.assert_not_called()
+
+    def test_strict_date_match_prevents_stale_and_future_fallback(self):
+        """strict_date_match=True では別日の特徴量・パターンにフォールバックせず、False でフォールバックする"""
+        score_res = ScoreResultModel(
+            symbol="7203.T",
+            date=self.target_date,
+            score_id="S002_StrategyScore",
+            total_score=80.0,
+            strategy_type="pullback",
+            sub_scores={"pullback_strategy_score": 80.0, "trend_env_score": 70.0},
+        )
+        feature_sets = [
+            FeatureSetModel(
+                symbol="7203.T",
+                date=date(2026, 2, 11),  # 基準日より未来日
+                results=[
+                    FeatureResultModel(
+                        feature_id="FUTURE_FEAT",
+                        feature_name="Future",
+                        score=99.0,
+                        raw_value=99.0,
+                    )
+                ],
+            )
+        ]
+        pattern_sets = [
+            PatternSetModel(
+                symbol="7203.T",
+                date=date(2026, 2, 1),  # 基準日より過去日
+                results=[
+                    PatternResultModel(
+                        pattern_id="PAST_PAT",
+                        pattern_name="Past",
+                        confidence=90.0,
+                    )
+                ],
+            )
+        ]
+
+        # strict_date_match=True (デフォルト) -> 一致なしのため空
+        strict_rankings = self.generator.generate_strategy_rankings(
+            [score_res],
+            feature_sets=feature_sets,
+            pattern_sets=pattern_sets,
+        )
+        self.assertEqual(strict_rankings["overall"][0].feature_results, [])
+        self.assertEqual(strict_rankings["overall"][0].pattern_results, [])
+
+        # strict_date_match=False をインスタンス初期化または引数で指定 -> 最新へフォールバック
+        non_strict_gen = RankingGenerator(strict_date_match=False)
+        fallback_rankings = non_strict_gen.generate_strategy_rankings(
+            [score_res],
+            feature_sets=feature_sets,
+            pattern_sets=pattern_sets,
+        )
+        self.assertEqual(fallback_rankings["overall"][0].feature_results[0].feature_id, "FUTURE_FEAT")
+        self.assertEqual(fallback_rankings["overall"][0].pattern_results[0].pattern_id, "PAST_PAT")
 
 
 if __name__ == "__main__":

@@ -154,16 +154,16 @@ Project Atlas は、スイングトレード（数週間〜3ヶ月保有）向�
 
 `docs/reports/feature_improvement_report_2026-11-17.md` の「6. 推奨ネクストステップ」に基づき、検証の切り分けを明確にするため Step 1〜Step 4 を 1 PR ずつ段階的に実装・フォワード検証する。
 
-- [ ] **PR #1 (Step 1): データ修正・検証基盤強化 (`fix/data-integrity-and-quantile-eval`)**
+- [x] **PR #1 (Step 1): データ修正・検証基盤強化 (`fix/data-integrity-and-quantile-eval`)**
     - **目的**: 評価の土台となるデータ不整合・計算バグを解消し、全通過銘柄を対象とした特徴量別分位バックテストによってベースラインを定量計測できるようにする。
     - **対象スコープ**:
-        - [ ] **株式分割による PER/PBR 歪みの補正**: Parquet に保存済みの `stock_splits` を用いて決算期末日（`fiscal_date`）翌日〜基準日（`as_of_date`）の累積分割比率を算出し、EPS/BPS を調整して PER/PBR を再計算（併せて異常値ガードを設定）。
-        - [ ] **成長率欠損の `None` 維持**: `DataCollector.collect_financial_data()` における過去 PL 欠損時の `revenue_growth` / `net_profit_growth`（単年・3年・5年）の `0.0` 初期化を廃止し、`None` のまま格納して `F002_GrowthScore` の欠損中立（25点）判定を有効化。
-        - [ ] **`V001_VolumeScore` の当日除外修正**: `avg_volume_25` の算出範囲から当日 `i` を除外（`t-25 〜 t-1`）し、出来高急増日の倍率圧縮バグを解消。
-        - [ ] **パターン検出バグ・ウィンドウ修正**: `HammerPattern` の `is_close_to_high` 条件式修正、および `DoubleBottomPattern` / `DoubleTopPattern` の谷・山探索期間ウィンドウ制限（直近営業日ウィンドウ導入）。
-        - [ ] **過去日パターンフォールバックの見直し**: `RankingGenerator._lookup_set()` で当日未検出時に過去日パターンへフォールバックする挙動を見直し、当日厳密一致を基本とする設定・制御を導入。
-        - [ ] **ダミー行クレンジング**: `data/price/1301.T.parquet` 先頭5行の `NaN` 混入ダミー行のクレンジング（および読込時除外の整合性確認）。
-        - [ ] **全通過銘柄＆特徴量別分位評価の追加**: `--mode evaluate` / `--mode backtest` で `overall_ranking`（上位 `top_n`）だけでなくスクリーニング全通過銘柄（`filtered_scores`）を対象に、各特徴量スコアの分位別（上位20% vs 下位20%）`+5 / +20 / +60` 営業日勝率・平均リターン・MFE・MAE を集計・出力する機能を追加。
+        - [x] **株式分割による PER/PBR 歪みの補正**: Parquet に保存済みの `stock_splits` を用いて決算期末日（`fiscal_date`）翌日〜基準日（`as_of_date`）の累積分割比率を算出し、EPS/BPS を調整して PER/PBR を再計算（併せて異常値ガードを設定）。
+        - [x] **成長率欠損の `None` 維持**: `DataCollector.collect_financial_data()` における過去 PL 欠損時の `revenue_growth` / `net_profit_growth`（単年・3年・5年）の `0.0` 初期化を廃止し、`None` のまま格納して `F002_GrowthScore` の欠損中立（25点）判定を有効化。
+        - [x] **`V001_VolumeScore` の当日除外修正**: `avg_volume_25` の算出範囲から当日 `i` を除外（`t-25 〜 t-1`）し、出来高急増日の倍率圧縮バグを解消。
+        - [x] **パターン検出バグ・ウィンドウ修正**: `HammerPattern` の `is_close_to_high` 条件式修正、および `DoubleBottomPattern` / `DoubleTopPattern` の谷・山探索期間ウィンドウ制限（直近営業日ウィンドウ導入）。
+        - [x] **過去日パターンフォールバックの見直し**: `RankingGenerator._lookup_set()` で当日未検出時に過去日パターンへフォールバックする挙動を見直し、当日厳密一致を基本とする設定・制御を導入。
+        - [x] **ダミー行クレンジング**: `data/price/1301.T.parquet` 先頭5行の `NaN` 混入ダミー行のクレンジング（および読込時除外の整合性確認）。
+        - [x] **全通過銘柄＆特徴量別分位評価の追加**: `--mode evaluate` / `--mode backtest` で `overall_ranking`（上位 `top_n`）だけでなくスクリーニング全通過銘柄（`filtered_scores`）を対象に、各特徴量スコアの分位別（上位20% vs 下位20%）`+5 / +20 / +60` 営業日勝率・平均リターン・MFE・MAE を集計・出力する機能を追加。
     - **変更予定ファイル**:
         - `src/data_collector/collector.py`
         - `src/feature_engine/features/volume/volume_score.py`
@@ -275,12 +275,17 @@ Project Atlas は、スイングトレード（数週間〜3ヶ月保有）向�
 - [x] 2026/11/15: 要件見直し（v0.2.0）および1要件1PR計画の策定完了（PR #1）
 - [x] 2026/11/16: フェーズ3 PR #2〜#5 の順次実装・検証完了
 - [x] 2026/11/18: フェーズ4 PR #1〜#4（銘柄評価高速化・スケーラビリティ改善）の順次実装・検証完了
-- [ ] フェーズ5 PR #1（Step 1）: データ修正・検証基盤強化＆ベースライン計測
+- [x] フェーズ5 PR #1（Step 1）: データ修正・検証基盤強化＆ベースライン計測
 - [ ] フェーズ5 PR #2（Step 2）: Phase A テクニカル特徴量・スコア改善
 - [ ] フェーズ5 PR #3（Step 3）: Phase A 財務データ拡張・`F004`/`F005` 刷新
 - [ ] フェーズ5 PR #4（Step 4）: Phase B 相対力（RS）・業種モメンタム・地合いレジーム導入
 
 ## 5. 実行ログ (最新の作業のみ記載)
+- 2026/11/19: フェーズ5 PR #1（Step 1: `fix/data-integrity-and-quantile-eval`）を実施。`DataCollector.collect_financial_data()` の `stock_splits` 累積分割調整（`fiscal_date < split_date <= as_of_date`・異常値ガード）＆成長率欠損の `None` 維持、`V001_VolumeScore` の当日除外（`t-25 〜 t-1`）、`HammerPattern.is_close_to_high` 修正、`DoubleBottom` / `DoubleTop` の直近60営業日ウィンドウ制限、`RankingGenerator` の `strict_date_match=True` デフォルト化、`1301.T.parquet` 先頭5行ダミー除去、および `--mode evaluate` / `--mode backtest` 向け全通過銘柄＆特徴量別分位評価（上位20% vs 下位20%）を実装し、全テスト313件（+4サブテスト）パスを確認。
+  - **Step 1 ベースライン計測結果**（`--mode backtest --as-of-dates 2025-07-01 2025-09-01 2025-11-04 2026-01-05 2026-03-02 2026-05-01 2026-07-01 --end-date 2026-11-18 --no-irbank-download`、対象1,776銘柄・7基準日）:
+    - **上位抽出（140件）**: `+5日` 勝率 `65.71%` / 平均 `+1.15%` / MFE `+3.98%` / MAE `-2.30%`、 `+20日` 勝率 `62.86%` / 平均 `+2.46%` / MFE `+7.79%` / MAE `-4.45%`、 `+60日` 勝率 `63.57%` / 平均 `+6.53%` / MFE `+16.91%` / MAE `-6.75%`。
+    - **全通過銘柄プール（2,442件）**: `+5日` 勝率 `53.85%` / 平均 `-0.57%` / MFE `+3.57%` / MAE `-4.34%`、 `+20日` 勝率 `52.38%` / 平均 `-0.07%` / MFE `+7.67%` / MAE `-6.97%`、 `+60日` 勝率 `61.71%` / 平均 `+6.26%` / MFE `+18.80%` / MAE `-9.70%`。
+    - **特徴量別上位20% vs 下位20%スプレッド（+60日 リターン差 / 勝率差・ユニーク数）**: `F003_ValuationScore` (`+13.76%` / `+32.17%`, unique=12), `P002_BreakoutScore` (`+2.91%` / `+9.43%`, unique=2351), `F002_GrowthScore` (`+2.91%` / `-2.87%`, unique=13), `P001_PullbackScore` (`+1.69%` / `+17.62%` [+5日 `+3.02%`/`+20.70%`], unique=1992), `R001_VolatilityScore` (`+0.25%` / `+0.41%`, unique=2314), `T001_TrendStrengthScore` (`-0.60%` / `+2.46%`, unique=11), `F001_TrendStrength` (`-0.73%` / `+6.56%`, unique=3), `F004_FinancialHealthScore` (`-0.94%` / `+4.10%`, unique=1), `O001_MomentumScore` (`-1.07%` / `-3.07%`, unique=2438), `V001_VolumeScore` (`-1.24%` / `-7.17%`, unique=16), `M001_MAAlignmentScore` (`-1.59%` / `+4.51%`, unique=3), `F005_EarningsQualityScore` (`-2.69%` / `-1.23%`, unique=5)。
 - 2026/11/18: `docs/reports/feature_improvement_report_2026-11-17.md` の「6. 推奨ネクストステップ（Step 1〜Step 4）」に基づき、フェーズ5（特徴量充足度改善・検証基盤強化）の4 PR 分割実装計画（目的・対象スコープ・変更予定ファイル・設計上の決定事項・Open Questions・完了条件）を策定し、`docs/_plan.md` を更新。
 - 2026/11/18: フェーズ4 PR #4（`perf/multiprocess-and-batch-backtest`）を実施。`src/pipeline_worker.py` を新設して `ProcessPoolExecutor`（macOS `spawn` 対応の `init_pipeline_worker`・3レジストリ初期化・完全読取専用制約・決定的順序結合・1銘柄例外隔離）と少銘柄閾値制御（`DEFAULT_PARALLEL_MIN_SYMBOLS=20`・`FEATURE_ENGINE_PARALLEL_PROCESSES` / `--workers`）を `src/main.py` に統合。さらに複数基準日一括バックテストランナー `run_batch_backtest`（CLI `--mode backtest` / `--as-of-dates`）および `BatchBacktestSummaryModel` / `ForwardReturnEvaluator.aggregate_batch_summaries` / `Presenter` 横断レポート出力を実装し、「全期間1回読込・ベクトル指標1回算出・基準日断面厳密分離（未来バー完全遮断・開示ラグ財務対応）」を実現。全テスト277件のパスおよび2段階レビュー（1次 `atlas-reviewer` 指摘修正後・2次 `gemini-4-argon-high` Approve）を完了。
 - 2026/11/18: フェーズ4 PR #3（`perf/vectorize-and-latest-only-eval`）を実施。`StorageManager.load_parquet(..., columns=...)` による列限定読込（不在列時のみフォールバック）と `DataCollector.collect_ohlcv_data()` の `NaN`/`inf` クレンジング・`iterrows()` 排除（`OhlcvModel.model_construct`）、`IndicatorCalculator` の単一ベクトル演算統合、`DoubleBottomPattern` / `DoubleTopPattern` の 1パス $O(N)$ 化（`src/pattern_detector/patterns/reversal/_common.py`）、および `src/common/indexing.py` を用いた全13特徴量・全3パターン・`FeatureManager` / `PatternManager`・`src/main.py` 向けの「全履歴参照・対象インデックス（`latest_only_per_symbol=True` 時は最新日）のみ評価」モードを実装。全テスト262件のパスおよび2段階レビュー（1次 `atlas-reviewer` 指摘修正後・2次 `gemini-4-argon-high` Approve）を完了。

@@ -8,6 +8,7 @@ from src.model.data_models import (
     AnalysisResultModel,
     BatchBacktestSummaryModel,
     EvaluationSummaryModel,
+    FeatureQuantileRowModel,
     HorizonSummaryModel,
 )
 
@@ -422,6 +423,44 @@ class Presenter:
                         f"| 平均MAE={self._fmt_pct(hs.avg_mae_pct, signed=True)}"
                     )
 
+    def _display_feature_quantile_summary_cli(
+        self,
+        horizons: Sequence[int],
+        feature_quantile_summary: Dict[str, Dict[int, FeatureQuantileRowModel]],
+    ) -> None:
+        """特徴量別分位評価（上位20% vs 下位20%）をCLI出力する共通ヘルパー。"""
+        if not feature_quantile_summary:
+            return
+        print("\n[特徴量別分位評価 (上位20% vs 下位20%)]")
+        for fid, h_map in feature_quantile_summary.items():
+            fname = next(
+                (r.feature_name for r in h_map.values() if r.feature_name),
+                "",
+            )
+            label = f"{fid} ({fname})" if fname else fid
+            print(f"  {label}")
+            for h in horizons:
+                row = h_map.get(h)
+                if row is None:
+                    continue
+                if row.top_avg_return_pct is None or row.bottom_avg_return_pct is None:
+                    print(
+                        f"    +{h}営業日: n={row.total_samples} (unique={row.unique_score_count}) "
+                        "| サンプル不足(<5)"
+                    )
+                else:
+                    print(
+                        f"    +{h}営業日: n={row.total_samples} (unique={row.unique_score_count}) "
+                        f"| 上位20%(n={row.top_count}): 勝率={self._fmt_pct(row.top_win_rate_pct)}, "
+                        f"平均={self._fmt_pct(row.top_avg_return_pct, signed=True)}, "
+                        f"MFE={self._fmt_pct(row.top_avg_mfe_pct, signed=True)}, "
+                        f"MAE={self._fmt_pct(row.top_avg_mae_pct, signed=True)} "
+                        f"| 下位20%(n={row.bottom_count}): 勝率={self._fmt_pct(row.bottom_win_rate_pct)}, "
+                        f"平均={self._fmt_pct(row.bottom_avg_return_pct, signed=True)} "
+                        f"| 差: リターン={self._fmt_pct(row.spread_return_pct, signed=True)}, "
+                        f"勝率={self._fmt_pct(row.spread_win_rate_pct, signed=True)}"
+                    )
+
     def _display_evaluation_cli(self, evaluation_summary: EvaluationSummaryModel) -> None:
         """フォワードリターン検証サマリーおよび銘柄別リターンをCLI出力する。"""
         print("\n=== フォワードリターン検証サマリー ===")
@@ -437,6 +476,22 @@ class Presenter:
             evaluation_summary.overall_summary,
             evaluation_summary.strategy_summary,
         )
+
+        if evaluation_summary.passed_overall_summary:
+            print(
+                f"\n[全通過銘柄サマリー (全 {evaluation_summary.passed_total_candidates} 件)]"
+            )
+            self._display_horizon_summaries_cli(
+                evaluation_summary.horizons,
+                evaluation_summary.passed_overall_summary,
+                evaluation_summary.passed_strategy_summary,
+            )
+
+        if evaluation_summary.feature_quantile_summary:
+            self._display_feature_quantile_summary_cli(
+                evaluation_summary.horizons,
+                evaluation_summary.feature_quantile_summary,
+            )
 
         print("\n[銘柄別フォワードリターン]")
         if not evaluation_summary.items:
@@ -862,6 +917,53 @@ class Presenter:
             lines.append("")
         return lines
 
+    def _build_feature_quantile_markdown_lines(
+        self,
+        horizons: Sequence[int],
+        feature_quantile_summary: Dict[str, Dict[int, FeatureQuantileRowModel]],
+        heading: str = "## 特徴量別分位評価（上位20% vs 下位20%）",
+    ) -> List[str]:
+        """特徴量別分位評価の Markdown テーブル行を生成する共通ヘルパー。"""
+        if not feature_quantile_summary:
+            return []
+        lines: List[str] = [
+            heading,
+            "",
+            "| 特徴量ID | 特徴量名 | ホライズン | 件数 (ユニーク) | 上位20%勝率 | 上位20%平均 | 上位20%MFE | 上位20%MAE | 下位20%勝率 | 下位20%平均 | スプレッド(リターン) | スプレッド(勝率) |",
+            "|:---|:---|:---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        ]
+        for fid, h_map in feature_quantile_summary.items():
+            fname = next(
+                (r.feature_name for r in h_map.values() if r.feature_name),
+                "",
+            )
+            for h in horizons:
+                row = h_map.get(h)
+                if row is None:
+                    continue
+                lines.append(
+                    "| "
+                    + " | ".join(
+                        [
+                            fid,
+                            fname or "-",
+                            f"+{h}営業日",
+                            f"{row.total_samples} ({row.unique_score_count})",
+                            self._fmt_pct(row.top_win_rate_pct),
+                            self._fmt_pct(row.top_avg_return_pct, signed=True),
+                            self._fmt_pct(row.top_avg_mfe_pct, signed=True),
+                            self._fmt_pct(row.top_avg_mae_pct, signed=True),
+                            self._fmt_pct(row.bottom_win_rate_pct),
+                            self._fmt_pct(row.bottom_avg_return_pct, signed=True),
+                            self._fmt_pct(row.spread_return_pct, signed=True),
+                            self._fmt_pct(row.spread_win_rate_pct, signed=True),
+                        ]
+                    )
+                    + " |"
+                )
+        lines.append("")
+        return lines
+
     def _build_evaluation_markdown_lines(
         self, evaluation_summary: EvaluationSummaryModel
     ) -> List[str]:
@@ -882,6 +984,29 @@ class Presenter:
                 evaluation_summary.strategy_summary,
             )
         )
+
+        if evaluation_summary.passed_overall_summary:
+            lines.extend(
+                [
+                    f"## 全通過銘柄フォワードリターンサマリー（全 {evaluation_summary.passed_total_candidates} 件）",
+                    "",
+                ]
+            )
+            lines.extend(
+                self._build_horizon_markdown_tables(
+                    evaluation_summary.horizons,
+                    evaluation_summary.passed_overall_summary,
+                    evaluation_summary.passed_strategy_summary,
+                )
+            )
+
+        if evaluation_summary.feature_quantile_summary:
+            lines.extend(
+                self._build_feature_quantile_markdown_lines(
+                    evaluation_summary.horizons,
+                    evaluation_summary.feature_quantile_summary,
+                )
+            )
 
         lines.append("## 銘柄別フォワードリターン詳細")
         lines.append("")
@@ -988,6 +1113,22 @@ class Presenter:
             batch_summary.aggregated_strategy_summary,
         )
 
+        if batch_summary.aggregated_passed_overall_summary:
+            print(
+                f"\n[全期間プール 全通過銘柄サマリー (全 {batch_summary.passed_total_candidates} 件)]"
+            )
+            self._display_horizon_summaries_cli(
+                batch_summary.horizons,
+                batch_summary.aggregated_passed_overall_summary,
+                batch_summary.aggregated_passed_strategy_summary,
+            )
+
+        if batch_summary.aggregated_feature_quantile_summary:
+            self._display_feature_quantile_summary_cli(
+                batch_summary.horizons,
+                batch_summary.aggregated_feature_quantile_summary,
+            )
+
         if batch_summary.per_date_summaries:
             print("\n[基準日別サマリー]")
             for dt in batch_summary.as_of_dates:
@@ -1067,6 +1208,28 @@ class Presenter:
                         batch_summary.aggregated_strategy_summary,
                     )
                 )
+                if batch_summary.aggregated_passed_overall_summary:
+                    lines.extend(
+                        [
+                            f"## 全期間プール 全通過銘柄サマリー（全 {batch_summary.passed_total_candidates} 件）",
+                            "",
+                        ]
+                    )
+                    lines.extend(
+                        self._build_horizon_markdown_tables(
+                            batch_summary.horizons,
+                            batch_summary.aggregated_passed_overall_summary,
+                            batch_summary.aggregated_passed_strategy_summary,
+                        )
+                    )
+                if batch_summary.aggregated_feature_quantile_summary:
+                    lines.extend(
+                        self._build_feature_quantile_markdown_lines(
+                            batch_summary.horizons,
+                            batch_summary.aggregated_feature_quantile_summary,
+                            heading="## 全期間プール 特徴量別分位評価（上位20% vs 下位20%）",
+                        )
+                    )
                 lines.append("## 基準日別サマリー")
                 lines.append("")
                 if not batch_summary.per_date_summaries:

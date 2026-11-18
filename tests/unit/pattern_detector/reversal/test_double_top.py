@@ -326,5 +326,47 @@ class TestDoubleTopPattern(unittest.TestCase):
         b_zero, i_zero = to_bars(zero_rows)
         self.assertEqual(self.pattern_detector.detect(b_zero, i_zero), [])
 
+    def test_lookback_window_60_boundary_and_target_indices_consistency(self):
+        """60日ウィンドウ境界（e1_idx >= i - 60 で検出、i - 61 で除外）と全履歴/単一日一致を検証"""
+        base = date(2025, 1, 1)
+        bars = []
+        # 0..9: 上昇トレンド（極値を作らない単調増加）
+        for idx in range(10):
+            p = 80.0 + idx * 2.0
+            bars.append(OhlcvModel(symbol=self.symbol, date=base + timedelta(days=idx), open=p, high=p + 1.0, low=p - 1.0, close=p, volume=1000))
+        # idx 10: 山1 (high=120.0)
+        bars.append(OhlcvModel(symbol=self.symbol, date=base + timedelta(days=10), open=118.0, high=120.0, low=116.0, close=118.0, volume=1000))
+        # 11..14: 下落してネック形成
+        for idx, p in enumerate([115.0, 110.0, 105.0, 101.0], start=11):
+            bars.append(OhlcvModel(symbol=self.symbol, date=base + timedelta(days=idx), open=p, high=p + 1.0, low=p - 1.0, close=p, volume=1000))
+        # idx 15: ネック (low=98.0)
+        bars.append(OhlcvModel(symbol=self.symbol, date=base + timedelta(days=15), open=100.0, high=102.0, low=98.0, close=100.0, volume=1000))
+        # 16..19: 上昇
+        for idx, p in enumerate([105.0, 110.0, 114.0, 117.0], start=16):
+            bars.append(OhlcvModel(symbol=self.symbol, date=base + timedelta(days=idx), open=p, high=p + 1.0, low=p - 1.0, close=p, volume=1000))
+        # idx 20: 山2 (high=119.5)
+        bars.append(OhlcvModel(symbol=self.symbol, date=base + timedelta(days=20), open=117.0, high=119.5, low=116.0, close=117.0, volume=1000))
+        # 21..75: 単調微減（新たな極値を作らず、ネック98.0を下抜けた状態を維持）
+        for idx in range(21, 76):
+            p = 115.0 - (idx - 21) * 0.5
+            bars.append(OhlcvModel(symbol=self.symbol, date=base + timedelta(days=idx), open=p, high=p + 1.0, low=p - 1.0, close=p - 0.2, volume=1000))
+
+        inds = [IndicatorSetModel(symbol=self.symbol, date=b.date, indicators={}) for b in bars]
+
+        all_results = self.pattern_detector.detect(bars, inds, target_indices=None)
+        detected_dates = {r.metadata["date"] for r in all_results}
+
+        # i=70 (70 - 60 = 10 == e1_idx) はウィンドウ内なので検出される
+        self.assertIn(bars[70].date, detected_dates)
+        # i=71 (71 - 60 = 11 > e1_idx) はウィンドウ外なので除外される
+        self.assertNotIn(bars[71].date, detected_dates)
+
+        # target_indices=[70] / [71] の単一日評価が全履歴結果と完全一致する
+        res_70 = self.pattern_detector.detect(bars, inds, target_indices=[70])
+        res_71 = self.pattern_detector.detect(bars, inds, target_indices=[71])
+        expected_70 = [r for r in all_results if r.metadata["date"] == bars[70].date]
+        self.assertEqual(res_70, expected_70)
+        self.assertEqual(res_71, [])
+
 if __name__ == '__main__':
     unittest.main()

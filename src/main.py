@@ -30,6 +30,7 @@ from src.model.data_models import (
     EvaluationSummaryModel,
     FeatureSetModel,
     FinancialModel,
+    ForwardEvaluationItemModel,
     OhlcvModel,
     PatternSetModel,
     ScoreResultModel,
@@ -514,7 +515,7 @@ def run_full_pipeline(
             all_score_results, criteria=config.screener
         )
 
-        ranking_gen = RankingGenerator()
+        ranking_gen = RankingGenerator(strict_date_match=config.ranking.strict_date_match)
         strategy_rankings = ranking_gen.generate_strategy_rankings(
             filtered_scores,
             master_map=master_map,
@@ -532,6 +533,14 @@ def run_full_pipeline(
             assert as_of_date is not None
             print("  フォワードリターン検証を実行中...", flush=True)
             t_eval = time.perf_counter()
+            passed_candidates = ranking_gen.generate_ranking(
+                filtered_scores,
+                master_map=master_map,
+                feature_sets=all_feature_sets,
+                pattern_sets=all_pattern_sets,
+                financial_map=financial_map,
+                top_n=None,
+            )
             evaluator = ForwardReturnEvaluator()
             evaluation_summary = evaluator.evaluate(
                 overall_ranking,
@@ -540,6 +549,7 @@ def run_full_pipeline(
                 horizons=resolved_horizons,
                 entry_price_mode=config.evaluation.entry_price_mode,
                 eval_end_date=eval_end_arg,
+                passed_candidates=passed_candidates,
             )
             timings_sec["forward_evaluation"] = time.perf_counter() - t_eval
 
@@ -869,11 +879,13 @@ def run_batch_backtest(
         # 5. 基準日別ランキング・フォワード評価・横断集計
         print(f"[4/5] 基準日別スクリーニング・フォワード検証 ({len(sorted_dates)}基準日)...", flush=True)
         screener_instance = Screener()
-        ranking_gen = RankingGenerator()
+        ranking_gen = RankingGenerator(strict_date_match=config.ranking.strict_date_match)
         evaluator = ForwardReturnEvaluator()
 
         per_date_results: Dict[date, Dict[str, Any]] = {}
         per_date_summaries: Dict[date, EvaluationSummaryModel] = {}
+        all_passed_items: List[ForwardEvaluationItemModel] = []
+        all_passed_records: List[Tuple[AnalysisResultModel, ForwardEvaluationItemModel]] = []
         date_tracker = ProgressTracker(
             label="基準日別スクリーニング・検証",
             total=len(sorted_dates),
@@ -894,19 +906,30 @@ def run_batch_backtest(
                 strategy_top_n=config.ranking.strategy_top_n,
             )
             overall_ranking: List[AnalysisResultModel] = strategy_rankings["overall"]
+            passed_candidates = ranking_gen.generate_ranking(
+                filtered_scores,
+                master_map=master_map,
+                feature_sets=date_features[d],
+                pattern_sets=date_patterns[d],
+                financial_map=date_financial_map[d],
+                top_n=None,
+            )
             timings_sec["screening_and_ranking"] += time.perf_counter() - t_rank
 
             t_eval = time.perf_counter()
-            eval_summary = evaluator.evaluate(
+            eval_summary, passed_items = evaluator.evaluate_with_passed(
                 overall_ranking,
                 as_of_date=d,
                 ohlcv_map=full_ohlcv_map,
                 horizons=resolved_horizons,
                 entry_price_mode=config.evaluation.entry_price_mode,
                 eval_end_date=end_date,
+                passed_candidates=passed_candidates,
             )
             timings_sec["forward_evaluation"] += time.perf_counter() - t_eval
 
+            all_passed_items.extend(passed_items)
+            all_passed_records.extend(zip(passed_candidates, passed_items))
             per_date_summaries[d] = eval_summary
             per_date_results[d] = {
                 "as_of_date": d,
@@ -928,6 +951,8 @@ def run_batch_backtest(
             per_date_summaries,
             horizons=resolved_horizons,
             entry_price_mode=config.evaluation.entry_price_mode,
+            passed_items_all=all_passed_items,
+            passed_records_all=all_passed_records,
         )
 
         timings_sec["total"] = time.perf_counter() - pipeline_start

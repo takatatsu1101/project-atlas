@@ -390,7 +390,8 @@ class TestPipelineIntegration(unittest.TestCase):
                  patch("src.main.collect_financial_data", return_value=fin_7203), \
                  patch("src.evaluator.evaluator.data_collector.collect_ohlcv_data", return_value=forward_bars), \
                  patch("src.main.IndicatorCalculator.calculate_indicators", wraps=IndicatorCalculator().calculate_indicators) as spy_ind, \
-                 patch("src.main.calculate_features", wraps=calculate_features) as spy_feat:
+                 patch("src.main.calculate_features", wraps=calculate_features) as spy_feat, \
+                 patch("src.main.RankingGenerator", wraps=RankingGenerator) as spy_rank:
                 mock_master_cls.return_value.load_master.return_value = [master_7203]
 
                 result = run_full_pipeline(
@@ -411,11 +412,18 @@ class TestPipelineIntegration(unittest.TestCase):
             self.assertEqual(spy_ind.call_args.kwargs["cache_key_suffix"], f"asof_{as_of.isoformat()}")
             self.assertEqual(spy_feat.call_args.kwargs["use_cache"], False)
             self.assertEqual(spy_feat.call_args.kwargs["cache_key_suffix"], f"asof_{as_of.isoformat()}")
+            self.assertIn("strict_date_match", spy_rank.call_args.kwargs)
 
             eval_summary = result["evaluation_summary"]
             self.assertIsNotNone(eval_summary)
             self.assertEqual(eval_summary.horizons, [5, 20])
             self.assertEqual(eval_summary.total_candidates, 1)
+            self.assertEqual(eval_summary.passed_total_candidates, 1)
+            self.assertIsInstance(eval_summary.passed_overall_summary, dict)
+            self.assertIsInstance(eval_summary.feature_quantile_summary, dict)
+            if eval_summary.passed_total_candidates > 0:
+                self.assertIn(5, eval_summary.passed_overall_summary)
+                self.assertIn(20, eval_summary.passed_overall_summary)
             self.assertEqual(eval_summary.overall_summary[5].evaluated_count, 1)
             self.assertEqual(eval_summary.overall_summary[20].evaluated_count, 1)
             self.assertAlmostEqual(eval_summary.items[0].horizons[5].return_pct, 2.5, places=4)
@@ -1353,6 +1361,12 @@ class TestPipelineIntegration(unittest.TestCase):
             self.assertEqual(spy_ohlcv.call_count, 2)
             self.assertEqual(spy_ind.call_count, 2)
             self.assertEqual(res_orig["as_of_dates"], [d1, d2])
+
+            batch_summary = res_orig["batch_summary"]
+            self.assertIsNotNone(batch_summary)
+            self.assertGreaterEqual(batch_summary.passed_total_candidates, 0)
+            self.assertIsInstance(batch_summary.aggregated_passed_overall_summary, dict)
+            self.assertIsInstance(batch_summary.aggregated_feature_quantile_summary, dict)
 
             # 3) 開示ラグによる財務データ切り替え検証 (d1=2025-05-15 -> ROE 10.0%, d2=2025-06-05 -> ROE 20.0%)
             d1_7203 = next(r for r in res_orig["per_date_results"][d1]["analysis_results"] if r.symbol == "7203.T")

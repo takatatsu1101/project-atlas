@@ -50,6 +50,9 @@ _SetLookupTuple = Tuple[
 class RankingGenerator:
     """スクリーニング済みスコア結果から総合・戦略別ランキングを生成するクラス"""
 
+    def __init__(self, strict_date_match: bool = True) -> None:
+        self.strict_date_match = strict_date_match
+
     @staticmethod
     def _normalize_date(value: Any) -> Optional[date]:
         if value is None:
@@ -162,8 +165,12 @@ class RankingGenerator:
         lookup_tuple: _SetLookupTuple,
         symbol: str,
         norm_date: Optional[date],
+        strict_date_match: bool = True,
     ) -> Optional[Any]:
-        """完全一致 symbol を優先し、無ければ正規化コードにフォールバックして検索する"""
+        """
+        完全一致 symbol を優先し、無ければ正規化コードで検索する。
+        norm_date が指定されている場合、strict_date_match=True なら別日へフォールバックせず None を返す。
+        """
         by_symbol_date, latest_by_symbol, by_code_date, latest_by_code = lookup_tuple
         code = cls._extract_code(symbol)
         if norm_date is not None:
@@ -173,6 +180,8 @@ class RankingGenerator:
             matched = by_code_date.get((code, norm_date))
             if matched is not None:
                 return matched
+            if strict_date_match:
+                return None
         return latest_by_symbol.get(symbol) or latest_by_code.get(code)
 
     @classmethod
@@ -240,10 +249,12 @@ class RankingGenerator:
         pattern_lookup: _SetLookupTuple,
         strategy_filter: Optional[str] = None,
         top_n: Optional[int] = None,
+        strict_date_match: Optional[bool] = None,
     ) -> List[AnalysisResultModel]:
         """構築済みルックアップ辞書を用いてランキングを生成する共通ヘルパー"""
         if not filtered_score_results:
             return []
+        resolved_strict = self.strict_date_match if strict_date_match is None else strict_date_match
 
         candidates = list(filtered_score_results)
         if strategy_filter is not None:
@@ -279,12 +290,22 @@ class RankingGenerator:
                 (master.sector_33 or master.sector_17 or "") if master else ""
             )
 
-            matched_fs = self._lookup_set(feature_lookup, score_result.symbol, norm_date)
+            matched_fs = self._lookup_set(
+                feature_lookup,
+                score_result.symbol,
+                norm_date,
+                strict_date_match=resolved_strict,
+            )
             feature_results: List[FeatureResultModel] = (
                 list(matched_fs.results) if matched_fs else []
             )
 
-            matched_ps = self._lookup_set(pattern_lookup, score_result.symbol, norm_date)
+            matched_ps = self._lookup_set(
+                pattern_lookup,
+                score_result.symbol,
+                norm_date,
+                strict_date_match=resolved_strict,
+            )
             pattern_results: List[PatternResultModel] = (
                 list(matched_ps.results) if matched_ps else []
             )
@@ -353,6 +374,7 @@ class RankingGenerator:
         financial_map: Optional[Dict[str, FinancialModel]] = None,
         strategy_filter: Optional[str] = None,
         top_n: Optional[int] = None,
+        strict_date_match: Optional[bool] = None,
     ) -> List[AnalysisResultModel]:
         """
         フィルタリングされたスコア結果からランキングを生成し、最終分析結果のリストを返す。
@@ -379,6 +401,7 @@ class RankingGenerator:
             pattern_lookup=pattern_lookup,
             strategy_filter=strategy_filter,
             top_n=top_n,
+            strict_date_match=strict_date_match,
         )
 
     def generate_strategy_rankings(
@@ -390,6 +413,7 @@ class RankingGenerator:
         financial_map: Optional[Dict[str, FinancialModel]] = None,
         overall_top_n: Optional[int] = None,
         strategy_top_n: Optional[int] = None,
+        strict_date_match: Optional[bool] = None,
     ) -> Dict[str, List[AnalysisResultModel]]:
         """
         総合ランキング（overall）、押し目買い型（pullback）、ブレイクアウト型（breakout）の
@@ -418,6 +442,7 @@ class RankingGenerator:
                 pattern_lookup=pattern_lookup,
                 strategy_filter=strat_filter,
                 top_n=top_n,
+                strict_date_match=strict_date_match,
             )
             for key, strat_filter, top_n in strategy_specs
         }
@@ -435,6 +460,7 @@ def generate_ranking(
     financial_map: Optional[Dict[str, FinancialModel]] = None,
     strategy_filter: Optional[str] = None,
     top_n: Optional[int] = None,
+    strict_date_match: Optional[bool] = None,
 ) -> List[AnalysisResultModel]:
     return ranking_generator.generate_ranking(
         filtered_score_results,
@@ -444,6 +470,7 @@ def generate_ranking(
         financial_map=financial_map,
         strategy_filter=strategy_filter,
         top_n=top_n,
+        strict_date_match=strict_date_match,
     )
 
 
@@ -455,6 +482,7 @@ def generate_strategy_rankings(
     financial_map: Optional[Dict[str, FinancialModel]] = None,
     overall_top_n: Optional[int] = None,
     strategy_top_n: Optional[int] = None,
+    strict_date_match: Optional[bool] = None,
 ) -> Dict[str, List[AnalysisResultModel]]:
     return ranking_generator.generate_strategy_rankings(
         filtered_score_results,
@@ -464,4 +492,5 @@ def generate_strategy_rankings(
         financial_map=financial_map,
         overall_top_n=overall_top_n,
         strategy_top_n=strategy_top_n,
+        strict_date_match=strict_date_match,
     )

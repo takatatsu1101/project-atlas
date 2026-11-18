@@ -99,6 +99,8 @@ ranking:
   top_n: 20
   # 戦略別ランキング上位件数
   strategy_top_n: 10
+  # スコア基準日と特徴量/パターン日付を厳密一致させるか（false で最新日付へフォールバック）
+  strict_date_match: true
 
 # 5. レポート出力設定
 output:

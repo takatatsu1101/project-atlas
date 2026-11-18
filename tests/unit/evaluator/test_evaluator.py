@@ -4,7 +4,12 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from src.evaluator import Evaluator, ForwardReturnEvaluator
-from src.model.data_models import AnalysisResultModel, BatchBacktestSummaryModel, OhlcvModel
+from src.model.data_models import (
+    AnalysisResultModel,
+    BatchBacktestSummaryModel,
+    FeatureResultModel,
+    OhlcvModel,
+)
 
 
 def _build_candidate(
@@ -451,6 +456,229 @@ class TestForwardReturnEvaluator(unittest.TestCase):
         self.assertTrue(item.horizons[2].available)
         self.assertEqual(item.horizons[2].target_date, date(2025, 5, 3))
         self.assertFalse(item.horizons[5].available)
+
+    def test_evaluate_with_passed_candidates_and_cache_reuse(self):
+        """passed_candidates 指定時に全通過銘柄サマリーと特徴量別分位評価を集計し、重複評価をキャッシュ再利用する"""
+        as_of = date(2025, 5, 1)
+        bars_map = {
+            "1001.T": _build_bars("1001.T", as_of, [1000.0, 1020.0, 1050.0]),  # +5%
+            "1002.T": _build_bars("1002.T", as_of, [1000.0, 1010.0, 1020.0]),  # +2%
+            "1003.T": _build_bars("1003.T", as_of, [1000.0, 1000.0, 1000.0]),  # 0%
+            "1004.T": _build_bars("1004.T", as_of, [1000.0, 990.0, 980.0]),    # -2%
+            "1005.T": _build_bars("1005.T", as_of, [1000.0, 960.0, 900.0]),    # -10%
+        }
+
+        mock_collector = MagicMock()
+        mock_collector.collect_ohlcv_data.side_effect = (
+            lambda sym, start, end, as_of_date=None: bars_map[sym]
+        )
+        evaluator = ForwardReturnEvaluator(collector=mock_collector)
+
+        def _cand(sym: str, f_score: float, strategy: str = "pullback", rank: int = 1):
+            c = _build_candidate(sym, as_of, strategy_type=strategy, close_price=1000.0, rank=rank)
+            c.feature_results = [
+                FeatureResultModel(
+                    feature_id="F001_Trend",
+                    feature_name="トレンド強度",
+                    score=f_score,
+                    raw_value=f_score,
+                )
+            ]
+            return c
+
+        passed = [
+            _cand("1001.T", 90.0, "pullback", 1),
+            _cand("1002.T", 70.0, "pullback", 2),
+            _cand("1003.T", 50.0, "breakout", 3),
+            _cand("1004.T", 30.0, "breakout", 4),
+            _cand("1005.T", 10.0, "breakout", 5),
+        ]
+        top_candidates = [passed[0]]
+
+        summary = evaluator.evaluate(
+            top_candidates,
+            as_of_date=as_of,
+            horizons=[2],
+            passed_candidates=passed,
+        )
+
+        # 1001.T は top_candidates で既に評価済みなので collect_ohlcv_data は計5回のみ
+        self.assertEqual(mock_collector.collect_ohlcv_data.call_count, 5)
+        self.assertEqual(summary.total_candidates, 1)
+        self.assertEqual(summary.overall_summary[2].win_count, 1)
+
+        self.assertEqual(summary.passed_total_candidates, 5)
+        passed_overall = summary.passed_overall_summary[2]
+        self.assertEqual(passed_overall.total_candidates, 5)
+        self.assertEqual(passed_overall.evaluated_count, 5)
+        self.assertEqual(passed_overall.win_count, 2)
+        self.assertAlmostEqual(passed_overall.avg_return_pct, (-10.0 - 2.0 + 0.0 + 2.0 + 5.0) / 5.0)
+        self.assertEqual(summary.passed_strategy_summary["pullback"][2].evaluated_count, 2)
+        self.assertEqual(summary.passed_strategy_summary["breakout"][2].evaluated_count, 3)
+
+        fq = summary.feature_quantile_summary["F001_Trend"][2]
+        self.assertEqual(fq.feature_name, "トレンド強度")
+        self.assertEqual(fq.total_samples, 5)
+        self.assertEqual(fq.unique_score_count, 5)
+        self.assertEqual(fq.top_count, 1)
+        self.assertEqual(fq.bottom_count, 1)
+        self.assertAlmostEqual(fq.top_win_rate_pct, 100.0)
+        self.assertAlmostEqual(fq.top_avg_return_pct, 5.0)
+        self.assertAlmostEqual(fq.bottom_win_rate_pct, 0.0)
+        self.assertAlmostEqual(fq.bottom_avg_return_pct, -10.0)
+        self.assertAlmostEqual(fq.spread_return_pct, 15.0)
+        self.assertAlmostEqual(fq.spread_win_rate_pct, 100.0)
+
+    def test_compute_feature_quantiles_small_sample_guard_and_constant_score(self):
+        """サンプル数 < 5 では統計を None にし、定数スコア・非有限値を適切に扱う"""
+        as_of = date(2025, 5, 1)
+        evaluator = ForwardReturnEvaluator(collector=MagicMock())
+        ohlcv_map = {
+            f"100{i}.T": _build_bars(f"100{i}.T", as_of, [1000.0, 1010.0, 1000.0 + i * 10.0])
+            for i in range(1, 6)
+        }
+        cands = []
+        for i in range(1, 6):
+            c = _build_candidate(f"100{i}.T", as_of, close_price=1000.0, rank=i)
+            c.feature_results = [
+                # 4件のみ（5件目は NaN なので除外される） -> 少サンプルガード対象
+                FeatureResultModel(
+                    feature_id="F_SMALL",
+                    feature_name="少サンプル特徴量",
+                    score=float("nan") if i == 5 else float(i * 10),
+                    raw_value=0.0,
+                ),
+                # 全5件とも同点（定数化検出: unique_score_count == 1）
+                FeatureResultModel(
+                    feature_id="F_CONST",
+                    feature_name="定数特徴量",
+                    score=50.0,
+                    raw_value=0.0,
+                ),
+            ]
+            cands.append(c)
+
+        summary = evaluator.evaluate(
+            cands,
+            as_of_date=as_of,
+            ohlcv_map=ohlcv_map,
+            horizons=[2],
+            passed_candidates=cands,
+        )
+
+        small_row = summary.feature_quantile_summary["F_SMALL"][2]
+        self.assertEqual(small_row.total_samples, 4)
+        self.assertEqual(small_row.unique_score_count, 4)
+        self.assertEqual(small_row.top_count, 0)
+        self.assertIsNone(small_row.top_avg_return_pct)
+        self.assertIsNone(small_row.bottom_avg_return_pct)
+        self.assertIsNone(small_row.spread_return_pct)
+
+        const_row = summary.feature_quantile_summary["F_CONST"][2]
+        self.assertEqual(const_row.total_samples, 5)
+        self.assertEqual(const_row.unique_score_count, 1)
+        self.assertEqual(const_row.top_count, 1)
+        self.assertEqual(const_row.bottom_count, 1)
+        # 決定的ソート (50.0, symbol, signal_date): bottom=1001.T (+1%), top=1005.T (+5%)
+        self.assertAlmostEqual(const_row.bottom_avg_return_pct, 1.0)
+        self.assertAlmostEqual(const_row.top_avg_return_pct, 5.0)
+        self.assertAlmostEqual(const_row.spread_return_pct, 4.0)
+
+    def test_aggregate_batch_summaries_with_passed_pool_and_feature_quantiles(self):
+        """一括バックテストで全期間プールの全通過サマリーおよび特徴量別分位評価を集計する"""
+        evaluator = ForwardReturnEvaluator(collector=MagicMock())
+        d1 = date(2025, 5, 1)
+        d2 = date(2025, 6, 2)
+
+        def _cand(sym: str, dt: date, f_score: float, strat: str = "pullback"):
+            c = _build_candidate(sym, dt, strategy_type=strat, close_price=1000.0)
+            c.feature_results = [
+                FeatureResultModel(
+                    feature_id="F001_Mom",
+                    feature_name="モメンタム",
+                    score=f_score,
+                    raw_value=f_score,
+                )
+            ]
+            return c
+
+        # d1: 3件 (+10%, +4%, -2%)
+        ohlcv_d1 = {
+            "1001.T": _build_bars("1001.T", d1, [1000.0, 1050.0, 1100.0]),
+            "1002.T": _build_bars("1002.T", d1, [1000.0, 1020.0, 1040.0]),
+            "1003.T": _build_bars("1003.T", d1, [1000.0, 990.0, 980.0]),
+        }
+        passed_d1 = [
+            _cand("1001.T", d1, 90.0, "pullback"),
+            _cand("1002.T", d1, 60.0, "pullback"),
+            _cand("1003.T", d1, 30.0, "breakout"),
+        ]
+        sum_d1, items_d1 = evaluator.evaluate_with_passed(
+            passed_d1[:1], as_of_date=d1, ohlcv_map=ohlcv_d1, horizons=[2], passed_candidates=passed_d1
+        )
+        # 単日では3件のため分位統計は None
+        self.assertIsNone(sum_d1.feature_quantile_summary["F001_Mom"][2].spread_return_pct)
+
+        # d2: 2件 (+20%, -10%)
+        ohlcv_d2 = {
+            "2001.T": _build_bars("2001.T", d2, [1000.0, 1100.0, 1200.0]),
+            "2002.T": _build_bars("2002.T", d2, [1000.0, 950.0, 900.0]),
+        }
+        passed_d2 = [
+            _cand("2001.T", d2, 95.0, "pullback"),
+            _cand("2002.T", d2, 10.0, "breakout"),
+        ]
+        sum_d2, items_d2 = evaluator.evaluate_with_passed(
+            passed_d2[:1], as_of_date=d2, ohlcv_map=ohlcv_d2, horizons=[2], passed_candidates=passed_d2
+        )
+
+        batch = ForwardReturnEvaluator.aggregate_batch_summaries(
+            {d1: sum_d1, d2: sum_d2},
+            horizons=[2],
+            entry_price_mode="signal_close",
+            passed_items_all=items_d1 + items_d2,
+            passed_records_all=list(zip(passed_d1 + passed_d2, items_d1 + items_d2)),
+        )
+
+        self.assertEqual(batch.total_candidates, 2)
+        self.assertEqual(batch.passed_total_candidates, 5)
+        self.assertEqual(batch.aggregated_passed_overall_summary[2].evaluated_count, 5)
+        self.assertEqual(batch.aggregated_passed_overall_summary[2].win_count, 3)
+        self.assertEqual(batch.aggregated_passed_strategy_summary["pullback"][2].evaluated_count, 3)
+        self.assertEqual(batch.aggregated_passed_strategy_summary["breakout"][2].evaluated_count, 2)
+
+        # 全期間プールで5件揃うため、上位20% (2001.T: +20%) vs 下位20% (2002.T: -10%) が算出される
+        fq = batch.aggregated_feature_quantile_summary["F001_Mom"][2]
+        self.assertEqual(fq.total_samples, 5)
+        self.assertEqual(fq.unique_score_count, 5)
+        self.assertAlmostEqual(fq.top_avg_return_pct, 20.0)
+        self.assertAlmostEqual(fq.bottom_avg_return_pct, -10.0)
+        self.assertAlmostEqual(fq.spread_return_pct, 30.0)
+
+    def test_evaluate_single_candidate_cache_preserves_candidate_attributes(self):
+        """キャッシュヒット時でも各候補固有の rank / strategy_type / total_score が引き継がれる"""
+        as_of = date(2025, 5, 1)
+        bars = _build_bars("1001.T", as_of, [1000.0, 1020.0, 1050.0])
+        mock_collector = MagicMock()
+        mock_collector.collect_ohlcv_data.return_value = bars
+        evaluator = ForwardReturnEvaluator(collector=mock_collector)
+
+        cand1 = _build_candidate("1001.T", as_of, strategy_type="pullback", close_price=1000.0, rank=1)
+        cand1.total_score = 88.0
+        cand2 = _build_candidate("1001.T", as_of, strategy_type="breakout", close_price=1000.0, rank=3)
+        cand2.total_score = 72.5
+
+        eval_cache = {}
+        item1 = evaluator._evaluate_single_candidate(cand1, as_of, [2], "signal_close", None, None, eval_cache)
+        item2 = evaluator._evaluate_single_candidate(cand2, as_of, [2], "signal_close", None, None, eval_cache)
+
+        self.assertEqual(mock_collector.collect_ohlcv_data.call_count, 1)
+        self.assertEqual(item1.rank, 1)
+        self.assertEqual(item1.strategy_type, "pullback")
+        self.assertAlmostEqual(item1.total_score, 88.0)
+        self.assertEqual(item2.rank, 3)
+        self.assertEqual(item2.strategy_type, "breakout")
+        self.assertAlmostEqual(item2.total_score, 72.5)
 
 
 if __name__ == "__main__":
