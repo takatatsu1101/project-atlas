@@ -9,6 +9,7 @@ from src.model.data_models import (
     AnalysisResultModel,
     BatchBacktestSummaryModel,
     EvaluationSummaryModel,
+    FeatureQuantileRowModel,
     FeatureResultModel,
     ForwardEvaluationItemModel,
     HorizonMetricsModel,
@@ -498,6 +499,172 @@ class TestPresenter(unittest.TestCase):
             self.assertIn("## 全期間横断検証サマリー（全体 / 戦略別）", md_text)
             self.assertIn("## 基準日別サマリー", md_text)
             self.assertIn("+1.25%", md_text)
+
+    @patch("builtins.print")
+    def test_evaluation_cli_json_markdown_with_passed_and_feature_quantile_summary(self, mock_print):
+        """全通過銘柄サマリーおよび特徴量別分位評価が CLI / JSON / Markdown に出力される"""
+        presenter = Presenter()
+        eval_summary = self._sample_evaluation_summary()
+        eval_summary.passed_total_candidates = 10
+        eval_summary.passed_overall_summary = {
+            5: HorizonSummaryModel(
+                horizon_days=5,
+                total_candidates=10,
+                evaluated_count=10,
+                win_count=7,
+                win_rate_pct=70.0,
+                avg_return_pct=2.3,
+                median_return_pct=2.0,
+                avg_mfe_pct=4.5,
+                avg_mae_pct=-1.2,
+                best_symbol="7203.T",
+                best_return_pct=6.0,
+                worst_symbol="9984.T",
+                worst_return_pct=-2.0,
+            ),
+            20: HorizonSummaryModel(
+                horizon_days=20,
+                total_candidates=10,
+                evaluated_count=0,
+                win_count=0,
+            ),
+        }
+        eval_summary.feature_quantile_summary = {
+            "F001_Trend": {
+                5: FeatureQuantileRowModel(
+                    feature_id="F001_Trend",
+                    feature_name="トレンド強度",
+                    horizon_days=5,
+                    total_samples=10,
+                    unique_score_count=8,
+                    top_count=2,
+                    top_win_rate_pct=100.0,
+                    top_avg_return_pct=5.5,
+                    top_avg_mfe_pct=7.0,
+                    top_avg_mae_pct=-0.5,
+                    bottom_count=2,
+                    bottom_win_rate_pct=0.0,
+                    bottom_avg_return_pct=-1.5,
+                    bottom_avg_mfe_pct=1.0,
+                    bottom_avg_mae_pct=-3.0,
+                    spread_return_pct=7.0,
+                    spread_win_rate_pct=100.0,
+                ),
+                20: FeatureQuantileRowModel(
+                    feature_id="F001_Trend",
+                    feature_name="トレンド強度",
+                    horizon_days=20,
+                    total_samples=3,
+                    unique_score_count=3,
+                ),
+            }
+        }
+
+        presenter.display_results([], output_type="cli", evaluation_summary=eval_summary)
+        printed_text = "\n".join(str(c.args[0]) for c in mock_print.call_args_list if c.args)
+        self.assertIn("[全通過銘柄サマリー (全 10 件)]", printed_text)
+        self.assertIn("[特徴量別分位評価 (上位20% vs 下位20%)]", printed_text)
+        self.assertIn("F001_Trend (トレンド強度)", printed_text)
+        self.assertIn("n=10 (unique=8)", printed_text)
+        self.assertIn("サンプル不足(<5)", printed_text)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            paths = presenter.export_reports(
+                [],
+                output_dir=tmpdir,
+                formats=("json", "markdown"),
+                as_of_date=date(2026, 2, 15),
+                evaluation_summary=eval_summary,
+            )
+            payload = json.loads(paths["json"].read_text(encoding="utf-8"))
+            self.assertEqual(payload["evaluation"]["passed_total_candidates"], 10)
+            self.assertIn("5", payload["evaluation"]["passed_overall_summary"])
+            self.assertIn("F001_Trend", payload["evaluation"]["feature_quantile_summary"])
+
+            md_text = paths["markdown"].read_text(encoding="utf-8")
+            self.assertIn("## 全通過銘柄フォワードリターンサマリー（全 10 件）", md_text)
+            self.assertIn("## 特徴量別分位評価（上位20% vs 下位20%）", md_text)
+            self.assertIn("| F001_Trend | トレンド強度 | +5営業日 | 10 (8) |", md_text)
+            self.assertIn("+7.00%", md_text)
+
+    @patch("builtins.print")
+    def test_batch_backtest_cli_json_markdown_with_passed_pool_and_feature_quantiles(self, mock_print):
+        """一括バックテストで全期間プールの全通過銘柄サマリーと特徴量別分位評価が CLI / JSON / Markdown に出力される"""
+        presenter = Presenter()
+        batch_summary = BatchBacktestSummaryModel(
+            as_of_dates=[date(2026, 2, 15)],
+            horizons=[5],
+            entry_price_mode="signal_close",
+            total_dates=1,
+            total_candidates=1,
+            aggregated_overall_summary={
+                5: HorizonSummaryModel(
+                    horizon_days=5,
+                    total_candidates=1,
+                    evaluated_count=1,
+                    win_count=1,
+                    win_rate_pct=100.0,
+                    avg_return_pct=4.5,
+                    median_return_pct=4.5,
+                )
+            },
+            passed_total_candidates=5,
+            aggregated_passed_overall_summary={
+                5: HorizonSummaryModel(
+                    horizon_days=5,
+                    total_candidates=5,
+                    evaluated_count=5,
+                    win_count=3,
+                    win_rate_pct=60.0,
+                    avg_return_pct=1.8,
+                    median_return_pct=1.5,
+                )
+            },
+            aggregated_feature_quantile_summary={
+                "F002_Vol": {
+                    5: FeatureQuantileRowModel(
+                        feature_id="F002_Vol",
+                        feature_name="出来高モメンタム",
+                        horizon_days=5,
+                        total_samples=5,
+                        unique_score_count=5,
+                        top_count=1,
+                        top_win_rate_pct=100.0,
+                        top_avg_return_pct=6.0,
+                        top_avg_mfe_pct=8.0,
+                        top_avg_mae_pct=-0.5,
+                        bottom_count=1,
+                        bottom_win_rate_pct=0.0,
+                        bottom_avg_return_pct=-2.0,
+                        bottom_avg_mfe_pct=0.5,
+                        bottom_avg_mae_pct=-3.0,
+                        spread_return_pct=8.0,
+                        spread_win_rate_pct=100.0,
+                    )
+                }
+            },
+        )
+
+        presenter.display_batch_backtest_results(batch_summary)
+        printed_text = "\n".join(str(c.args[0]) for c in mock_print.call_args_list if c.args)
+        self.assertIn("[全期間プール 全通過銘柄サマリー (全 5 件)]", printed_text)
+        self.assertIn("F002_Vol (出来高モメンタム)", printed_text)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            paths = presenter.export_batch_backtest_reports(
+                batch_summary,
+                output_dir=tmpdir,
+                formats=("json", "markdown"),
+            )
+            payload = json.loads(paths["json"].read_text(encoding="utf-8"))
+            self.assertEqual(payload["passed_total_candidates"], 5)
+            self.assertIn("5", payload["aggregated_passed_overall_summary"])
+            self.assertIn("F002_Vol", payload["aggregated_feature_quantile_summary"])
+
+            md_text = paths["markdown"].read_text(encoding="utf-8")
+            self.assertIn("## 全期間プール 全通過銘柄サマリー（全 5 件）", md_text)
+            self.assertIn("## 全期間プール 特徴量別分位評価（上位20% vs 下位20%）", md_text)
+            self.assertIn("| F002_Vol | 出来高モメンタム | +5営業日 | 5 (5) |", md_text)
 
 
 if __name__ == "__main__":

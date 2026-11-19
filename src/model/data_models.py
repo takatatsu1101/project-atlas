@@ -151,6 +151,28 @@ class HorizonSummaryModel(BaseModel):
     worst_return_pct: Optional[float] = None
 
 
+class FeatureQuantileRowModel(BaseModel):
+    """特徴量別分位評価（上位20% vs 下位20%）の1行分サマリーモデル"""
+
+    feature_id: str
+    feature_name: str = ""
+    horizon_days: int
+    total_samples: int = 0
+    unique_score_count: int = 0
+    top_count: int = 0
+    top_win_rate_pct: Optional[float] = None
+    top_avg_return_pct: Optional[float] = None
+    top_avg_mfe_pct: Optional[float] = None
+    top_avg_mae_pct: Optional[float] = None
+    bottom_count: int = 0
+    bottom_win_rate_pct: Optional[float] = None
+    bottom_avg_return_pct: Optional[float] = None
+    bottom_avg_mfe_pct: Optional[float] = None
+    bottom_avg_mae_pct: Optional[float] = None
+    spread_return_pct: Optional[float] = None
+    spread_win_rate_pct: Optional[float] = None
+
+
 class EvaluationSummaryModel(BaseModel):
     """フォワードリターン検証全体のサマリーモデル"""
 
@@ -161,6 +183,10 @@ class EvaluationSummaryModel(BaseModel):
     overall_summary: Dict[int, HorizonSummaryModel] = Field(default_factory=dict)
     strategy_summary: Dict[str, Dict[int, HorizonSummaryModel]] = Field(default_factory=dict)
     items: List[ForwardEvaluationItemModel] = Field(default_factory=list)
+    passed_total_candidates: int = 0
+    passed_overall_summary: Dict[int, HorizonSummaryModel] = Field(default_factory=dict)
+    passed_strategy_summary: Dict[str, Dict[int, HorizonSummaryModel]] = Field(default_factory=dict)
+    feature_quantile_summary: Dict[str, Dict[int, FeatureQuantileRowModel]] = Field(default_factory=dict)
 
 
 class BatchBacktestSummaryModel(BaseModel):
@@ -174,3 +200,7 @@ class BatchBacktestSummaryModel(BaseModel):
     aggregated_overall_summary: Dict[int, HorizonSummaryModel] = Field(default_factory=dict)
     aggregated_strategy_summary: Dict[str, Dict[int, HorizonSummaryModel]] = Field(default_factory=dict)
     per_date_summaries: Dict[DateType, EvaluationSummaryModel] = Field(default_factory=dict)
+    passed_total_candidates: int = 0
+    aggregated_passed_overall_summary: Dict[int, HorizonSummaryModel] = Field(default_factory=dict)
+    aggregated_passed_strategy_summary: Dict[str, Dict[int, HorizonSummaryModel]] = Field(default_factory=dict)
+    aggregated_feature_quantile_summary: Dict[str, Dict[int, FeatureQuantileRowModel]] = Field(default_factory=dict)

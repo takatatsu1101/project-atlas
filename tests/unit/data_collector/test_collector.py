@@ -1,5 +1,6 @@
 from contextlib import redirect_stdout
 import io
+import json
 import tempfile
 import unittest
 from datetime import date, datetime
@@ -1530,6 +1531,300 @@ class TestDataCollector(unittest.TestCase):
         self.assertIn("OHLCVバッチプリフェッチ完了:", out)
         self.assertIn("IR BANK 財務キャッシュ準備中: 2024〜2025年度 (2期分)...", out)
         self.assertIn("IR BANK 財務キャッシュ準備完了 (2期分)", out)
+
+    def test_collect_financial_data_split_adjustment_and_lookahead_boundary(self):
+        """株式分割による EPS/BPS/PER/PBR 補正と先読みバイアス境界・フォールバックを検証"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            storage = StorageManager(base_dir=tmpdir)
+            collector = DataCollector(storage=storage)
+
+            # 2024年3月期決算 (fiscal_date = 2024-03-31, 開示日 = 2024-05-30)
+            bs_2024 = {
+                "item": {
+                    "7203": ["2024/03", "1000000", "500000", "450000", "300000", "10000", "20000", "2000.0", "45.0"]
+                }
+            }
+            pl_2024 = {
+                "item": {
+                    "7203": ["2024/03", "100000", "15000", "16000", "10000", "100.0", "12.0", "5.0"]
+                }
+            }
+            (storage.financial_dir / "0024-fy-balance-sheet.json").write_text(
+                json.dumps(bs_2024), encoding="utf-8"
+            )
+            (storage.financial_dir / "0024-fy-profit-and-loss.json").write_text(
+                json.dumps(pl_2024), encoding="utf-8"
+            )
+
+            # price Parquet に境界日付の stock_splits を保存
+            # - 2024-03-31 (fiscal_date 当日): 適用しない
+            # - 2024-06-01 (fiscal_date < d <= as_of_date): 適用する (2.0)
+            # - 2024-09-01 (通常日 0.0): 無視する
+            # - 2024-10-01 (as_of_date=2024-09-30 より未来): 適用しない (3.0)
+            price_df = pd.DataFrame({
+                "date": [date(2024, 3, 31), date(2024, 6, 1), date(2024, 9, 1), date(2024, 10, 1)],
+                "open": [1000.0, 1000.0, 1000.0, 1000.0],
+                "high": [1000.0, 1000.0, 1000.0, 1000.0],
+                "low": [1000.0, 1000.0, 1000.0, 1000.0],
+                "close": [1000.0, 1000.0, 1000.0, 1000.0],
+                "volume": [10000, 10000, 10000, 10000],
+                "stock_splits": [2.0, 2.0, 0.0, 3.0],
+            })
+            storage.save_parquet(price_df, storage.price_dir / "7203.T.parquet")
+
+            # as_of_date = 2024-09-30, latest_close=1000.0, read_only=True
+            fin_sep = collector.collect_financial_data(
+                "7203.T",
+                fiscal_year=2024,
+                as_of_date=date(2024, 9, 30),
+                allow_download=False,
+                latest_close=1000.0,
+                read_only=True,
+            )
+            self.assertIsNotNone(fin_sep)
+            self.assertAlmostEqual(fin_sep.eps, 50.0)
+            self.assertAlmostEqual(fin_sep.bps, 1000.0)
+            self.assertAlmostEqual(fin_sep.per, 20.0)
+            self.assertAlmostEqual(fin_sep.pbr, 1.0)
+
+            # as_of_date = 2024-10-15 では 2024-10-01 の 3.0 も累積乗算 (ratio = 6.0)
+            fin_oct = collector.collect_financial_data(
+                "7203.T",
+                fiscal_year=2024,
+                as_of_date=date(2024, 10, 15),
+                allow_download=False,
+                latest_close=1000.0,
+                read_only=True,
+            )
+            self.assertIsNotNone(fin_oct)
+            self.assertAlmostEqual(fin_oct.eps, 100.0 / 6.0)
+            self.assertAlmostEqual(fin_oct.bps, 2000.0 / 6.0)
+            self.assertAlmostEqual(fin_oct.per, 60.0)
+            self.assertAlmostEqual(fin_oct.pbr, 3.0)
+
+            # Parquet が存在しない場合は ratio=1.0 へ安全にフォールバック
+            (storage.price_dir / "7203.T.parquet").unlink()
+            fin_no_parquet = collector.collect_financial_data(
+                "7203.T",
+                fiscal_year=2024,
+                as_of_date=date(2024, 9, 30),
+                allow_download=False,
+                latest_close=1000.0,
+                read_only=True,
+            )
+            self.assertIsNotNone(fin_no_parquet)
+            self.assertAlmostEqual(fin_no_parquet.eps, 100.0)
+            self.assertAlmostEqual(fin_no_parquet.bps, 2000.0)
+
+    def test_collect_financial_data_growth_missing_keeps_none_and_f002_integration(self):
+        """成長率欠損時に None を維持し、F002_GrowthScore が 3年平均へ正しくフォールバックすることを検証"""
+        from src.feature_engine.features.fundamental.growth_score import GrowthScore
+        from src.model.data_models import IndicatorSetModel
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            storage = StorageManager(base_dir=tmpdir)
+            collector = DataCollector(storage=storage)
+
+            bs_2024 = {
+                "item": {
+                    "7203": ["2024/03", "1000000", "500000", "450000", "300000", "10000", "20000", "2000.0", "45.0"]
+                }
+            }
+            # 当期(2024): 売上 173.0, 純利益 173.0 (3年前 100.0 から年率+20%超)
+            pl_2024 = {"item": {"7203": ["2024/03", "173.0", "20", "20", "173.0", "100.0", "12.0", "5.0"]}}
+            # 1年前(2023): 欠損 "-"
+            pl_2023 = {"item": {"7203": ["2023/03", "-", "10", "10", "-", "50.0", "10.0", "4.0"]}}
+            # 3年前(2021): 売上 100.0, 純利益 100.0
+            pl_2021 = {"item": {"7203": ["2021/03", "100.0", "10", "10", "100.0", "50.0", "10.0", "4.0"]}}
+            # 5年前(2019): 欠損 "-"
+            pl_2019 = {"item": {"7203": ["2019/03", "-", "10", "10", "-", "50.0", "10.0", "4.0"]}}
+
+            (storage.financial_dir / "0024-fy-balance-sheet.json").write_text(json.dumps(bs_2024), encoding="utf-8")
+            (storage.financial_dir / "0024-fy-profit-and-loss.json").write_text(json.dumps(pl_2024), encoding="utf-8")
+            (storage.financial_dir / "0023-fy-profit-and-loss.json").write_text(json.dumps(pl_2023), encoding="utf-8")
+            (storage.financial_dir / "0021-fy-profit-and-loss.json").write_text(json.dumps(pl_2021), encoding="utf-8")
+            (storage.financial_dir / "0019-fy-profit-and-loss.json").write_text(json.dumps(pl_2019), encoding="utf-8")
+
+            fin = collector.collect_financial_data(
+                "7203.T",
+                fiscal_year=2024,
+                as_of_date=date(2024, 9, 30),
+                allow_download=False,
+                latest_close=1000.0,
+                read_only=True,
+            )
+            self.assertIsNotNone(fin)
+            self.assertIsNone(fin.revenue_growth)
+            self.assertIsNone(fin.net_profit_growth)
+            self.assertIsNone(fin.revenue_growth_5y_avg)
+            self.assertIsNone(fin.net_profit_growth_5y_avg)
+            self.assertGreater(fin.revenue_growth_3y_avg, 20.0)
+            self.assertGreater(fin.net_profit_growth_3y_avg, 20.0)
+
+            # F002_GrowthScore が 5年平均=None をスキップして 3年平均(+20%) を採用し 100点になること
+            ind = [IndicatorSetModel(symbol="7203.T", date=date(2024, 9, 30), indicators={})]
+            f002_res = GrowthScore().calculate([], ind, financial_data=fin)
+            self.assertEqual(len(f002_res), 1)
+            self.assertAlmostEqual(f002_res[0].score, 100.0)
+
+    def test_collect_financial_data_split_edge_cases_and_relative_storage(self):
+        """stock_splits の異常値・列欠損・同一日付重複・相対パス StorageManager・1引数モック互換を検証"""
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as tmpdir:
+            rel_base = Path(tmpdir).relative_to(Path.cwd())
+            rel_storage = StorageManager(base_dir=str(rel_base))
+            rel_collector = DataCollector(storage=rel_storage)
+
+            # 相対パス StorageManager でも base_dir 二重結合せずに _compute_cumulative_split_ratio が動作すること
+            rel_df = pd.DataFrame({
+                "date": [date(2024, 6, 1)],
+                "open": [1000.0],
+                "high": [1000.0],
+                "low": [1000.0],
+                "close": [1000.0],
+                "volume": [10000],
+                "stock_splits": [2.0],
+            })
+            rel_storage.save_parquet(rel_df, "price/7203.T.parquet")
+            self.assertAlmostEqual(
+                rel_collector._compute_cumulative_split_ratio(
+                    "7203.T", date(2024, 3, 31), date(2024, 9, 30)
+                ),
+                2.0,
+            )
+
+            storage = StorageManager(base_dir=tmpdir)
+            collector = DataCollector(storage=storage)
+
+            bs_2024 = {
+                "item": {
+                    "7203": ["2024/03", "1000000", "500000", "450000", "300000", "10000", "20000", "2000.0", "45.0"]
+                }
+            }
+            pl_2024 = {
+                "item": {
+                    "7203": ["2024/03", "100000", "15000", "16000", "10000", "100.0", "12.0", "5.0"]
+                }
+            }
+            (storage.financial_dir / "0024-fy-balance-sheet.json").write_text(
+                json.dumps(bs_2024), encoding="utf-8"
+            )
+            (storage.financial_dir / "0024-fy-profit-and-loss.json").write_text(
+                json.dumps(pl_2024), encoding="utf-8"
+            )
+
+            # 1) NaN / inf / -inf / 負値、および同一日付重複行（keep="last" で後の値 2.0 のみ採用）を含む Parquet
+            price_df = pd.DataFrame({
+                "date": [
+                    date(2024, 5, 1),
+                    date(2024, 5, 15),
+                    date(2024, 5, 20),
+                    date(2024, 5, 25),
+                    date(2024, 6, 1),
+                    date(2024, 6, 1),
+                ],
+                "open": [1000.0] * 6,
+                "high": [1000.0] * 6,
+                "low": [1000.0] * 6,
+                "close": [1000.0] * 6,
+                "volume": [10000] * 6,
+                "stock_splits": [float("nan"), float("inf"), float("-inf"), -2.0, 5.0, 2.0],
+            })
+            storage.save_parquet(price_df, "price/7203.T.parquet")
+
+            fin_rel = collector.collect_financial_data(
+                "7203.T",
+                fiscal_year=2024,
+                as_of_date=date(2024, 9, 30),
+                allow_download=False,
+                latest_close=1000.0,
+                read_only=True,
+            )
+            self.assertIsNotNone(fin_rel)
+            # 重複日の keep="last" (2.0) のみが適用されること
+            self.assertAlmostEqual(fin_rel.eps, 50.0)
+            self.assertAlmostEqual(fin_rel.bps, 1000.0)
+
+            # 2) columns 引数を受け付けないモック StorageManager でも 1引数フォールバックで動作すること
+            orig_load = storage.load_parquet
+            with patch.object(
+                storage,
+                "load_parquet",
+                side_effect=lambda p: orig_load(p),
+            ):
+                fin_mock = collector.collect_financial_data(
+                    "7203.T",
+                    fiscal_year=2024,
+                    as_of_date=date(2024, 9, 30),
+                    allow_download=False,
+                    latest_close=1000.0,
+                    read_only=True,
+                )
+            self.assertIsNotNone(fin_mock)
+            self.assertAlmostEqual(fin_mock.eps, 50.0)
+
+            # 3) stock_splits 列が存在しない Parquet の場合は ratio=1.0
+            no_split_col_df = price_df.drop(columns=["stock_splits"])
+            storage.save_parquet(no_split_col_df, "price/7203.T.parquet")
+            fin_no_col = collector.collect_financial_data(
+                "7203.T",
+                fiscal_year=2024,
+                as_of_date=date(2024, 9, 30),
+                allow_download=False,
+                latest_close=1000.0,
+                read_only=True,
+            )
+            self.assertIsNotNone(fin_no_col)
+            self.assertAlmostEqual(fin_no_col.eps, 100.0)
+            self.assertAlmostEqual(fin_no_col.bps, 2000.0)
+
+    def test_collect_financial_data_abnormal_eps_bps_and_datetime_as_of(self):
+        """datetime型 as_of_date の正規化と eps=0 / 極小EPS / 'nan' / 'inf' 異常値ガードを検証"""
+        import math
+
+        for label, raw_eps, raw_bps, expected_eps, expected_bps, expected_per, expected_pbr in [
+            ("zero_eps", "0", "2000.0", 0.0, 2000.0, 0.0, 0.5),
+            ("tiny_eps", "1e-310", "2000.0", 1e-310, 2000.0, 0.0, 0.5),
+            ("nan_str", "nan", "NaN", 0.0, 0.0, 0.0, 0.0),
+            ("inf_str", "inf", "-inf", 0.0, 0.0, 0.0, 0.0),
+        ]:
+            with self.subTest(case=label):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    storage = StorageManager(base_dir=tmpdir)
+                    collector = DataCollector(storage=storage)
+                    bs_2024 = {
+                        "item": {
+                            "7203": ["2024/03", "1000000", "500000", "450000", "300000", "10000", "20000", raw_bps, "45.0"]
+                        }
+                    }
+                    pl_2024 = {
+                        "item": {
+                            "7203": ["2024/03", "100000", "15000", "16000", "10000", raw_eps, "12.0", "5.0"]
+                        }
+                    }
+                    (storage.financial_dir / "0024-fy-balance-sheet.json").write_text(
+                        json.dumps(bs_2024), encoding="utf-8"
+                    )
+                    (storage.financial_dir / "0024-fy-profit-and-loss.json").write_text(
+                        json.dumps(pl_2024), encoding="utf-8"
+                    )
+
+                    fin = collector.collect_financial_data(
+                        "7203.T",
+                        fiscal_year=2024,
+                        as_of_date=datetime(2024, 9, 30, 15, 0, 0),
+                        allow_download=False,
+                        latest_close=1000.0,
+                        read_only=True,
+                    )
+                    self.assertIsNotNone(fin)
+                    self.assertTrue(math.isfinite(fin.eps))
+                    self.assertTrue(math.isfinite(fin.bps))
+                    self.assertTrue(math.isfinite(fin.per))
+                    self.assertTrue(math.isfinite(fin.pbr))
+                    self.assertAlmostEqual(fin.eps, expected_eps)
+                    self.assertAlmostEqual(fin.bps, expected_bps)
+                    self.assertAlmostEqual(fin.per, expected_per)
+                    self.assertAlmostEqual(fin.pbr, expected_pbr)
 
 if __name__ == '__main__':
     unittest.main()

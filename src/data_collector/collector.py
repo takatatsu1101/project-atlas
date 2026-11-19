@@ -1,5 +1,6 @@
 import os
 import json
+import math
 import random
 import time
 import re
@@ -1093,6 +1094,66 @@ class DataCollector:
         """決算期末月末日 + 開示ラグ日数が as_of_date 以下であれば開示済みと判定する"""
         return (fiscal_end_date + timedelta(days=disclosure_lag_days)) <= as_of_date
 
+    def _compute_cumulative_split_ratio(
+        self,
+        symbol: str,
+        fiscal_date: date,
+        split_end_date: date,
+    ) -> float:
+        """
+        決算期末日翌日（fiscal_date < split_date）〜基準日（split_date <= split_end_date）の
+        累積株式分割比率を price Parquet の stock_splits 列から算出する。
+        Parquet や stock_splits 列が無い場合、または例外時は 1.0 へフォールバックする。
+        """
+        if split_end_date <= fiscal_date:
+            return 1.0
+        try:
+            parquet_path = f"price/{symbol}.parquet"
+            # モック互換のため columns 指定で TypeError 時は1引数へフォールバック
+            try:
+                df = self.storage.load_parquet(
+                    parquet_path,
+                    columns=["date", "stock_splits"],
+                )
+            except TypeError:
+                df = self.storage.load_parquet(parquet_path)
+            if df is None or df.empty:
+                return 1.0
+            if "date" not in df.columns or "stock_splits" not in df.columns:
+                return 1.0
+
+            norm_df = self._normalize_date_column(df[["date", "stock_splits"]])
+            if "date" not in norm_df.columns:
+                return 1.0
+            norm_df = norm_df.drop_duplicates(subset=["date"], keep="last")
+
+            ratio = 1.0
+            for split_date, raw_val in zip(norm_df["date"], norm_df["stock_splits"]):
+                if split_date is None:
+                    continue
+                if isinstance(split_date, datetime):
+                    split_date = split_date.date()
+                elif not isinstance(split_date, date):
+                    continue
+                # 先読みバイアス防止: 厳密に fiscal_date 翌日〜split_end_date の分割のみ適用
+                if not (fiscal_date < split_date <= split_end_date):
+                    continue
+                if raw_val is None:
+                    continue
+                try:
+                    v = float(raw_val)
+                except (ValueError, TypeError):
+                    continue
+                if pd.notna(v) and math.isfinite(v) and v > 0.0:
+                    ratio *= v
+
+            if not (math.isfinite(ratio) and ratio > 0.0):
+                return 1.0
+            return ratio
+        except Exception as e:
+            logger.debug(f"累積株式分割比率の算出をスキップしました ({symbol}): {e}")
+            return 1.0
+
     def _load_irbank_json_with_mode(
         self,
         year: int,
@@ -1181,6 +1242,9 @@ class DataCollector:
         latest_close が指定された場合は内部で OHLCV を再取得せず、その終値を用いて PER / PBR を算出する。
         read_only=True の場合はダウンロードや破損JSON削除・OHLCV更新を行わない。
         """
+        if isinstance(as_of_date, datetime):
+            as_of_date = as_of_date.date()
+
         code = self._parse_symbol(symbol)
         target_year = fiscal_year if fiscal_year is not None else (as_of_date or date.today()).year
         logger.debug(f"実財務データをキャッシュ読込中... {symbol}(コード: {code}), 会計年度: {target_year}")
@@ -1212,14 +1276,20 @@ class DataCollector:
         # ["年度","総資産","純資産","株主資本","利益剰余金","短期借入金","長期借入金","BPS","自己資本比率"]
         total_assets = to_opt_float(bs_val[1]) if len(bs_val) > 1 else None
         bps = to_float(bs_val[7]) if len(bs_val) > 7 else 0.0
+        if not math.isfinite(bps):
+            bps = 0.0
         equity_ratio = to_opt_float(bs_val[8]) if len(bs_val) > 8 else None
 
         # PL データのパース
         # ["年度","売上高","営業利益","経常利益","当期純利益","EPS","ROE","ROA"]
-        revenue = to_float(pl_val[1]) if len(pl_val) > 1 else 0.0
+        revenue_opt = to_opt_float(pl_val[1]) if len(pl_val) > 1 else None
+        revenue = revenue_opt if revenue_opt is not None else 0.0
         operating_profit = to_float(pl_val[2]) if len(pl_val) > 2 else 0.0
-        net_profit = to_float(pl_val[4]) if len(pl_val) > 4 else 0.0
+        net_profit_opt = to_opt_float(pl_val[4]) if len(pl_val) > 4 else None
+        net_profit = net_profit_opt if net_profit_opt is not None else 0.0
         eps = to_float(pl_val[5]) if len(pl_val) > 5 else 0.0
+        if not math.isfinite(eps):
+            eps = 0.0
         roe = to_float(pl_val[6]) if len(pl_val) > 6 else 0.0
         roa = to_float(pl_val[7]) if len(pl_val) > 7 else 0.0
 
@@ -1241,43 +1311,54 @@ class DataCollector:
             if y_pl and code in y_pl.get("item", {}):
                 history_pl[y] = y_pl["item"][code]
 
-        # 成長率（CAGR）の計算
-        revenue_growth = 0.0
-        net_profit_growth = 0.0
-        revenue_growth_3y_avg = 0.0
-        revenue_growth_5y_avg = 0.0
-        net_profit_growth_3y_avg = 0.0
-        net_profit_growth_5y_avg = 0.0
+        # 成長率（CAGR）の計算（欠損・比較不可時は None を維持）
+        revenue_growth: Optional[float] = None
+        net_profit_growth: Optional[float] = None
+        revenue_growth_3y_avg: Optional[float] = None
+        revenue_growth_5y_avg: Optional[float] = None
+        net_profit_growth_3y_avg: Optional[float] = None
+        net_profit_growth_5y_avg: Optional[float] = None
 
         # 1年前との単年成長率
         if adopted_year - 1 in history_pl:
             pl_prev = history_pl[adopted_year - 1]
-            rev_prev = to_float(pl_prev[1])
-            net_prev = to_float(pl_prev[4])
-            if rev_prev > 0:
-                revenue_growth = ((revenue - rev_prev) / rev_prev) * 100.0
-            if net_prev > 0:
-                net_profit_growth = ((net_profit - net_prev) / net_prev) * 100.0
+            rev_prev = to_opt_float(pl_prev[1]) if len(pl_prev) > 1 else None
+            net_prev = to_opt_float(pl_prev[4]) if len(pl_prev) > 4 else None
+            if revenue_opt is not None and rev_prev is not None and rev_prev > 0:
+                revenue_growth = ((revenue_opt - rev_prev) / rev_prev) * 100.0
+            if net_profit_opt is not None and net_prev is not None and net_prev > 0:
+                net_profit_growth = ((net_profit_opt - net_prev) / net_prev) * 100.0
 
-        # 3年平均成長率（CAGR）
-        if adopted_year - 3 in history_pl:
-            pl_prev_3 = history_pl[adopted_year - 3]
-            rev_prev_3 = to_float(pl_prev_3[1])
-            net_prev_3 = to_float(pl_prev_3[4])
-            if rev_prev_3 > 0 and revenue > 0:
-                revenue_growth_3y_avg = ((revenue / rev_prev_3) ** (1.0 / 3.0) - 1.0) * 100.0
-            if net_prev_3 > 0 and net_profit > 0:
-                net_profit_growth_3y_avg = ((net_profit / net_prev_3) ** (1.0 / 3.0) - 1.0) * 100.0
+        # 3年・5年平均成長率（CAGR）
+        def _calc_cagr(
+            curr_val: Optional[float], prev_val: Optional[float], years: int
+        ) -> Optional[float]:
+            if curr_val is not None and prev_val is not None and curr_val > 0 and prev_val > 0:
+                return ((curr_val / prev_val) ** (1.0 / years) - 1.0) * 100.0
+            return None
 
-        # 5年平均成長率（CAGR）
-        if adopted_year - 5 in history_pl:
-            pl_prev_5 = history_pl[adopted_year - 5]
-            rev_prev_5 = to_float(pl_prev_5[1])
-            net_prev_5 = to_float(pl_prev_5[4])
-            if rev_prev_5 > 0 and revenue > 0:
-                revenue_growth_5y_avg = ((revenue / rev_prev_5) ** (1.0 / 5.0) - 1.0) * 100.0
-            if net_prev_5 > 0 and net_profit > 0:
-                net_profit_growth_5y_avg = ((net_profit / net_prev_5) ** (1.0 / 5.0) - 1.0) * 100.0
+        cagr_by_years: Dict[int, Tuple[Optional[float], Optional[float]]] = {}
+        for years in (3, 5):
+            if adopted_year - years in history_pl:
+                pl_prev_n = history_pl[adopted_year - years]
+                rev_prev_n = to_opt_float(pl_prev_n[1]) if len(pl_prev_n) > 1 else None
+                net_prev_n = to_opt_float(pl_prev_n[4]) if len(pl_prev_n) > 4 else None
+                cagr_by_years[years] = (
+                    _calc_cagr(revenue_opt, rev_prev_n, years),
+                    _calc_cagr(net_profit_opt, net_prev_n, years),
+                )
+            else:
+                cagr_by_years[years] = (None, None)
+
+        revenue_growth_3y_avg, net_profit_growth_3y_avg = cagr_by_years[3]
+        revenue_growth_5y_avg, net_profit_growth_5y_avg = cagr_by_years[5]
+
+        # 決算期末日翌日〜基準日の累積株式分割比率で EPS / BPS を調整
+        split_end_date = as_of_date or date.today()
+        split_ratio = self._compute_cumulative_split_ratio(symbol, fiscal_date, split_end_date)
+        if math.isfinite(split_ratio) and split_ratio > 0.0:
+            eps = eps / split_ratio
+            bps = bps / split_ratio
 
         # 3. 最新の株価を取得してPER, PBRを算出（as_of_date 指定時は未来株価を参照しない）
         per = 0.0
@@ -1299,11 +1380,19 @@ class DataCollector:
                 )
                 if ohlcv_list:
                     resolved_close = ohlcv_list[-1].close
-            if resolved_close is not None and resolved_close > 0:
-                if eps > 0:
-                    per = resolved_close / eps
-                if bps > 0:
-                    pbr = resolved_close / bps
+            if (
+                resolved_close is not None
+                and math.isfinite(resolved_close)
+                and resolved_close > 0
+            ):
+                if math.isfinite(eps) and eps > 0:
+                    cand_per = resolved_close / eps
+                    if math.isfinite(cand_per) and cand_per >= 0.0:
+                        per = cand_per
+                if math.isfinite(bps) and bps > 0:
+                    cand_pbr = resolved_close / bps
+                    if math.isfinite(cand_pbr) and cand_pbr >= 0.0:
+                        pbr = cand_pbr
         except Exception as e:
             logger.warning(f"最新株価の取得・PER/PBR算出に失敗しました: {e}")
 

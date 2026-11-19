@@ -38,21 +38,22 @@ class VolumeScore(IFeature):
             vma25 = None
 
             if i >= min_past_days and i < len(ohlcv_data):
-                # 過去25日間（今日を含む）の平均出来高
-                start_idx = max(0, i - max_past_days + 1)
-                end_idx = min(i + 1, len(ohlcv_data))
+                # 当日 i を除外した過去最大25営業日（t-25 〜 t-1）の平均出来高
+                start_idx = max(0, i - max_past_days)
+                end_idx = i
                 if start_idx < end_idx:
                     volumes_25 = [ohlcv_data[j].volume for j in range(start_idx, end_idx) if ohlcv_data[j].volume is not None]
                     if volumes_25:
                         avg_volume_25 = sum(volumes_25) / len(volumes_25)
                         vma25 = avg_volume_25
 
-                    # 過去5日間の平均出来高
-                    start_idx_5 = max(0, i - 5 + 1)
-                    if start_idx_5 < end_idx:
-                        volumes_5 = [ohlcv_data[j].volume for j in range(start_idx_5, end_idx) if ohlcv_data[j].volume is not None]
-                        if volumes_5:
-                            vma5 = sum(volumes_5) / len(volumes_5)
+                # 短期トレンド比較用の直近5営業日（当日を含む t-4 〜 t）の平均出来高
+                start_idx_5 = max(0, i - 5 + 1)
+                end_idx_5 = i + 1
+                if start_idx_5 < end_idx_5:
+                    volumes_5 = [ohlcv_data[j].volume for j in range(start_idx_5, end_idx_5) if ohlcv_data[j].volume is not None]
+                    if volumes_5:
+                        vma5 = sum(volumes_5) / len(volumes_5)
 
             metadata = {
                 "volume": volume_today,

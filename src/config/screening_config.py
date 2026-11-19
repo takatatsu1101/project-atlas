@@ -14,10 +14,11 @@ from src.screener.screener import ScreeningCriteria
 
 
 class RankingConfig(BaseModel):
-    """ランキング件数設定"""
+    """ランキング件数・日付照合設定"""
 
     top_n: int = 20
     strategy_top_n: int = 10
+    strict_date_match: bool = True
 
 
 class OutputConfig(BaseModel):

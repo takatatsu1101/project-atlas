@@ -41,8 +41,9 @@ related:
 
 | ID | カテゴリ | パターン名 | 説明 | 優先度 | ステータス |
 |----|----------|------------|------|---------|------------|
-| R001 | Reversal | DoubleBottom | ダブルボトム | P1 | Draft |
-| R002 | Reversal | DoubleTop | ダブルトップ | P1 | Draft |
+| R001 | Reversal | DoubleBottom | ダブルボトム（直近60営業日ウィンドウ内の極値ペアを対象） | P1 | Implemented |
+| R002 | Reversal | DoubleTop | ダブルトップ（直近60営業日ウィンドウ内の極値ペアを対象） | P1 | Implemented |
+| P001 | Candlestick | Hammer | ハンマー（長い下ヒゲ・実体上端が高値付近 `high - max(open, close) < 0.1 * range`） | P1 | Implemented |
 
 ---
 

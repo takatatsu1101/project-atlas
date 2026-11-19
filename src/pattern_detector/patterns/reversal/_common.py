@@ -30,12 +30,14 @@ def find_double_reversal_candidates(
     min_length: int = 15,
     start_index: int = 10,
     max_price_diff_rate: float = 0.025,
+    lookback_window: int = 60,
 ) -> List[DoubleReversalCandidate]:
     """
     1パス増分極値更新とペア変化時のみのネックライン探索キャッシュにより、
     全体 O(N) でダブルボトム（mode='bottom'）またはダブルトップ（mode='top'）の候補を抽出する。
 
-    先読みバイアスを防ぐため、各日 i では従来どおり j in range(2, i - 2) の極値のみを参照する。
+    先読みバイアスを防ぐため、各日 i では従来どおり j in range(2, i - 2) の極値のみを参照し、
+    1つ目の極値 e1_idx が直近 lookback_window 営業日ウィンドウ内のもののみを対象とする。
     """
     n = len(ohlcv_data)
     if n < min_length:
@@ -91,6 +93,9 @@ def find_double_reversal_candidates(
 
         e1_idx = extrema[-2]
         e2_idx = extrema[-1]
+        if e1_idx < i - lookback_window:
+            continue
+
         e1_val = extrema_src[e1_idx]
         e2_val = extrema_src[e2_idx]
 

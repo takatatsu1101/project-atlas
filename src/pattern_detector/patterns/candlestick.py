@@ -45,8 +45,8 @@ class HammerPattern(IPattern):
             # 上ヒゲがほとんどない、または非常に短い（実体以下）
             is_small_upper_shadow = upper_shadow < body if body > 0 else upper_shadow < 0.01 * current_ohlcv.open # upper_shadow < body * 0.5 などで調整可能
 
-            # 終値が安値に近い (下ヒゲが長いことを補強する条件)
-            is_close_to_high = (max(current_ohlcv.open, current_ohlcv.close) - current_ohlcv.high) / (candle_range + 1e-9) < 0.1
+            # 高値が実体の上端に近いか（上ヒゲがローソク足全体の10%未満）
+            is_close_to_high = (current_ohlcv.high - max(current_ohlcv.open, current_ohlcv.close)) / (candle_range + 1e-9) < 0.1
 
             if is_small_body and is_long_lower_shadow and is_small_upper_shadow and is_close_to_high: # 条件を強化
                 confidence = self._calculate_confidence({

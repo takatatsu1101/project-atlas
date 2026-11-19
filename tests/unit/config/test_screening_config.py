@@ -145,6 +145,17 @@ ranking:
         with self.assertRaises(ValidationError):
             EvaluationConfig(entry_price_mode="invalid_mode")
 
+    def test_ranking_config_strict_date_match_default_and_override(self):
+        """RankingConfig.strict_date_match のデフォルト True と YAML 上書きを検証"""
+        default_cfg = load_screening_config()
+        self.assertTrue(default_cfg.ranking.strict_date_match)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            yaml_path = Path(tmpdir) / "custom.yaml"
+            yaml_path.write_text("ranking:\n  strict_date_match: false\n", encoding="utf-8")
+            custom_cfg = load_screening_config(yaml_path)
+            self.assertFalse(custom_cfg.ranking.strict_date_match)
+
 
 if __name__ == "__main__":
     unittest.main()

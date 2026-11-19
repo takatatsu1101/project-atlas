@@ -50,6 +50,32 @@ class TestHammerPattern(unittest.TestCase):
         results = self.pattern_detector.detect(ohlcv_data, indicator_data)
         self.assertEqual(len(results), 0)
 
+    def test_detect_excludes_long_upper_shadow_candle(self):
+        # is_small_body / is_long_lower_shadow / is_small_upper_shadow を満たしつつ
+        # 上ヒゲ比率 >= 10% (is_close_to_high=False) で除外される陰線・陽線を検証
+        bullish_upper_shadow = OhlcvModel(
+            symbol=self.symbol,
+            date=date(2025, 1, 1),
+            open=95.5,
+            high=104.0,
+            low=80.0,
+            close=100.0,
+            volume=1500,
+        )
+        bearish_upper_shadow = OhlcvModel(
+            symbol=self.symbol,
+            date=date(2025, 1, 2),
+            open=100.0,
+            high=104.0,
+            low=80.0,
+            close=95.5,
+            volume=1500,
+        )
+        inds = [IndicatorSetModel(symbol=self.symbol, date=b.date, indicators={}) for b in (bullish_upper_shadow, bearish_upper_shadow)]
+
+        results = self.pattern_detector.detect([bullish_upper_shadow, bearish_upper_shadow], inds)
+        self.assertEqual(len(results), 0)
+
     def test_detect_inverted_hammer(self):
         # 逆ハンマー（下ヒゲが短い）
         ohlcv_data = [
@@ -165,6 +191,23 @@ class TestHammerPattern(unittest.TestCase):
         )
         self.assertEqual(len(res_mismatch), 1)
         self.assertEqual(res_mismatch[0].date, date(2025, 1, 3))
+
+    def test_hammer_zero_candle_range_edge_case(self):
+        """四本値同値（candle_range == 0）でもゼロ除算せず未検出となること"""
+        flat_bars = [
+            OhlcvModel(
+                symbol=self.symbol,
+                date=date(2025, 1, 1),
+                open=100.0,
+                high=100.0,
+                low=100.0,
+                close=100.0,
+                volume=1000,
+            )
+        ]
+        flat_inds = [IndicatorSetModel(symbol=self.symbol, date=date(2025, 1, 1), indicators={})]
+        results = self.pattern_detector.detect(flat_bars, flat_inds)
+        self.assertEqual(results, [])
 
 if __name__ == '__main__':
     unittest.main()
