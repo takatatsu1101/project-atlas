@@ -54,8 +54,9 @@ related:
 | F001 | Fundamental | ProfitabilityScore | 収益性（ROE・営業利益率など） | 実装済 |
 | F002 | Fundamental | GrowthScore | 成長性（EPS・売上・利益CAGRなど） | 実装済 |
 | F003 | Fundamental | ValuationScore | 割安性（PER・PBR） | 実装済 |
-| F004 | Fundamental | FinancialHealthScore | 財務健全性（自己資本・黒字安定性など） | 実装済 |
-| F005 | Fundamental | EarningsQualityScore | 利益の質（本業利益と純利益の整合性など） | 実装済 |
+| F004 | Fundamental | FinancialHealthScore | 財務健全性（自己資本比率・ネットキャッシュ比率・利益剰余金/D/Eバランス） | 実装済 |
+| F005 | Fundamental | EarningsQualityScore | 利益の質（営業CF裏付け・FCF・営業CFマージン・実効税率基準整合性・レバレッジ） | 実装済 |
+| F006 | Fundamental | ShareholderReturnScore | 株主還元（連続増配/非減配・総還元性向バランス・自社株買い・DOE） | 実装済 |
 
 > Note: 旧一覧にあった `R002: RiskScore` および `S001: SupportResistanceScore` は、v0.2.0 要件見直しにより独立した特徴量クラスからは廃止し、`P001` / `P002` / `R001` のメタデータおよび Score Engine・出力層の「後段AI連携用・具体的サポレジ価格水準＆リスク情報」へ統合。
 

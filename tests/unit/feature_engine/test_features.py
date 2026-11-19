@@ -63,15 +63,37 @@ class TestFeatureLatestOnlyAndCacheIntegrity(unittest.TestCase):
             net_profit_growth_3y_avg=13.0,
             total_assets=60_000_000_000.0,
             equity_ratio=45.0,
+            net_assets=27_000_000_000.0,
+            shareholders_equity=26_500_000_000.0,
+            retained_earnings=20_000_000_000.0,
+            short_term_debt=2_000_000_000.0,
+            long_term_debt=4_000_000_000.0,
+            ordinary_profit=3_600_000_000.0,
+            operating_cf=4_000_000_000.0,
+            investing_cf=-1_500_000_000.0,
+            financing_cf=-1_000_000_000.0,
+            capex=-1_200_000_000.0,
+            free_cash_flow=2_800_000_000.0,
+            cash_and_equivalents=8_000_000_000.0,
+            operating_cf_margin=13.3,
+            dividend_per_share=90.0,
+            total_dividends=900_000_000.0,
+            share_buyback=300_000_000.0,
+            payout_ratio=36.0,
+            total_payout_ratio=48.0,
+            doe=3.4,
+            consecutive_dividend_increase_years=3,
+            consecutive_non_decrease_years=5,
+            buyback_count_3y=2,
         )
 
     def tearDown(self):
         self.temp_dir.cleanup()
 
-    def test_all_12_features_latest_only_matches_full_last_day(self):
-        """全12特徴量について latest_only=True が latest_only=False の最終日と完全一致する"""
+    def test_all_13_features_latest_only_matches_full_last_day(self):
+        """全13特徴量について latest_only=True が latest_only=False の最終日と完全一致する"""
         registered = self.manager.registry.list_features()
-        self.assertEqual(len(registered), 12)
+        self.assertEqual(len(registered), 13)
 
         full_sets = self.manager.calculate_features(
             self.ohlcv, self.indicators, self.fin, use_cache=False, latest_only=False
@@ -83,7 +105,7 @@ class TestFeatureLatestOnlyAndCacheIntegrity(unittest.TestCase):
         self.assertEqual(len(full_sets), len(self.ohlcv))
         self.assertEqual(len(latest_sets), 1)
         self.assertEqual(latest_sets[0].date, full_sets[-1].date)
-        self.assertEqual(len(latest_sets[0].results), 12)
+        self.assertEqual(len(latest_sets[0].results), 13)
 
         full_by_id = {r.feature_id: r for r in full_sets[-1].results}
         latest_by_id = {r.feature_id: r for r in latest_sets[0].results}

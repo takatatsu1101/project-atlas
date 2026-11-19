@@ -1,16 +1,12 @@
-
-
 ---
 title: FinancialHealthScore
 document_id: SPEC-FEATURE-F004
-version: 0.1.0
-status: Draft
+version: 0.2.0
+status: Implemented
 project: Project Atlas
 feature_id: F004
 category: Fundamental
-author:
-created:
-updated:
+updated: 2026-11-19
 related:
   - specifications/feature_list.md
   - design/feature_engine.md
@@ -19,99 +15,42 @@ related:
 # FinancialHealthScore
 
 ## 1. 概要
-- Feature ID：F004
+- Feature ID：`F004_FinancialHealthScore`
 - Feature名：FinancialHealthScore
 - 日本語名：財務健全性スコア
 - カテゴリ：Fundamental
-- バージョン：0.1.0
-- ステータス：Draft
+- バージョン：0.2.0
+- ステータス：Implemented
 - 優先度：P2
 
 ## 2. 目的
-- 企業の財務健全性の状態を定量的に数値化する。
-- 財務基盤の安定性や安全性を評価する。
-- 他のFundamental Featureと組み合わせてFundamental Scoreを算出するための基礎情報として利用する。
-- 投資判断は行わず、企業の財務健全性のみを評価対象とする。
+- 企業の財務健全性を「自己資本比率」「ネットキャッシュ比率」「有利子負債／利益剰余金バランス」の多段階・連続評価で定量化し、定数化を解消して実質的な財務余力・安全性を識別する。
 
-## 3. 前提条件
-- 対象企業の財務諸表データが取得可能であること。
-- 評価対象期間の財務データが十分に存在すること。
+## 3. 入力
+- 入力データ（`FinancialModel`）:
+  - BS: `equity_ratio`, `total_assets`, `short_term_debt`, `long_term_debt`, `retained_earnings`, `shareholders_equity`, `net_assets`
+  - CF: `cash_and_equivalents`
+  - レガシーフォールバック用: `eps`, `bps`, `operating_profit`, `net_profit`
 
-## 4. 入力
-- 入力データ
-  - 財務諸表データ
-- 使用する財務指標
-  - 財務健全性を表す指標（例：自己資本比率、D/Eレシオ、流動比率、当座比率）
-- パラメータ
-  - 利用する財務指標
-  - 評価対象期間
+## 4. 出力
+- `score`: `0.0〜100.0`（正規化スコア）
+- `metadata`: `equity_ratio`, `total_assets`, `cash_and_equivalents`, `interest_bearing_debt`, `net_cash_ratio`, `retained_earnings_ratio`, `debt_to_equity`, `available_weight`
 
-## 5. 出力
-- 型
-  - 数値（Float）
-- 値域
-  - 正規化されたスコア
-- 値の意味
-  - 高い値：財務基盤が安定している状態
-  - 中間の値：財務基盤が平均的な状態
-  - 低い値：財務基盤が不安定な状態
+## 5. アルゴリズム・配点バランス
+取得可能な項目のウェイト合計で再配分する（`(weighted_sum / weight_sum) * 100.0`）。
 
-## 6. アルゴリズム
-- アルゴリズム概要
-  - 複数の財務健全性指標を総合的に評価し、企業の財務健全性を単一のスコアとして数値化する。
-- 処理手順
-  - 必要な財務指標を取得する。
-  - 各指標から財務健全性を評価する。
-  - 評価結果を統合し、FinancialHealthScoreを算出する。
-  - スコアを正規化して出力する。
-- 算出式の概要
-  - 各財務健全性指標を統合してスコア化する。詳細な計算方法、重み付け、正規化方法は設計書で定義する。
-- 使用するパラメータ
-  - 利用する財務指標
-  - 評価対象期間
-  - 正規化方法
-- 備考
-  - 本Featureは企業の財務健全性のみを評価する。
-  - 倒産リスクや投資判断は行わない。
+1. **自己資本比率（ウェイト 40.0）**
+   - `equity_ratio`（%）を `10% → 0.0`、`75% → 40.0` の範囲で連続線形評価。
+2. **ネットキャッシュ比率（ウェイト 40.0）**
+   - `cash_and_equivalents`・`total_assets > 0` が揃い、かつ `short_term_debt` または `long_term_debt` の少なくとも一方が非 `None` 有限値の場合に限り、`interest_bearing_debt = (short_term_debt or 0.0) + (long_term_debt or 0.0)`、`net_cash_ratio = (cash_and_equivalents - interest_bearing_debt) / total_assets` を算出。
+   - `-0.40 → 0.0`、`+0.40 → 40.0` の範囲で連続線形評価。
+   - 短期・長期借入金が双方 `None` の銘柄（銀行・借入金明細非開示企業など）では有利子負債 `0` と見なさず欠損扱いとし、取得可能項目へウェイトを再配分する。
+3. **有利子負債 / 利益剰余金健全性（ウェイト 20.0）**
+   - **利益剰余金比率**: `retained_earnings / total_assets` を `-0.10 〜 +0.60` で `0.0 〜 1.0` に正規化。
+   - **D/E レシオ**: `interest_bearing_debt / (shareholders_equity or net_assets)` を `2.0 〜 0.0` で `0.0 〜 1.0` に正規化（債務超過 `<= 0` は `0.0`）。
+   - 算出可能なサブ指標の平均 × `20.0`。
 
-## 7. 判定基準
-- 高スコアとなる条件
-  - 財務健全性指標が総合的に良好な状態。
-- 低スコアとなる条件
-  - 財務健全性指標が総合的に脆弱な状態。
-- 正規化方法
-  - 他Featureと比較可能なスコアとなるよう正規化する。詳細は設計書で定義する。
-
-## 8. 利用箇所
-- 利用モジュール
-  - Score Engine
-- 利用目的
-  - Fundamental Score
-  - Total Score
-
-## 9. 例外処理
-- データ不足時
-  - 算出不可とする。
-- 異常値
-  - 異常な財務データや算出不能な指標は除外またはエラーとして扱う。
-- エラー時の扱い
-  - Feature Engine共通の例外処理方針に従う。
-
-## 10. テスト観点
-- 正常系
-  - 財務基盤が強固な企業で高スコアとなること。
-  - 財務基盤が脆弱な企業で低スコアとなること。
-- 境界値
-  - 平均的な財務健全性で中程度のスコアとなること。
-- 異常系
-  - 財務データ不足時に適切に処理されること。
-  - 指標が算出不能な場合に適切に処理されること。
-- 期待値
-  - 高い自己資本比率・低いD/Eレシオ：高スコア
-  - 債務依存が高く自己資本が低い：低スコア
-
-## 11. 今後の拡張
-- インタレスト・カバレッジ・レシオなど追加指標への対応。
-- キャッシュフローを考慮した健全性評価への拡張。
-- 業種ごとの財務健全性基準への対応。
-- 複数年度の推移を考慮した安定性評価への拡張。
+## 6. 例外処理・フォールバック
+- `financial_data is None` の場合は中立 `50.0` を返す。
+- 上記 3 軸がすべて算出不能（`weight_sum == 0`）の場合のみ、レガシー 4 項目（`eps`, `bps`, `operating_profit`, `net_profit`）による簡易判定へフォールバックし、それも欠損していれば `50.0` を返す。
+- 非有限値（`NaN` / `inf`）は欠損（`None`）として安全に除外する。
