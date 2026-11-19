@@ -59,6 +59,8 @@ related:
 | F006 | Fundamental | ShareholderReturnScore | 株主還元（連続増配/非減配・総還元性向バランス・自社株買い・DOE） | 実装済 |
 
 > Note: 旧一覧にあった `R002: RiskScore` および `S001: SupportResistanceScore` は、v0.2.0 要件見直しにより独立した特徴量クラスからは廃止し、`P001` / `P002` / `R001` のメタデータおよび Score Engine・出力層の「後段AI連携用・具体的サポレジ価格水準＆リスク情報」へ統合。
+>
+> Note (Phase B 横断評価の責務分離): 単一銘柄単位で算出される登録特徴量は上記 13 特徴量とし、複数銘柄横断の相対評価・地合いレジーム（**`MC_RS_Rank`: 対 TOPIX `1306.T` 相対力**、**`MC_SectorMomentum`: 33業種モメンタム**、**`MC_RelativeValuation`: 業種内相対バリュエーション Z スコア**、**Market Breadth**）は並列ワーカー内では算出せず、親プロセス側で基準日 `as_of_date` 以前のデータのみから構築する読み取り専用 `MarketContext`（`src/score_engine/market_context.py`）として Score Engine・Screener へ注入し、分位評価でも `MC_*` として検証する。
 
 ---
 

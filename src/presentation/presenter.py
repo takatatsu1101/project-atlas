@@ -26,6 +26,10 @@ _SUB_SCORE_LABELS: Dict[str, str] = {
     "trend_env_score": "トレンド環境スコア",
     "fundamental_score": "ファンダメンタルスコア",
     "penalty_score": "ペナルティ減点",
+    "rs_score": "対TOPIX相対力(RS)",
+    "sector_momentum_score": "業種モメンタム",
+    "relative_valuation_score": "業種内相対バリュエーション",
+    "market_context_adjustment": "市場コンテキスト補正",
 }
 
 
@@ -461,6 +465,18 @@ class Presenter:
                         f"勝率={self._fmt_pct(row.spread_win_rate_pct, signed=True)}"
                     )
 
+    @staticmethod
+    def _format_market_regime_brief(mrs: Optional[Dict[str, Any]]) -> str:
+        """地合いレジームサマリーを簡潔な表示文字列へ整形する。"""
+        if not mrs:
+            return ""
+        regime = str(mrs.get("regime") or "-")
+        breadth_val = mrs.get("breadth_ratio")
+        breadth_txt = f"{float(breadth_val) * 100:.1f}%" if breadth_val is not None else "-"
+        bo_delta = float(mrs.get("breakout_threshold_delta") or 0.0)
+        bo_txt = f", BO閾値+{bo_delta:.0f}" if bo_delta > 0 else ""
+        return f"{regime} (Breadth={breadth_txt}{bo_txt})"
+
     def _display_evaluation_cli(self, evaluation_summary: EvaluationSummaryModel) -> None:
         """フォワードリターン検証サマリーおよび銘柄別リターンをCLI出力する。"""
         print("\n=== フォワードリターン検証サマリー ===")
@@ -470,6 +486,10 @@ class Presenter:
             f"検証対象: {evaluation_summary.total_candidates} 件 | "
             f"ホライズン: {evaluation_summary.horizons}"
         )
+        if evaluation_summary.market_regime_summary:
+            print(
+                f"地合いレジーム: {self._format_market_regime_brief(evaluation_summary.market_regime_summary)}"
+            )
 
         self._display_horizon_summaries_cli(
             evaluation_summary.horizons,
@@ -975,8 +995,12 @@ class Presenter:
             f"- エントリー価格基準: `{evaluation_summary.entry_price_mode}`",
             f"- 検証対象銘柄数: **{evaluation_summary.total_candidates} 件**",
             f"- 検証ホライズン: `{evaluation_summary.horizons}`",
-            "",
         ]
+        if evaluation_summary.market_regime_summary:
+            lines.append(
+                f"- 地合いレジーム: `{self._format_market_regime_brief(evaluation_summary.market_regime_summary)}`"
+            )
+        lines.append("")
         lines.extend(
             self._build_horizon_markdown_tables(
                 evaluation_summary.horizons,
@@ -1145,8 +1169,10 @@ class Presenter:
                         f"平均={self._fmt_pct(hs.avg_return_pct, signed=True)}"
                     )
                 detail_str = " / ".join(h_parts) if h_parts else "-"
+                regime_brief = self._format_market_regime_brief(es.market_regime_summary)
+                regime_suffix = f" | 地合い={regime_brief}" if regime_brief else ""
                 print(
-                    f"  {dt.isoformat()}: 候補={es.total_candidates}件 | {detail_str}"
+                    f"  {dt.isoformat()}: 候補={es.total_candidates}件{regime_suffix} | {detail_str}"
                 )
         print("==================================================")
 
@@ -1236,17 +1262,31 @@ class Presenter:
                     lines.append("基準日別の検証結果はありません。")
                     lines.append("")
                 else:
+                    has_regime = any(
+                        es.market_regime_summary is not None
+                        for es in batch_summary.per_date_summaries.values()
+                    )
                     h_cols = [
                         f"+{h}日勝率 / 平均リターン" for h in batch_summary.horizons
                     ]
-                    lines.append(
-                        "| 基準日 | 候補数 | " + " | ".join(h_cols) + " |"
-                    )
-                    lines.append(
-                        "|:---|---:|"
-                        + "|".join(["---:" for _ in batch_summary.horizons])
-                        + "|"
-                    )
+                    if has_regime:
+                        lines.append(
+                            "| 基準日 | 候補数 | 地合い (Breadth) | " + " | ".join(h_cols) + " |"
+                        )
+                        lines.append(
+                            "|:---|---:|:---|"
+                            + "|".join(["---:" for _ in batch_summary.horizons])
+                            + "|"
+                        )
+                    else:
+                        lines.append(
+                            "| 基準日 | 候補数 | " + " | ".join(h_cols) + " |"
+                        )
+                        lines.append(
+                            "|:---|---:|"
+                            + "|".join(["---:" for _ in batch_summary.horizons])
+                            + "|"
+                        )
                     for dt in batch_summary.as_of_dates:
                         es = batch_summary.per_date_summaries.get(dt)
                         if es is None:
@@ -1261,11 +1301,14 @@ class Presenter:
                                     f"{self._fmt_pct(hs.win_rate_pct)} / "
                                     f"{self._fmt_pct(hs.avg_return_pct, signed=True)}"
                                 )
+                        row_prefix = [dt.isoformat(), str(es.total_candidates)]
+                        if has_regime:
+                            row_prefix.append(
+                                self._format_market_regime_brief(es.market_regime_summary) or "-"
+                            )
                         lines.append(
                             "| "
-                            + " | ".join(
-                                [dt.isoformat(), str(es.total_candidates), *cells]
-                            )
+                            + " | ".join([*row_prefix, *cells])
                             + " |"
                         )
                     lines.append("")

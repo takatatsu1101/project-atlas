@@ -2070,6 +2070,271 @@ class TestPipelineIntegration(unittest.TestCase):
         self.assertEqual(feat_logger.level, orig_feat_level)
         self.assertEqual(storage_logger.level, orig_storage_level)
 
+    def test_market_context_pipeline_parallel_consistency_zero_lookahead_and_benchmark_fallback(self):
+        """
+        MarketContext 有効時の統合検証:
+        1) run_full_pipeline / run_batch_backtest で workers=2 と workers=1 が 1 ビットも違わず完全一致する
+        2) ベンチマーク (1306.T) および個別銘柄の d1 より後の未来バー改ざんで d1 のコンテキスト・スコア・ランキングが変化しない
+        3) ベンチマーク取得失敗時もユニバース中央値へ安全フォールバックし、market_regime_summary と MC_* 分位評価が出力される
+        """
+        symbols = ["6001.T", "6002.T", "6003.T", "9001.T", "9002.T", "9003.T"]
+        start_dt = date(2025, 2, 1)
+        d1 = date(2025, 5, 15)
+        d2 = date(2025, 6, 5)
+        total_days = 150
+
+        def _build_bars(
+            sym: str, slope: float, spike_after_d1: bool = False
+        ) -> list[OhlcvModel]:
+            out: list[OhlcvModel] = []
+            for i in range(total_days):
+                dt = start_dt + timedelta(days=i)
+                # 適度に押し目を挟み過熱 (RSI>80) を回避しつつ上昇トレンドを作る
+                c = 1000.0 + i * slope - (4.0 if i % 4 == 3 else 0.0)
+                if spike_after_d1 and dt > d1:
+                    c = 999_999.0 if i % 2 == 0 else 5.0
+                out.append(
+                    OhlcvModel(
+                        symbol=sym,
+                        date=dt,
+                        open=c - 2.0,
+                        high=c + 6.0,
+                        low=c - 6.0,
+                        close=c,
+                        volume=300_000,
+                    )
+                )
+            return out
+
+        slopes = {
+            "6001.T": 4.0,
+            "6002.T": 3.5,
+            "6003.T": 3.0,
+            "9001.T": 2.2,
+            "9002.T": 2.0,
+            "9003.T": 1.8,
+        }
+        bars_orig = {s: _build_bars(s, slopes[s], False) for s in symbols}
+        bars_orig["1306.T"] = _build_bars("1306.T", 2.0, False)
+
+        bars_tampered = {s: _build_bars(s, slopes[s], True) for s in symbols}
+        bars_tampered["1306.T"] = _build_bars("1306.T", 2.0, True)
+
+        bars_no_bench = {s: _build_bars(s, slopes[s], False) for s in symbols}
+
+        bs_items = {
+            s.split(".")[0]: ["2025/03", "100000", "0", "0", "0", "0", "0", "1000.0", "45.0"]
+            for s in symbols
+        }
+        pl_items = {}
+        for idx, s in enumerate(symbols):
+            code = s.split(".")[0]
+            eps = 120.0 - idx * 10.0
+            roe = 18.0 - idx * 1.5
+            pl_items[code] = [
+                "2025/03",
+                "50000000000",
+                "5000000000",
+                "5200000000",
+                "3500000000",
+                str(eps),
+                str(roe),
+                "8.0",
+            ]
+
+        masters = [
+            StockMasterModel(
+                code=s.split(".")[0],
+                symbol=s,
+                name=f"銘柄{s}",
+                market="プライム",
+                sector_33="電気機器" if s.startswith("6") else "情報・通信業",
+            )
+            for s in symbols
+        ]
+
+        custom_yaml = """
+strategy_score:
+  min_entry_score: 40.0
+screener:
+  min_total_score: 40.0
+market_context:
+  enabled: true
+  min_universe_size: 4
+  min_sector_size: 2
+"""
+
+        with tempfile.TemporaryDirectory() as tmp1, tempfile.TemporaryDirectory() as tmp2, tempfile.TemporaryDirectory() as tmp3:
+            cfg_path = Path(tmp1) / "mc_screening.yaml"
+            cfg_path.write_text(custom_yaml, encoding="utf-8")
+
+            col_orig = self._write_temp_env(
+                tmp1, bars_orig, bs_by_year={2025: {"item": bs_items}}, pl_by_year={2025: {"item": pl_items}}
+            )
+            # 1) run_full_pipeline: workers=2 と workers=1 の完全一致確認
+            with patch("src.data_collector.collector.data_collector", col_orig), \
+                 patch("src.main.data_collector", col_orig), \
+                 patch("src.main.prefetch_ohlcv_batch"), \
+                 patch("src.main.MasterManager") as mock_master_cls, \
+                 redirect_stdout(io.StringIO()):
+                mock_master_cls.return_value.load_master.return_value = masters
+
+                full_seq = run_full_pipeline(
+                    symbols=symbols,
+                    start_date=start_dt,
+                    end_date=d1,
+                    as_of_date=d1,
+                    config_path=cfg_path,
+                    export_reports=False,
+                    mode="evaluate",
+                    horizons=[5],
+                    use_cache=False,
+                    allow_irbank_download=False,
+                    workers=1,
+                    parallel_min_symbols=2,
+                )
+                full_par = run_full_pipeline(
+                    symbols=symbols,
+                    start_date=start_dt,
+                    end_date=d1,
+                    as_of_date=d1,
+                    config_path=cfg_path,
+                    export_reports=False,
+                    mode="evaluate",
+                    horizons=[5],
+                    use_cache=False,
+                    allow_irbank_download=False,
+                    workers=2,
+                    parallel_min_symbols=2,
+                )
+
+            self.assertIsNotNone(full_seq["market_context"])
+            self.assertTrue(full_seq["market_context"].is_active)
+            self.assertEqual(
+                full_seq["market_context"].model_dump(),
+                full_par["market_context"].model_dump(),
+            )
+            self.assertEqual(
+                [r.model_dump() for r in full_seq["score_results"]],
+                [r.model_dump() for r in full_par["score_results"]],
+            )
+            self.assertEqual(
+                [r.model_dump() for r in full_seq["analysis_results"]],
+                [r.model_dump() for r in full_par["analysis_results"]],
+            )
+            self.assertIsNotNone(full_seq["evaluation_summary"].market_regime_summary)
+            self.assertIn("MC_RS_Rank", full_seq["evaluation_summary"].feature_quantile_summary)
+
+            # 2) run_batch_backtest: workers=2 と workers=1 の完全一致＆未来バー改ざん不変検証
+            with patch("src.data_collector.collector.data_collector", col_orig), \
+                 patch("src.main.data_collector", col_orig), \
+                 patch("src.main.prefetch_ohlcv_batch"), \
+                 patch("src.main.MasterManager") as mock_master_cls, \
+                 redirect_stdout(io.StringIO()):
+                mock_master_cls.return_value.load_master.return_value = masters
+
+                bt_seq = run_batch_backtest(
+                    as_of_dates=[d1, d2],
+                    symbols=symbols,
+                    start_date=start_dt,
+                    end_date=date(2025, 6, 30),
+                    config_path=cfg_path,
+                    horizons=[5],
+                    export_reports=False,
+                    use_cache=False,
+                    allow_irbank_download=False,
+                    workers=1,
+                    parallel_min_symbols=2,
+                )
+                bt_par = run_batch_backtest(
+                    as_of_dates=[d1, d2],
+                    symbols=symbols,
+                    start_date=start_dt,
+                    end_date=date(2025, 6, 30),
+                    config_path=cfg_path,
+                    horizons=[5],
+                    export_reports=False,
+                    use_cache=False,
+                    allow_irbank_download=False,
+                    workers=2,
+                    parallel_min_symbols=2,
+                )
+
+            self.assertEqual(
+                bt_seq["per_date_results"][d1]["market_context"].model_dump(),
+                bt_par["per_date_results"][d1]["market_context"].model_dump(),
+            )
+            self.assertEqual(
+                [r.model_dump() for r in bt_seq["per_date_results"][d1]["analysis_results"]],
+                [r.model_dump() for r in bt_par["per_date_results"][d1]["analysis_results"]],
+            )
+            self.assertIn(
+                "MC_RS_Rank",
+                bt_seq["batch_summary"].aggregated_feature_quantile_summary,
+            )
+
+            col_tampered = self._write_temp_env(
+                tmp2, bars_tampered, bs_by_year={2025: {"item": bs_items}}, pl_by_year={2025: {"item": pl_items}}
+            )
+            with patch("src.data_collector.collector.data_collector", col_tampered), \
+                 patch("src.main.data_collector", col_tampered), \
+                 patch("src.main.prefetch_ohlcv_batch"), \
+                 patch("src.main.MasterManager") as mock_master_cls, \
+                 redirect_stdout(io.StringIO()):
+                mock_master_cls.return_value.load_master.return_value = masters
+
+                bt_tampered = run_batch_backtest(
+                    as_of_dates=[d1, d2],
+                    symbols=symbols,
+                    start_date=start_dt,
+                    end_date=date(2025, 6, 30),
+                    config_path=cfg_path,
+                    horizons=[5],
+                    export_reports=False,
+                    use_cache=False,
+                    allow_irbank_download=False,
+                    workers=1,
+                    parallel_min_symbols=2,
+                )
+
+            # d1 より後のベンチマーク・銘柄バー改ざんでも d1 は1ビットも変化しない
+            self.assertEqual(
+                bt_seq["per_date_results"][d1]["market_context"].model_dump(),
+                bt_tampered["per_date_results"][d1]["market_context"].model_dump(),
+            )
+            self.assertEqual(
+                [s.model_dump() for s in bt_seq["per_date_results"][d1]["score_results"]],
+                [s.model_dump() for s in bt_tampered["per_date_results"][d1]["score_results"]],
+            )
+
+            # 3) ベンチマーク取得失敗時もユニバース中央値フォールバックで完走する
+            col_no_bench = self._write_temp_env(
+                tmp3, bars_no_bench, bs_by_year={2025: {"item": bs_items}}, pl_by_year={2025: {"item": pl_items}}
+            )
+            with patch("src.data_collector.collector.data_collector", col_no_bench), \
+                 patch("src.main.data_collector", col_no_bench), \
+                 patch("src.main.prefetch_ohlcv_batch"), \
+                 patch("src.main.collect_benchmark_ohlcv", return_value=[]), \
+                 patch("src.main.MasterManager") as mock_master_cls, \
+                 redirect_stdout(io.StringIO()):
+                mock_master_cls.return_value.load_master.return_value = masters
+
+                res_fallback = run_full_pipeline(
+                    symbols=symbols,
+                    start_date=start_dt,
+                    end_date=d1,
+                    as_of_date=d1,
+                    config_path=cfg_path,
+                    export_reports=False,
+                    use_cache=False,
+                    allow_irbank_download=False,
+                    workers=1,
+                )
+
+            self.assertTrue(res_fallback["market_context"].is_active)
+            self.assertFalse(res_fallback["market_context"].benchmark.available)
+            self.assertEqual(len(res_fallback["processed_symbols"]), len(symbols))
+
 
 if __name__ == "__main__":
     unittest.main()

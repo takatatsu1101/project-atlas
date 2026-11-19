@@ -1,7 +1,7 @@
 import unittest
 from datetime import date, datetime
 from src.screener.screener import Screener, ScreeningCriteria
-from src.model.data_models import ScoreResultModel
+from src.model.data_models import MarketContextModel, ScoreResultModel, SymbolMarketMetricsModel
 
 
 class TestScreenerAndRanking(unittest.TestCase):
@@ -184,6 +184,104 @@ class TestScreenerAndRanking(unittest.TestCase):
         )
         filtered = screener.apply_screener(results, criteria)
         self.assertEqual([r.symbol for r in filtered], ["2001.T", "1001.T"])
+
+    def test_bearish_market_regime_raises_breakout_threshold_without_double_counting(self):
+        """bearish 地合い時にブレイクアウト閾値のみが動的引き上げされ、metadata との二重加算も起きない"""
+        screener = Screener()
+        dt = date(2026, 3, 2)
+
+        bo_70 = self._make_score(
+            "3001.T",
+            dt=dt,
+            strategy_type="breakout",
+            total_score=70.0,
+            breakout_score=70.0,
+        )
+        bo_70.metadata["breakout_threshold_delta"] = 8.0
+
+        bo_74 = self._make_score(
+            "3002.T",
+            dt=dt,
+            strategy_type="breakout",
+            total_score=74.0,
+            breakout_score=74.0,
+        )
+        bo_74.metadata["breakout_threshold_delta"] = 8.0
+
+        pb_66 = self._make_score(
+            "3003.T",
+            dt=dt,
+            strategy_type="pullback",
+            total_score=66.0,
+            pullback_score=66.0,
+        )
+        pb_66.metadata["breakout_threshold_delta"] = 8.0
+
+        bear_ctx = MarketContextModel(
+            as_of_date=dt,
+            is_active=True,
+            universe_size=50,
+            breadth_ratio=0.28,
+            regime="bearish",
+            breakout_threshold_delta=8.0,
+            symbol_metrics={
+                sym: SymbolMarketMetricsModel(symbol=sym, bar_date=dt)
+                for sym in ("3001.T", "3002.T", "3003.T")
+            },
+        )
+        criteria = ScreeningCriteria(min_total_score=65.0)
+        # 65.0 + 8.0 = 73.0 が有効閾値（二重加算なら 81.0 になり 74.0 が落ちてしまう）
+        filtered = screener.apply_screener(
+            [bo_70, bo_74, pb_66], criteria, market_context=bear_ctx
+        )
+        self.assertEqual([r.symbol for r in filtered], ["3002.T", "3003.T"])
+
+        # market_context 省略時でも metadata["breakout_threshold_delta"] で同様に機能
+        filtered_meta = screener.apply_screener([bo_70, bo_74, pb_66], criteria)
+        self.assertEqual([r.symbol for r in filtered_meta], ["3002.T", "3003.T"])
+
+        # min_breakout_strategy_score 指定時も 64 + 8 = 72 となり 70 は除外、74 は通過
+        criteria_bo = ScreeningCriteria(
+            min_total_score=60.0,
+            min_breakout_strategy_score=64.0,
+        )
+        filtered_bo_sub = screener.apply_screener(
+            [bo_70, bo_74], criteria_bo, market_context=bear_ctx
+        )
+        self.assertEqual([r.symbol for r in filtered_bo_sub], ["3002.T"])
+
+        # apply_market_regime_adjustment=False なら通常閾値 65.0 で通過
+        criteria_disabled = ScreeningCriteria(
+            min_total_score=65.0,
+            apply_market_regime_adjustment=False,
+        )
+        filtered_disabled = screener.apply_screener(
+            [bo_70, bo_74, pb_66], criteria_disabled, market_context=bear_ctx
+        )
+        self.assertEqual([r.symbol for r in filtered_disabled], ["3001.T", "3002.T", "3003.T"])
+
+        # sym_ctx.bar_date=None かつ market_context.as_of_date != result.date なら過去日に誤適用されない
+        past_bo_70 = self._make_score(
+            "3004.T",
+            dt=date(2026, 2, 20),
+            strategy_type="breakout",
+            total_score=70.0,
+            breakout_score=70.0,
+        )
+        none_bar_ctx = MarketContextModel(
+            as_of_date=date(2026, 3, 2),
+            is_active=True,
+            universe_size=50,
+            regime="bearish",
+            breakout_threshold_delta=8.0,
+            symbol_metrics={
+                "3004.T": SymbolMarketMetricsModel(symbol="3004.T", bar_date=None)
+            },
+        )
+        filtered_mismatch = screener.apply_screener(
+            [past_bo_70], criteria, market_context=none_bar_ctx
+        )
+        self.assertEqual([r.symbol for r in filtered_mismatch], ["3004.T"])
 
 
 if __name__ == "__main__":

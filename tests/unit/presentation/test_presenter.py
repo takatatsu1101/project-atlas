@@ -666,6 +666,46 @@ class TestPresenter(unittest.TestCase):
             self.assertIn("## 全期間プール 特徴量別分位評価（上位20% vs 下位20%）", md_text)
             self.assertIn("| F002_Vol | 出来高モメンタム | +5営業日 | 5 (5) |", md_text)
 
+    @patch("builtins.print")
+    def test_market_regime_summary_cli_and_markdown_output(self, mock_print):
+        """market_regime_summary が存在する場合、CLI および Markdown に地合いレジーム・Breadth・BO閾値補正が出力される"""
+        presenter = Presenter()
+        d1 = date(2026, 3, 2)
+        eval_d1 = EvaluationSummaryModel(
+            as_of_date=d1,
+            horizons=[5],
+            total_candidates=1,
+            overall_summary={5: HorizonSummaryModel(horizon_days=5, total_candidates=1, evaluated_count=1, win_count=1, win_rate_pct=100.0, avg_return_pct=2.0)},
+            market_regime_summary={
+                "as_of_date": d1.isoformat(),
+                "is_active": True,
+                "regime": "bearish",
+                "universe_size": 100,
+                "breadth_ratio": 0.312,
+                "breakout_threshold_delta": 8.0,
+            },
+        )
+        batch_summary = BatchBacktestSummaryModel(
+            as_of_dates=[d1],
+            horizons=[5],
+            total_dates=1,
+            total_candidates=1,
+            aggregated_overall_summary=eval_d1.overall_summary,
+            per_date_summaries={d1: eval_d1},
+        )
+
+        presenter.display_batch_backtest_results(batch_summary)
+        printed_text = "\n".join(str(c.args[0]) for c in mock_print.call_args_list if c.args)
+        self.assertIn("地合い=bearish (Breadth=31.2%, BO閾値+8)", printed_text)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            paths = presenter.export_batch_backtest_reports(
+                batch_summary, output_dir=tmpdir, formats=("markdown",)
+            )
+            md_text = paths["markdown"].read_text(encoding="utf-8")
+            self.assertIn("| 基準日 | 候補数 | 地合い (Breadth) |", md_text)
+            self.assertIn("bearish (Breadth=31.2%, BO閾値+8)", md_text)
+
 
 if __name__ == "__main__":
     unittest.main()

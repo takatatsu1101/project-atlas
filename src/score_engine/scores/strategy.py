@@ -7,9 +7,11 @@ from src.model.data_models import (
     FeatureResultModel,
     FeatureSetModel,
     IndicatorSetModel,
+    MarketContextModel,
     OhlcvModel,
     PatternSetModel,
     ScoreResultModel,
+    SymbolMarketMetricsModel,
 )
 from src.score_engine.interfaces import IScoreCalculator
 from src.score_engine.registry import score_registry
@@ -107,9 +109,10 @@ class StrategyScoreCalculator(IScoreCalculator):
         pattern_sets: List[PatternSetModel],
         ohlcv_data: Optional[List[OhlcvModel]] = None,
         indicator_sets: Optional[List[IndicatorSetModel]] = None,
+        market_context: Optional[MarketContextModel] = None,
     ) -> List[ScoreResultModel]:
         """
-        特徴量セット・パターンセット・OHLCV・指標セットを日付単位で突合し、
+        特徴量セット・パターンセット・OHLCV・指標セット・市場コンテキストを日付単位で突合し、
         3段階ゲートによる戦略別スコアを計算する。
         """
         if not feature_sets:
@@ -125,7 +128,11 @@ class StrategyScoreCalculator(IScoreCalculator):
             ps = pattern_map.get(key)
             ohlcv = ohlcv_map.get(key)
             ind_set = indicator_map.get(key)
-            results.append(self._evaluate_single_day(fs, ps, ohlcv, ind_set))
+            results.append(
+                self._evaluate_single_day(
+                    fs, ps, ohlcv, ind_set, market_context=market_context
+                )
+            )
 
         return results
 
@@ -135,6 +142,7 @@ class StrategyScoreCalculator(IScoreCalculator):
         pattern_set: Optional[PatternSetModel],
         ohlcv: Optional[OhlcvModel],
         indicator_set: Optional[IndicatorSetModel],
+        market_context: Optional[MarketContextModel] = None,
     ) -> ScoreResultModel:
         """1日分の特徴量・パターン等から戦略スコアと根拠を算出する。"""
         feature_map: Dict[str, FeatureResultModel] = {
@@ -356,6 +364,55 @@ class StrategyScoreCalculator(IScoreCalculator):
                     f"高信頼度のダブルトップ検出のためスコア上限を {self.config.double_top_high_confidence_cap:.1f} 点に制限し、見送り判定としました。"
                 )
 
+        # 市場コンテキスト（RS・業種モメンタム・業種内相対バリュエーション・地合いレジーム）の整合解決
+        fs_date = self._normalize_date(feature_set.date)
+        context_applied = False
+        sym_ctx: Optional[SymbolMarketMetricsModel] = None
+        if market_context is not None and market_context.is_active:
+            ctx_as_of = self._normalize_date(market_context.as_of_date)
+            candidate_sym_ctx = market_context.symbol_metrics.get(feature_set.symbol)
+            if candidate_sym_ctx is not None:
+                sym_bar_dt = self._normalize_date(candidate_sym_ctx.bar_date)
+                date_matched = (
+                    (sym_bar_dt == fs_date)
+                    if sym_bar_dt is not None
+                    else (ctx_as_of == fs_date)
+                )
+                if date_matched:
+                    context_applied = True
+                    sym_ctx = candidate_sym_ctx
+            elif ctx_as_of == fs_date:
+                context_applied = True
+
+        pullback_context_adj = 0.0
+        breakout_context_adj = 0.0
+        if context_applied and sym_ctx is not None:
+            raw_pb_adj = self._to_optional_float(sym_ctx.pullback_adjustment)
+            if raw_pb_adj is None:
+                raw_pb_adj = self._to_optional_float(sym_ctx.total_adjustment)
+            if raw_pb_adj is not None:
+                pullback_context_adj = raw_pb_adj
+
+            raw_bo_adj = self._to_optional_float(sym_ctx.breakout_adjustment)
+            if raw_bo_adj is None:
+                raw_bo_adj = self._to_optional_float(sym_ctx.total_adjustment)
+            if raw_bo_adj is not None:
+                breakout_context_adj = raw_bo_adj
+
+        raw_delta = (
+            self._to_optional_float(market_context.breakout_threshold_delta)
+            if (context_applied and market_context is not None)
+            else None
+        )
+        breakout_threshold_delta = max(0.0, raw_delta) if raw_delta is not None else 0.0
+
+        raw_penalty = (
+            self._to_optional_float(market_context.breakout_score_penalty)
+            if (context_applied and market_context is not None)
+            else None
+        )
+        breakout_regime_penalty = max(0.0, raw_penalty) if raw_penalty is not None else 0.0
+
         # 両戦略スコアの算出
         raw_pullback = (
             p001 * self.config.pullback_weight_p001
@@ -369,6 +426,7 @@ class StrategyScoreCalculator(IScoreCalculator):
             + short_rsi_rebound_bonus
             + pullback_dryup_rebound_bonus
             - penalty_score
+            + pullback_context_adj
         )
         raw_breakout = (
             p002 * self.config.breakout_weight_p002
@@ -378,7 +436,58 @@ class StrategyScoreCalculator(IScoreCalculator):
             + fundamental_score * self.config.breakout_weight_fundamental
             - penalty_score
             - gap_up_penalty
+            + breakout_context_adj
+            - breakout_regime_penalty
         )
+
+        if context_applied and sym_ctx is not None:
+            ctx_parts: List[str] = []
+            if sym_ctx.rs_percentile is not None:
+                ctx_parts.append(
+                    f"RS順位={sym_ctx.rs_percentile:.1f}%({sym_ctx.rs_adjustment:+.1f})"
+                )
+            if sym_ctx.sector_momentum_score is not None:
+                sec_label = sym_ctx.sector_33 or "業種"
+                ctx_parts.append(
+                    f"{sec_label}モメンタム={sym_ctx.sector_momentum_score:.1f}({sym_ctx.sector_momentum_adjustment:+.1f})"
+                )
+            if sym_ctx.relative_valuation_z is not None:
+                ctx_parts.append(
+                    f"業種内相対バリュエーションZ={sym_ctx.relative_valuation_z:+.2f}({sym_ctx.relative_valuation_adjustment:+.1f})"
+                )
+            if ctx_parts:
+                adj_label = (
+                    f"{pullback_context_adj:+.1f}点"
+                    if abs(pullback_context_adj - breakout_context_adj) < 1e-6
+                    else f"押し目={pullback_context_adj:+.1f}点/ブレイク={breakout_context_adj:+.1f}点"
+                )
+                reasons.append(
+                    f"市場コンテキスト補正({adj_label}): " + ", ".join(ctx_parts)
+                )
+
+        if (
+            context_applied
+            and (breakout_threshold_delta > 0.0 or breakout_regime_penalty > 0.0)
+            and market_context is not None
+        ):
+            breadth_str = (
+                f"{market_context.breadth_ratio * 100:.1f}%"
+                if market_context.breadth_ratio is not None
+                else "-"
+            )
+            effective_bo_entry = self.config.min_entry_score + breakout_threshold_delta
+            regime_actions: List[str] = []
+            if breakout_regime_penalty > 0.0:
+                regime_actions.append(f"ブレイクアウト減点={-breakout_regime_penalty:+.1f}点")
+            if breakout_threshold_delta > 0.0:
+                regime_actions.append(
+                    f"ブレイクアウト要求スコア={effective_bo_entry:.1f}点(+{breakout_threshold_delta:.1f})"
+                )
+            reasons.append(
+                f"地合い悪化レジーム({market_context.regime}, Breadth={breadth_str})のため"
+                + "、".join(regime_actions)
+                + "を適用しました。"
+            )
 
         # 第1関門未達・高信頼度ダブルトップによる上限キャップ適用
         if not gate1_passed:
@@ -399,6 +508,7 @@ class StrategyScoreCalculator(IScoreCalculator):
             breakout_score=breakout_strategy_score,
             p001=p001,
             p002=p002,
+            breakout_threshold_delta=breakout_threshold_delta,
         )
 
         if strategy_type == "pullback":
@@ -418,17 +528,85 @@ class StrategyScoreCalculator(IScoreCalculator):
                         f"主軸セットアップ条件（P001>={self.config.min_pullback_setup_score:.1f} または P002>={self.config.min_breakout_setup_score:.1f}）未達のため見送り(watch)としました。"
                     )
                 else:
-                    reasons.append(
-                        f"適格戦略の総合スコアがエントリー基準({self.config.min_entry_score:.1f})未満のため見送り(watch)としました（押し目: {pullback_strategy_score:.1f} / ブレイク: {breakout_strategy_score:.1f}）。"
-                    )
+                    effective_bo_entry = self.config.min_entry_score + breakout_threshold_delta
+                    if breakout_threshold_delta > 0.0 and breakout_setup_ok:
+                        reasons.append(
+                            f"適格戦略の総合スコアがエントリー基準(押し目:{self.config.min_entry_score:.1f} / ブレイク:{effective_bo_entry:.1f})未満のため見送り(watch)としました（押し目: {pullback_strategy_score:.1f} / ブレイク: {breakout_strategy_score:.1f}）。"
+                        )
+                    else:
+                        reasons.append(
+                            f"適格戦略の総合スコアがエントリー基準({self.config.min_entry_score:.1f})未満のため見送り(watch)としました（押し目: {pullback_strategy_score:.1f} / ブレイク: {breakout_strategy_score:.1f}）。"
+                        )
 
-        sub_scores = {
+        sub_scores: Dict[str, float] = {
             "pullback_strategy_score": pullback_strategy_score,
             "breakout_strategy_score": breakout_strategy_score,
             "trend_env_score": trend_env_score,
             "fundamental_score": fundamental_score,
             "penalty_score": penalty_score,
         }
+        metadata: Dict[str, Any] = {
+            "strategy_type": strategy_type,
+            "reasons": reasons,
+            "key_levels": key_levels,
+            "risk_metrics": risk_metrics,
+            "gate1_passed": gate1_passed,
+            "volatility_stability": volatility_stability,
+            "double_top_confidence": double_top_conf,
+        }
+
+        if context_applied and market_context is not None:
+            if strategy_type == "pullback":
+                applied_context_adj = pullback_context_adj
+            elif strategy_type == "breakout":
+                applied_context_adj = breakout_context_adj - breakout_regime_penalty
+            else:
+                applied_context_adj = (
+                    float(sym_ctx.total_adjustment) if sym_ctx is not None else 0.0
+                )
+            sub_scores["market_context_adjustment"] = round(applied_context_adj, 4)
+            if sym_ctx is not None:
+                if sym_ctx.rs_percentile is not None:
+                    sub_scores["rs_score"] = round(float(sym_ctx.rs_percentile), 4)
+                if sym_ctx.sector_momentum_score is not None:
+                    sub_scores["sector_momentum_score"] = round(
+                        float(sym_ctx.sector_momentum_score), 4
+                    )
+                if sym_ctx.relative_valuation_score is not None:
+                    sub_scores["relative_valuation_score"] = round(
+                        float(sym_ctx.relative_valuation_score), 4
+                    )
+
+            ctx_as_of_norm = self._normalize_date(market_context.as_of_date)
+            metadata["market_regime"] = market_context.regime
+            metadata["market_breadth_ratio"] = market_context.breadth_ratio
+            metadata["breakout_threshold_delta"] = breakout_threshold_delta
+            metadata["market_context"] = {
+                "as_of_date": ctx_as_of_norm.isoformat() if ctx_as_of_norm else None,
+                "regime": market_context.regime,
+                "breadth_ratio": market_context.breadth_ratio,
+                "breakout_threshold_delta": breakout_threshold_delta,
+                "breakout_score_penalty": breakout_regime_penalty,
+                "benchmark_return_20d": market_context.benchmark.return_20d,
+                "benchmark_return_60d": market_context.benchmark.return_60d,
+                "sector_33": sym_ctx.sector_33 if sym_ctx else None,
+                "rs_percentile": sym_ctx.rs_percentile if sym_ctx else None,
+                "rs_adjustment": sym_ctx.rs_adjustment if sym_ctx else 0.0,
+                "sector_momentum_score": sym_ctx.sector_momentum_score if sym_ctx else None,
+                "sector_momentum_adjustment": (
+                    sym_ctx.sector_momentum_adjustment if sym_ctx else 0.0
+                ),
+                "relative_valuation_z": sym_ctx.relative_valuation_z if sym_ctx else None,
+                "relative_valuation_score": (
+                    sym_ctx.relative_valuation_score if sym_ctx else None
+                ),
+                "relative_valuation_adjustment": (
+                    sym_ctx.relative_valuation_adjustment if sym_ctx else 0.0
+                ),
+                "pullback_adjustment": pullback_context_adj,
+                "breakout_adjustment": breakout_context_adj,
+                "total_adjustment": applied_context_adj,
+            }
 
         return ScoreResultModel(
             symbol=feature_set.symbol,
@@ -440,15 +618,7 @@ class StrategyScoreCalculator(IScoreCalculator):
             reasons=reasons,
             key_levels=key_levels,
             risk_metrics=risk_metrics,
-            metadata={
-                "strategy_type": strategy_type,
-                "reasons": reasons,
-                "key_levels": key_levels,
-                "risk_metrics": risk_metrics,
-                "gate1_passed": gate1_passed,
-                "volatility_stability": volatility_stability,
-                "double_top_confidence": double_top_conf,
-            },
+            metadata=metadata,
         )
 
     def _decide_strategy_and_score(
@@ -459,9 +629,13 @@ class StrategyScoreCalculator(IScoreCalculator):
         breakout_score: float,
         p001: float,
         p002: float,
+        breakout_threshold_delta: float = 0.0,
     ) -> Tuple[str, float]:
         """第2関門の適格性判定に基づき、推奨戦略タイプと代表スコアを連動して決定する。"""
         base_ok = gate1_passed and not high_conf_double_top
+        effective_breakout_min_entry = self.config.min_entry_score + max(
+            0.0, breakout_threshold_delta
+        )
         pullback_eligible = (
             base_ok
             and (p001 >= self.config.min_pullback_setup_score)
@@ -470,7 +644,7 @@ class StrategyScoreCalculator(IScoreCalculator):
         breakout_eligible = (
             base_ok
             and (p002 >= self.config.min_breakout_setup_score)
-            and (breakout_score >= self.config.min_entry_score)
+            and (breakout_score >= effective_breakout_min_entry)
         )
 
         if pullback_eligible and breakout_eligible:
@@ -663,9 +837,12 @@ class StrategyScoreCalculator(IScoreCalculator):
         ratio = max(0.0, min(1.0, (100.0 - rsi) / (100.0 - ideal_max)))
         return ratio * 100.0
 
-    @staticmethod
-    def _clip_score(val: float) -> float:
-        return max(0.0, min(100.0, float(val)))
+    @classmethod
+    def _clip_score(cls, val: float) -> float:
+        num = cls._to_optional_float(val)
+        if num is None:
+            return 0.0
+        return max(0.0, min(100.0, num))
 
 
 # レジストリにスコア計算クラスを登録

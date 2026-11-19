@@ -1,9 +1,10 @@
 from datetime import date, datetime
+import math
 from typing import Any, Dict, List, Optional, Union
 from pydantic import BaseModel, Field
 
 from src.common.logger import get_logger
-from src.model.data_models import ScoreResultModel
+from src.model.data_models import MarketContextModel, ScoreResultModel
 
 logger = get_logger(__name__)
 
@@ -24,6 +25,7 @@ class ScreeningCriteria(BaseModel):
     max_double_top_confidence: Optional[float] = 70.0
     score_id: Optional[str] = "S002_StrategyScore"
     latest_only_per_symbol: bool = True
+    apply_market_regime_adjustment: bool = True
 
 
 class Screener:
@@ -58,10 +60,54 @@ class Screener:
                 seen_symbols.add(result.symbol)
         return selected
 
+    def _resolve_breakout_threshold_delta(
+        self,
+        result: ScoreResultModel,
+        metadata: Dict[str, Any],
+        market_context: Optional[MarketContextModel],
+    ) -> float:
+        """
+        ブレイクアウト戦略用の地合い悪化レジーム閾値引き上げ幅（単一ソース・非負）を解決する。
+        二重加算を防ぐため、market_context（アクティブかつ日付整合）がある場合はそちらのみを参照し、
+        未指定時のみ metadata["breakout_threshold_delta"] を参照する。
+        """
+        if result.strategy_type != "breakout":
+            return 0.0
+
+        if market_context is not None:
+            if not market_context.is_active:
+                return 0.0
+            res_date = self._normalize_date(result.date)
+            ctx_as_of = self._normalize_date(market_context.as_of_date)
+            sym_ctx = market_context.symbol_metrics.get(result.symbol)
+            if sym_ctx is not None:
+                sym_bar_dt = self._normalize_date(sym_ctx.bar_date)
+                if sym_bar_dt is not None:
+                    if sym_bar_dt != res_date:
+                        return 0.0
+                elif ctx_as_of != res_date:
+                    return 0.0
+            elif ctx_as_of != res_date:
+                return 0.0
+            raw_delta = market_context.breakout_threshold_delta
+        else:
+            raw_delta = metadata.get("breakout_threshold_delta", 0.0)
+
+        if raw_delta is None or isinstance(raw_delta, bool):
+            return 0.0
+        try:
+            delta = float(raw_delta)
+        except (TypeError, ValueError):
+            return 0.0
+        if not math.isfinite(delta):
+            return 0.0
+        return max(0.0, delta)
+
     def apply_screener(
         self,
         score_results: List[ScoreResultModel],
         criteria: Union[ScreeningCriteria, Dict[str, Any], None] = None,
+        market_context: Optional[MarketContextModel] = None,
     ) -> List[ScoreResultModel]:
         """
         指定された条件でスコア結果をフィルタリングし、合致する銘柄のリストを返す。
@@ -73,9 +119,14 @@ class Screener:
 
         if isinstance(criteria, dict):
             rule_map: Dict[str, Any] = criteria
+            if "apply_market_regime_adjustment" in rule_map:
+                apply_market_regime = bool(rule_map.get("apply_market_regime_adjustment"))
+            else:
+                apply_market_regime = market_context is not None
         else:
             cond = criteria or ScreeningCriteria()
             rule_map = cond.model_dump()
+            apply_market_regime = bool(rule_map.get("apply_market_regime_adjustment", True))
 
         # 1. score_id 指定時の一致チェック
         target_score_id = rule_map.get("score_id")
@@ -134,9 +185,17 @@ class Screener:
                 if result.strategy_type not in allowed_strategies:
                     continue
 
-            # 7. 総合スコア下限チェック
-            if min_total_score is not None and result.total_score < min_total_score:
-                continue
+            breakout_delta = (
+                self._resolve_breakout_threshold_delta(result, metadata, market_context)
+                if apply_market_regime
+                else 0.0
+            )
+
+            # 7. 総合スコア下限チェック（ブレイクアウトかつ地合い悪化時は閾値を動的に引き上げ）
+            if min_total_score is not None:
+                effective_min_total = float(min_total_score) + breakout_delta
+                if result.total_score < effective_min_total:
+                    continue
 
             # 8. 戦略別・ファンダメンタルサブスコア下限チェック
             if min_pullback_score is not None and result.strategy_type == "pullback":
@@ -146,7 +205,8 @@ class Screener:
 
             if min_breakout_score is not None and result.strategy_type == "breakout":
                 bo_val = sub_scores.get("breakout_strategy_score")
-                if bo_val is None or bo_val < min_breakout_score:
+                effective_min_breakout = float(min_breakout_score) + breakout_delta
+                if bo_val is None or bo_val < effective_min_breakout:
                     continue
 
             if min_fundamental_score is not None:
@@ -175,5 +235,8 @@ screener = Screener()
 def apply_screener(
     score_results: List[ScoreResultModel],
     criteria: Union[ScreeningCriteria, Dict[str, Any], None] = None,
+    market_context: Optional[MarketContextModel] = None,
 ) -> List[ScoreResultModel]:
-    return screener.apply_screener(score_results, criteria)
+    return screener.apply_screener(
+        score_results, criteria, market_context=market_context
+    )

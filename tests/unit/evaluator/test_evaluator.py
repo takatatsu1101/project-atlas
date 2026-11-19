@@ -680,6 +680,36 @@ class TestForwardReturnEvaluator(unittest.TestCase):
         self.assertEqual(item2.strategy_type, "breakout")
         self.assertAlmostEqual(item2.total_score, 72.5)
 
+    def test_compute_feature_quantiles_includes_market_context_subscores(self):
+        """sub_scores に含まれる MarketContext 由来指標が MC_* として分位評価される"""
+        evaluator = ForwardReturnEvaluator(collector=MagicMock())
+        as_of = date(2025, 6, 2)
+        returns = [10.0, 5.0, 2.0, -3.0, -8.0]
+        ohlcv_map = {
+            f"100{i}.T": _build_bars(f"100{i}.T", as_of, [1000.0, 1000.0, 1000.0 * (1.0 + r / 100.0)])
+            for i, r in enumerate(returns)
+        }
+        passed = []
+        for i in range(5):
+            cand = _build_candidate(f"100{i}.T", as_of, close_price=1000.0)
+            cand.sub_scores = {
+                "rs_score": 100.0 - i * 25.0,
+                "sector_momentum_score": 90.0 - i * 20.0,
+                "relative_valuation_score": 80.0 - i * 15.0,
+            }
+            passed.append(cand)
+
+        summary, _ = evaluator.evaluate_with_passed(
+            passed[:1], as_of_date=as_of, ohlcv_map=ohlcv_map, horizons=[2], passed_candidates=passed
+        )
+        for mc_id in ("MC_RS_Rank", "MC_SectorMomentum", "MC_RelativeValuation"):
+            self.assertIn(mc_id, summary.feature_quantile_summary)
+            row = summary.feature_quantile_summary[mc_id][2]
+            self.assertEqual(row.total_samples, 5)
+            self.assertAlmostEqual(row.top_avg_return_pct, 10.0)
+            self.assertAlmostEqual(row.bottom_avg_return_pct, -8.0)
+            self.assertAlmostEqual(row.spread_return_pct, 18.0)
+
 
 if __name__ == "__main__":
     unittest.main()
