@@ -1,22 +1,26 @@
 
 import unittest
-from datetime import date
-from typing import List
+from datetime import date, timedelta
 
 from src.feature_engine.features.moving_average.ma_alignment_score import MAAlignmentScore
-from src.model.data_models import OhlcvModel, IndicatorSetModel, FeatureResultModel
+from src.model.data_models import IndicatorSetModel, OhlcvModel
+
 
 class TestMAAlignmentScore(unittest.TestCase):
-
     def setUp(self):
         self.feature = MAAlignmentScore()
         self.symbol = "TEST"
-
-        # OHLCVデータはここでは直接利用しないが、FeatureResultModelに日付情報などを持たせるために必要
         self.ohlcv_data = [
-            OhlcvModel(symbol=self.symbol, date=date(2025, 1, 1), open=100, high=100, low=100, close=100, volume=0),
-            OhlcvModel(symbol=self.symbol, date=date(2025, 1, 2), open=100, high=100, low=100, close=100, volume=0),
-            OhlcvModel(symbol=self.symbol, date=date(2025, 1, 3), open=100, high=100, low=100, close=100, volume=0),
+            OhlcvModel(
+                symbol=self.symbol,
+                date=date(2025, 1, 1) + timedelta(days=i),
+                open=100,
+                high=100,
+                low=100,
+                close=100,
+                volume=0,
+            )
+            for i in range(25)
         ]
 
     def test_feature_properties(self):
@@ -24,65 +28,88 @@ class TestMAAlignmentScore(unittest.TestCase):
         self.assertEqual(self.feature.feature_name, "移動平均線の並び評価")
         self.assertEqual(self.feature.feature_category, "Moving Average")
 
-    def test_calculate_strong_uptrend(self):
-        # 短期 > 中期 > 長期
+    def test_perfect_order_with_positive_slopes(self):
+        """パーフェクトオーダー + 上向き傾き + 適正スプレッドで高スコア"""
         indicator_data = [
-            IndicatorSetModel(symbol=self.symbol, date=date(2025, 1, 1), indicators={"SMA5": 100, "SMA25": 90, "SMA75": 80}),
+            IndicatorSetModel(
+                symbol=self.symbol,
+                date=date(2025, 1, 1) + timedelta(days=i),
+                indicators={
+                    "SMA5": 110.0 + i * 0.8,
+                    "SMA25": 100.0 + i * 0.5,
+                    "SMA75": 95.0 + i * 0.3,
+                    "SMA200": 90.0 + i * 0.1,
+                },
+            )
+            for i in range(25)
         ]
         results = self.feature.calculate(self.ohlcv_data, indicator_data)
-        self.assertEqual(results[0].score, 100.0)
-        self.assertEqual(results[0].raw_value, 100.0)
+        last = results[-1]
+        self.assertGreater(last.score, 85.0)
+        self.assertIsNotNone(last.metadata["sma200"])
+        self.assertIsNotNone(last.metadata["sma25_slope_5d"])
+        self.assertIsNotNone(last.metadata["sma25_slope_20d"])
+        self.assertIsNotNone(last.metadata["sma75_slope_20d"])
 
-    def test_calculate_strong_downtrend(self):
-        # 短期 < 中期 < 長期
+    def test_strong_downtrend_with_negative_slopes(self):
+        """完全下降配列 + 下向き傾きで低スコア"""
         indicator_data = [
-            IndicatorSetModel(symbol=self.symbol, date=date(2025, 1, 1), indicators={"SMA5": 80, "SMA25": 90, "SMA75": 100}),
+            IndicatorSetModel(
+                symbol=self.symbol,
+                date=date(2025, 1, 1) + timedelta(days=i),
+                indicators={
+                    "SMA5": 90.0 - i * 0.8,
+                    "SMA25": 100.0 - i * 0.5,
+                    "SMA75": 110.0 - i * 0.3,
+                    "SMA200": 120.0 - i * 0.1,
+                },
+            )
+            for i in range(25)
         ]
         results = self.feature.calculate(self.ohlcv_data, indicator_data)
-        self.assertEqual(results[0].score, 0.0)
-        self.assertEqual(results[0].raw_value, 0.0)
+        self.assertLess(results[-1].score, 15.0)
 
-    def test_calculate_uptrend_bias(self):
-        # 短期 > 中期 かつ 短期 > 長期 だが、中期 <= 長期 の場合 (上昇基調)
-        indicator_data = [
-            IndicatorSetModel(symbol=self.symbol, date=date(2025, 1, 1), indicators={"SMA5": 95, "SMA25": 88, "SMA75": 90}),
+    def test_slope_continuity_and_spread_attenuation(self):
+        """傾きが大きいほど高く、スプレッド過拡散(+25%超)は適正帯より減衰する"""
+        # 適正スプレッド (+6%)
+        healthy = [
+            IndicatorSetModel(
+                symbol=self.symbol,
+                date=date(2025, 1, 1),
+                indicators={"SMA5": 110.0, "SMA25": 106.0, "SMA75": 100.0, "SMA200": 90.0},
+            )
         ]
-        results = self.feature.calculate(self.ohlcv_data, indicator_data)
-        self.assertEqual(results[0].score, 75.0)
-        self.assertEqual(results[0].raw_value, 75.0)
+        # 過拡散スプレッド (+35%)
+        over_spread = [
+            IndicatorSetModel(
+                symbol=self.symbol,
+                date=date(2025, 1, 1),
+                indicators={"SMA5": 140.0, "SMA25": 135.0, "SMA75": 100.0, "SMA200": 90.0},
+            )
+        ]
+        res_healthy = self.feature.calculate(self.ohlcv_data[:1], healthy)[0]
+        res_over = self.feature.calculate(self.ohlcv_data[:1], over_spread)[0]
+        self.assertGreater(res_healthy.score, res_over.score)
+        # i < 5 では傾きは None（中立点フォールバック）
+        self.assertIsNone(res_healthy.metadata["sma25_slope_5d"])
 
-    def test_calculate_downtrend_bias(self):
-        # 短期 < 中期, 長期との関係が複雑な場合 (下降基調)
-        indicator_data = [
-            IndicatorSetModel(symbol=self.symbol, date=date(2025, 1, 1), indicators={"SMA5": 85, "SMA25": 90, "SMA75": 88}), # SMA5 < SMA25 < SMA75 ではないが下降基調
+    def test_missing_sma200_and_missing_core_sma(self):
+        """SMA200欠損時は3本で評価し、必須SMA欠損時は50.0"""
+        no_200 = [
+            IndicatorSetModel(
+                symbol=self.symbol,
+                date=date(2025, 1, 1),
+                indicators={"SMA5": 110.0, "SMA25": 105.0, "SMA75": 100.0},
+            )
         ]
-        results = self.feature.calculate(self.ohlcv_data, indicator_data)
-        self.assertEqual(results[0].score, 25.0)
-        self.assertEqual(results[0].raw_value, 25.0)
+        res_no_200 = self.feature.calculate(self.ohlcv_data[:1], no_200)[0]
+        self.assertGreater(res_no_200.score, 65.0)
+        self.assertIsNone(res_no_200.metadata["sma200"])
 
-    def test_calculate_neutral_complex_1(self):
-        # 短期 > 中期, 中期 < 長期 (レンジ)
-        indicator_data = [
-            IndicatorSetModel(symbol=self.symbol, date=date(2025, 1, 1), indicators={"SMA5": 90, "SMA25": 85, "SMA75": 95}), # 短期 > 中期, 中期 < 長期
+        missing = [
+            IndicatorSetModel(symbol=self.symbol, date=date(2025, 1, 1), indicators={"SMA5": 100}),
         ]
-        results = self.feature.calculate(self.ohlcv_data, indicator_data)
-        self.assertEqual(results[0].score, 50.0)
-        self.assertEqual(results[0].raw_value, 50.0)
-
-    def test_calculate_neutral_complex_2(self):
-        # 短期 < 中期, 中期 > 長期 (レンジ)
-        indicator_data = [
-            IndicatorSetModel(symbol=self.symbol, date=date(2025, 1, 1), indicators={"SMA5": 90, "SMA25": 95, "SMA75": 85}), # 短期 < 中期, 中期 > 長期
-        ]
-        results = self.feature.calculate(self.ohlcv_data, indicator_data)
-        self.assertEqual(results[0].score, 50.0)
-        self.assertEqual(results[0].raw_value, 50.0)
-
-    def test_calculate_missing_sma_data(self):
-        indicator_data = [
-            IndicatorSetModel(symbol=self.symbol, date=date(2025, 1, 1), indicators={"SMA5": 100}), # SMA25, SMA75がない
-        ]
-        results = self.feature.calculate(self.ohlcv_data, indicator_data)
+        results = self.feature.calculate(self.ohlcv_data[:1], missing)
         self.assertEqual(results[0].score, 50.0)
 
     def test_calculate_empty_indicator_data(self):
@@ -97,6 +124,7 @@ class TestMAAlignmentScore(unittest.TestCase):
         self.assertEqual(self.feature._normalize_score(50, 50, 50), 50.0)
         self.assertEqual(self.feature._normalize_score(-10, 0, 100), 0.0)
         self.assertEqual(self.feature._normalize_score(110, 0, 100), 100.0)
+
 
 if __name__ == '__main__':
     unittest.main()

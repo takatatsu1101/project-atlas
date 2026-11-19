@@ -148,18 +148,38 @@ class TestStrategyScoreCalculator(unittest.TestCase):
         self.assertEqual(res.strategy_type, "watch")
 
     def test_extreme_volatility_penalty(self):
+        # 新R001は高いほど安定・低リスクのため、低スコア(<=10.0)で異常過熱ペナルティが発動する
         fs = self._build_feature_set(
             {
                 "M001_MAAlignmentScore": 80.0,
                 "T001_TrendStrengthScore": 80.0,
                 "P001_PullbackScore": 80.0,
                 "P002_BreakoutScore": 80.0,
-                "R001_VolatilityScore": 95.0,
+                "R001_VolatilityScore": 8.0,
             }
         )
         res = self.calculator.calculate([fs], [])[0]
         self.assertAlmostEqual(res.sub_scores["penalty_score"], 10.0)
-        self.assertAlmostEqual(res.metadata["volatility_stability"], 32.5)
+        self.assertAlmostEqual(res.metadata["volatility_stability"], 8.0)
+        self.assertTrue(any("異常ボラティリティ" in r for r in res.reasons))
+
+    def test_extreme_volatility_penalty_by_volatility_ratio(self):
+        # R001スコアが中程度でも volatility_ratio >= 2.0 なら異常過熱ペナルティが発動する
+        fs = self._build_feature_set(
+            {
+                "M001_MAAlignmentScore": 80.0,
+                "T001_TrendStrengthScore": 80.0,
+                "P001_PullbackScore": 80.0,
+                "P002_BreakoutScore": 80.0,
+                "R001_VolatilityScore": 60.0,
+            },
+            metadata_map={
+                "R001_VolatilityScore": {"volatility_ratio": 2.2},
+            },
+        )
+        res = self.calculator.calculate([fs], [])[0]
+        self.assertAlmostEqual(res.sub_scores["penalty_score"], 10.0)
+        self.assertAlmostEqual(res.metadata["volatility_stability"], 60.0)
         self.assertTrue(any("異常ボラティリティ" in r for r in res.reasons))
 
     def test_pullback_strategy_dominant_with_bonuses(self):
@@ -171,7 +191,7 @@ class TestStrategyScoreCalculator(unittest.TestCase):
                 "P002_BreakoutScore": 40.0,
                 "O001_MomentumScore": 70.0,
                 "V001_VolumeScore": 50.0,
-                "R001_VolatilityScore": 50.0,  # vol_stability = 100.0
+                "R001_VolatilityScore": 50.0,  # vol_stability = 50.0
                 "F001_ProfitabilityScore": 80.0,
                 "F002_GrowthScore": 80.0,
             }
@@ -184,9 +204,9 @@ class TestStrategyScoreCalculator(unittest.TestCase):
         )
         res = self.calculator.calculate([fs], [ps])[0]
         self.assertEqual(res.strategy_type, "pullback")
-        self.assertAlmostEqual(res.sub_scores["pullback_strategy_score"], 96.75)
+        self.assertAlmostEqual(res.sub_scores["pullback_strategy_score"], 89.9)
         self.assertAlmostEqual(res.sub_scores["breakout_strategy_score"], 55.5)
-        self.assertAlmostEqual(res.total_score, 96.75)
+        self.assertAlmostEqual(res.total_score, 89.9)
 
     def test_breakout_strategy_dominant(self):
         fs = self._build_feature_set(
@@ -204,7 +224,7 @@ class TestStrategyScoreCalculator(unittest.TestCase):
         res = self.calculator.calculate([fs], [])[0]
         self.assertEqual(res.strategy_type, "breakout")
         self.assertAlmostEqual(res.sub_scores["breakout_strategy_score"], 87.5)
-        self.assertAlmostEqual(res.sub_scores["pullback_strategy_score"], 65.0)
+        self.assertAlmostEqual(res.sub_scores["pullback_strategy_score"], 61.3)
         self.assertAlmostEqual(res.total_score, 87.5)
 
     def test_missing_fundamentals_neutral_50(self):
@@ -404,6 +424,233 @@ class TestStrategyScoreCalculator(unittest.TestCase):
         self.assertEqual(res.strategy_type, "watch")
         self.assertLessEqual(res.total_score, self.calculator.config.watch_score_cap)
         self.assertTrue(any("主軸セットアップ条件" in r for r in res.reasons))
+
+    def test_strategy_specific_rsi_bell_and_overheat_penalty(self):
+        base_scores = {
+            "M001_MAAlignmentScore": 80.0,
+            "T001_TrendStrengthScore": 80.0,
+            "P001_PullbackScore": 75.0,
+            "P002_BreakoutScore": 75.0,
+            "O001_MomentumScore": 60.0,
+            "V001_VolumeScore": 70.0,
+            "R001_VolatilityScore": 60.0,
+        }
+        # RSI14=48 (押し目理想帯 40〜60 内、ブレイク理想帯 55〜75 未満)
+        fs_pullback_rsi = self._build_feature_set(
+            base_scores,
+            metadata_map={"O001_MomentumScore": {"rsi14": 48.0}},
+        )
+        res_pb = self.calculator.calculate([fs_pullback_rsi], [])[0]
+
+        # RSI14=70 (ブレイク理想帯 55〜75 内、押し目理想帯超え)
+        fs_breakout_rsi = self._build_feature_set(
+            base_scores,
+            metadata_map={"O001_MomentumScore": {"rsi14": 70.0}},
+        )
+        res_bo = self.calculator.calculate([fs_breakout_rsi], [])[0]
+
+        self.assertGreater(
+            res_pb.sub_scores["pullback_strategy_score"],
+            res_bo.sub_scores["pullback_strategy_score"],
+        )
+        self.assertGreater(
+            res_bo.sub_scores["breakout_strategy_score"],
+            res_pb.sub_scores["breakout_strategy_score"],
+        )
+
+        # indicator_set フォールバック＋RSI14 > 80 過熱減点
+        fs_no_meta_rsi = self._build_feature_set(base_scores)
+        ind_overheat = IndicatorSetModel(
+            symbol=self.symbol,
+            date=self.target_date,
+            indicators={"RSI14": 85.0},
+        )
+        res_overheat = self.calculator.calculate(
+            [fs_no_meta_rsi], [], indicator_sets=[ind_overheat]
+        )[0]
+        self.assertAlmostEqual(
+            res_overheat.sub_scores["penalty_score"],
+            self.calculator.config.rsi_overheat_penalty,
+        )
+        self.assertTrue(any("RSI過熱" in r for r in res_overheat.reasons))
+
+    def test_short_rsi_rebound_bonus(self):
+        base_scores = {
+            "M001_MAAlignmentScore": 80.0,
+            "T001_TrendStrengthScore": 80.0,
+            "P001_PullbackScore": 75.0,
+            "P002_BreakoutScore": 75.0,
+            "O001_MomentumScore": 65.0,
+            "V001_VolumeScore": 65.0,
+            "R001_VolatilityScore": 60.0,
+        }
+        fs_no_rebound = self._build_feature_set(
+            base_scores,
+            metadata_map={"O001_MomentumScore": {"prev_short_rsi": 40.0, "short_rsi": 50.0}},
+        )
+        fs_rebound = self._build_feature_set(
+            base_scores,
+            metadata_map={"O001_MomentumScore": {"prev_short_rsi": 30.0, "short_rsi": 42.0}},
+        )
+        res_base = self.calculator.calculate([fs_no_rebound], [])[0]
+        res_reb = self.calculator.calculate([fs_rebound], [])[0]
+
+        self.assertAlmostEqual(
+            res_reb.sub_scores["pullback_strategy_score"] - res_base.sub_scores["pullback_strategy_score"],
+            self.calculator.config.short_rsi_rebound_bonus,
+        )
+        self.assertAlmostEqual(
+            res_reb.sub_scores["breakout_strategy_score"],
+            res_base.sub_scores["breakout_strategy_score"],
+        )
+        self.assertTrue(any("短期RSI反転" in r for r in res_reb.reasons))
+
+    def test_pullback_dryup_rebound_bonus(self):
+        base_scores = {
+            "M001_MAAlignmentScore": 80.0,
+            "T001_TrendStrengthScore": 80.0,
+            "P001_PullbackScore": 75.0,
+            "P002_BreakoutScore": 75.0,
+            "O001_MomentumScore": 65.0,
+            "V001_VolumeScore": 65.0,
+            "R001_VolatilityScore": 60.0,
+        }
+        fs_normal = self._build_feature_set(
+            base_scores,
+            metadata_map={"V001_VolumeScore": {"pullback_dryup_rebound": False}},
+        )
+        fs_dryup = self._build_feature_set(
+            base_scores,
+            metadata_map={"V001_VolumeScore": {"pullback_dryup_rebound": True}},
+        )
+        res_normal = self.calculator.calculate([fs_normal], [])[0]
+        res_dryup = self.calculator.calculate([fs_dryup], [])[0]
+
+        self.assertAlmostEqual(
+            res_dryup.sub_scores["pullback_strategy_score"] - res_normal.sub_scores["pullback_strategy_score"],
+            self.calculator.config.pullback_dryup_rebound_bonus,
+        )
+        self.assertAlmostEqual(
+            res_dryup.sub_scores["breakout_strategy_score"],
+            res_normal.sub_scores["breakout_strategy_score"],
+        )
+        self.assertTrue(any("押し目売り枯れ" in r for r in res_dryup.reasons))
+
+    def test_sma75_dev_overheat_penalty(self):
+        base_scores = {
+            "M001_MAAlignmentScore": 80.0,
+            "T001_TrendStrengthScore": 80.0,
+            "P001_PullbackScore": 75.0,
+            "P002_BreakoutScore": 75.0,
+            "O001_MomentumScore": 70.0,
+            "V001_VolumeScore": 70.0,
+            "R001_VolatilityScore": 60.0,
+        }
+        # 乖離率 (1150 - 1000)/1000 = 15% <= 25% (ペナルティなし)
+        fs_ok = self._build_feature_set(
+            base_scores,
+            metadata_map={"P001_PullbackScore": {"close": 1150.0, "sma75": 1000.0}},
+        )
+        # 乖離率 (1300 - 1000)/1000 = 30% > 25% (ペナルティあり)
+        fs_overheat = self._build_feature_set(
+            base_scores,
+            metadata_map={"P001_PullbackScore": {"close": 1300.0, "sma75": 1000.0}},
+        )
+        res_ok = self.calculator.calculate([fs_ok], [])[0]
+        res_oh = self.calculator.calculate([fs_overheat], [])[0]
+
+        expected_pen = self.calculator.config.sma75_dev_overheat_penalty
+        self.assertAlmostEqual(res_oh.sub_scores["penalty_score"], expected_pen)
+        self.assertAlmostEqual(
+            res_ok.sub_scores["pullback_strategy_score"] - res_oh.sub_scores["pullback_strategy_score"],
+            expected_pen,
+        )
+        self.assertAlmostEqual(
+            res_ok.sub_scores["breakout_strategy_score"] - res_oh.sub_scores["breakout_strategy_score"],
+            expected_pen,
+        )
+        self.assertTrue(any("75日線乖離過熱" in r for r in res_oh.reasons))
+
+    def test_gap_up_overheat_penalty(self):
+        base_scores = {
+            "M001_MAAlignmentScore": 80.0,
+            "T001_TrendStrengthScore": 80.0,
+            "P001_PullbackScore": 75.0,
+            "P002_BreakoutScore": 80.0,
+            "O001_MomentumScore": 70.0,
+            "V001_VolumeScore": 75.0,
+            "R001_VolatilityScore": 60.0,
+        }
+        fs_normal = self._build_feature_set(
+            base_scores,
+            metadata_map={"P002_BreakoutScore": {"gap_pct": 0.03}},
+        )
+        fs_gap = self._build_feature_set(
+            base_scores,
+            metadata_map={"P002_BreakoutScore": {"gap_pct": 0.09}},
+        )
+        res_normal = self.calculator.calculate([fs_normal], [])[0]
+        res_gap = self.calculator.calculate([fs_gap], [])[0]
+
+        self.assertAlmostEqual(
+            res_normal.sub_scores["breakout_strategy_score"] - res_gap.sub_scores["breakout_strategy_score"],
+            self.calculator.config.gap_up_overheat_penalty,
+        )
+        # 押し目戦略には影響しない
+        self.assertAlmostEqual(
+            res_gap.sub_scores["pullback_strategy_score"],
+            res_normal.sub_scores["pullback_strategy_score"],
+        )
+        self.assertTrue(any("大幅ギャップアップ過熱" in r for r in res_gap.reasons))
+
+    def test_nan_and_inf_guards(self):
+        # _calc_rsi_bell_score に NaN/inf を渡しても満点にならず中立 50.0 を返す
+        self.assertEqual(self.calculator._calc_rsi_bell_score(float("nan"), 40.0, 60.0), 50.0)
+        self.assertEqual(self.calculator._calc_rsi_bell_score(float("inf"), 40.0, 60.0), 50.0)
+
+        # metadata に NaN/inf が混入しても None として安全にフォールバックし例外・不正満点にならない
+        fs_nan = self._build_feature_set(
+            {
+                "M001_MAAlignmentScore": 80.0,
+                "T001_TrendStrengthScore": 80.0,
+                "P001_PullbackScore": 75.0,
+                "P002_BreakoutScore": 75.0,
+                "O001_MomentumScore": 60.0,
+                "V001_VolumeScore": 70.0,
+                "R001_VolatilityScore": 60.0,
+            },
+            metadata_map={
+                "O001_MomentumScore": {
+                    "rsi14": float("nan"),
+                    "short_rsi": float("inf"),
+                    "prev_short_rsi": 20.0,
+                },
+                "P002_BreakoutScore": {"gap_pct": float("nan")},
+                "R001_VolatilityScore": {"volatility_ratio": float("inf")},
+            },
+        )
+        fs_plain = self._build_feature_set(
+            {
+                "M001_MAAlignmentScore": 80.0,
+                "T001_TrendStrengthScore": 80.0,
+                "P001_PullbackScore": 75.0,
+                "P002_BreakoutScore": 75.0,
+                "O001_MomentumScore": 60.0,
+                "V001_VolumeScore": 70.0,
+                "R001_VolatilityScore": 60.0,
+            }
+        )
+        res_nan = self.calculator.calculate([fs_nan], [])[0]
+        res_plain = self.calculator.calculate([fs_plain], [])[0]
+        self.assertAlmostEqual(
+            res_nan.sub_scores["pullback_strategy_score"],
+            res_plain.sub_scores["pullback_strategy_score"],
+        )
+        self.assertAlmostEqual(
+            res_nan.sub_scores["breakout_strategy_score"],
+            res_plain.sub_scores["breakout_strategy_score"],
+        )
+        self.assertAlmostEqual(res_nan.sub_scores["penalty_score"], 0.0)
 
 
 if __name__ == "__main__":

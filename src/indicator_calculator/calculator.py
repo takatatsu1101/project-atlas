@@ -212,7 +212,15 @@ class IndicatorCalculator:
         )
         expected_dates = [o.date.isoformat()[:10] for o in ohlcv_data]
 
-        # キャッシュのチェック（空でないリスト・長さ一致・全日付列完全一致・最新要素に LOWEST_LOW_20 が含まれる場合のみ利用）
+        # キャッシュのチェック（空でないリスト・長さ一致・全日付列完全一致・最新要素に必須指標キーが含まれる場合のみ利用）
+        required_cache_keys = (
+            "LOWEST_LOW_20",
+            "RSI5",
+            "ATR5",
+            "ATR20",
+            "HIGHEST_HIGH_60",
+            "HIGHEST_HIGH_250",
+        )
         if use_cache:
             cached_data = self.storage.load_json(cache_path)
             if (
@@ -223,12 +231,12 @@ class IndicatorCalculator:
                 and all(isinstance(item, dict) for item in cached_data)
                 and [str(item.get("date", ""))[:10] for item in cached_data] == expected_dates
                 and isinstance(cached_data[-1].get("indicators"), dict)
-                and "LOWEST_LOW_20" in cached_data[-1].get("indicators", {})
+                and all(k in cached_data[-1].get("indicators", {}) for k in required_cache_keys)
             ):
                 logger.debug(f"{symbol} のテクニカル指標をキャッシュからロードしました。")
                 return [IndicatorSetModel(**item) for item in cached_data]
 
-        # high, low, close, volume を1回だけ抽出し全9指標を一括ベクトル計算する
+        # high, low, close, volume を1回だけ抽出し全指標を一括ベクトル計算する
         high_series = pd.Series([o.high for o in ohlcv_data], dtype="float64")
         low_series = pd.Series([o.low for o in ohlcv_data], dtype="float64")
         close_series = pd.Series([o.close for o in ohlcv_data], dtype="float64")
@@ -237,11 +245,17 @@ class IndicatorCalculator:
         sma_5 = self._compute_sma(close_series, 5)
         sma_25 = self._compute_sma(close_series, 25)
         sma_75 = self._compute_sma(close_series, 75)
+        sma_200 = self._compute_sma(close_series, 200)
+        rsi_5 = self._compute_rsi(close_series, 5)
         rsi_14 = self._compute_rsi(close_series, 14)
         macd_data = self._compute_macd(close_series)
         highest_high_20 = self._compute_highest_high(high_series, 20)
+        highest_high_60 = self._compute_highest_high(high_series, 60)
+        highest_high_250 = self._compute_highest_high(high_series, 250)
         lowest_low_20 = self._compute_lowest_low(low_series, 20)
+        atr_5 = self._compute_atr(high_series, low_series, close_series, 5)
         atr_14 = self._compute_atr(high_series, low_series, close_series, 14)
+        atr_20 = self._compute_atr(high_series, low_series, close_series, 20)
         volume_ratio = self._compute_volume_ratio(volume_series, 20)
 
         indicator_sets: List[IndicatorSetModel] = []
@@ -250,22 +264,34 @@ class IndicatorCalculator:
             s5,
             s25,
             s75,
+            s200,
+            r5,
             r14,
             macd_item,
             hh20,
+            hh60,
+            hh250,
             ll20,
+            a5,
             a14,
+            a20,
             vr,
         ) in zip(
             ohlcv_data,
             sma_5,
             sma_25,
             sma_75,
+            sma_200,
+            rsi_5,
             rsi_14,
             macd_data,
             highest_high_20,
+            highest_high_60,
+            highest_high_250,
             lowest_low_20,
+            atr_5,
             atr_14,
+            atr_20,
             volume_ratio,
         ):
             indicators: Dict[str, object] = {}
@@ -275,15 +301,27 @@ class IndicatorCalculator:
                 indicators["SMA25"] = s25
             if not math.isnan(s75):
                 indicators["SMA75"] = s75
+            if not math.isnan(s200):
+                indicators["SMA200"] = s200
+            if not math.isnan(r5):
+                indicators["RSI5"] = r5
             if not math.isnan(r14):
                 indicators["RSI14"] = r14
             indicators["MACD"] = macd_item
             if not math.isnan(hh20):
                 indicators["HIGHEST_HIGH_20"] = hh20
+            if not math.isnan(hh60):
+                indicators["HIGHEST_HIGH_60"] = hh60
+            if not math.isnan(hh250):
+                indicators["HIGHEST_HIGH_250"] = hh250
             if not math.isnan(ll20):
                 indicators["LOWEST_LOW_20"] = ll20
+            if not math.isnan(a5):
+                indicators["ATR5"] = a5
             if not math.isnan(a14):
                 indicators["ATR14"] = a14
+            if not math.isnan(a20):
+                indicators["ATR20"] = a20
             if vr is not None:
                 indicators["VOLUME_RATIO"] = vr
 

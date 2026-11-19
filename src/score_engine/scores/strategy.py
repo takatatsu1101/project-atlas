@@ -1,3 +1,4 @@
+import math
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Tuple
 from pydantic import BaseModel
@@ -44,6 +45,20 @@ class StrategyScoreConfig(BaseModel):
     double_top_high_confidence_cap: float = 40.0
     extreme_volatility_threshold: float = 90.0
     extreme_volatility_penalty: float = 10.0
+    extreme_volatility_ratio_threshold: float = 2.0
+    sma75_dev_overheat_threshold: float = 0.25
+    sma75_dev_overheat_penalty: float = 12.0
+    gap_up_overheat_threshold: float = 0.07
+    gap_up_overheat_penalty: float = 10.0
+
+    # 戦略別 RSI ベル型評価・短期反転設定
+    pullback_rsi_ideal_min: float = 40.0
+    pullback_rsi_ideal_max: float = 60.0
+    breakout_rsi_ideal_min: float = 55.0
+    breakout_rsi_ideal_max: float = 75.0
+    rsi_overheat_threshold: float = 80.0
+    rsi_overheat_penalty: float = 8.0
+    short_rsi_rebound_bonus: float = 5.0
 
     # 第2関門・戦略判定
     min_pullback_setup_score: float = 55.0
@@ -52,15 +67,17 @@ class StrategyScoreConfig(BaseModel):
     watch_score_cap: float = 59.0
 
     # 押し目買い戦略の重み・裏付け加点
-    pullback_weight_p001: float = 0.40
-    pullback_weight_trend_env: float = 0.25
+    pullback_weight_p001: float = 0.38
+    pullback_weight_trend_env: float = 0.22
     pullback_weight_o001: float = 0.15
     pullback_weight_fundamental: float = 0.10
     pullback_weight_volatility_stability: float = 0.10
+    pullback_weight_v001: float = 0.05
     double_bottom_bonus_factor: float = 0.10
     double_bottom_bonus_max: float = 10.0
     hammer_bonus_factor: float = 0.05
     hammer_bonus_max: float = 5.0
+    pullback_dryup_rebound_bonus: float = 5.0
 
     # ブレイクアウト戦略の重み
     breakout_weight_p002: float = 0.40
@@ -209,15 +226,93 @@ class StrategyScoreCalculator(IScoreCalculator):
                     f"第1関門未達: 終値({close_price:.2f})が75日移動平均線({sma75:.2f})を下回っています。"
                 )
 
-        # ボラティリティ安定性補助と異常過熱ペナルティ
-        volatility_stability = max(
-            0.0, min(100.0, 100.0 - max(0.0, vol_score - 50.0) * 1.5)
-        )
+        # ボラティリティ安定性（新R001: 高いほど低リスク・VCP収縮良好）と異常過熱ペナルティ
+        volatility_stability = self._clip_score(vol_score)
         penalty_score = 0.0
-        if vol_score >= self.config.extreme_volatility_threshold:
+        volatility_ratio = risk_metrics.get("volatility_ratio")
+        low_vol_score_threshold = 100.0 - self.config.extreme_volatility_threshold
+        is_extreme_volatility = (
+            volatility_ratio is not None
+            and volatility_ratio >= self.config.extreme_volatility_ratio_threshold
+        ) or (vol_score <= low_vol_score_threshold)
+        if is_extreme_volatility:
             penalty_score += self.config.extreme_volatility_penalty
+            ratio_info = f", ratio={volatility_ratio:.2f}" if volatility_ratio is not None else ""
             reasons.append(
-                f"異常ボラティリティ過熱(R001={vol_score:.1f})のため {self.config.extreme_volatility_penalty:.1f} 点を減点しました。"
+                f"異常ボラティリティ過熱(R001={vol_score:.1f}{ratio_info})のため {self.config.extreme_volatility_penalty:.1f} 点を減点しました。"
+            )
+
+        # 戦略別 RSI ベル型評価・RSI過熱減点・短期反転加点
+        rsi14 = self._get_metadata_float(feature_map, ("O001_MomentumScore",), "rsi14")
+        if rsi14 is None and indicator_set is not None:
+            rsi14 = self._to_optional_float(indicator_set.indicators.get("RSI14"))
+
+        if rsi14 is not None:
+            pullback_bell_rsi = self._calc_rsi_bell_score(
+                rsi14,
+                self.config.pullback_rsi_ideal_min,
+                self.config.pullback_rsi_ideal_max,
+            )
+            breakout_bell_rsi = self._calc_rsi_bell_score(
+                rsi14,
+                self.config.breakout_rsi_ideal_min,
+                self.config.breakout_rsi_ideal_max,
+            )
+            pullback_momentum = 0.5 * o001 + 0.5 * pullback_bell_rsi
+            breakout_momentum = 0.5 * o001 + 0.5 * breakout_bell_rsi
+
+            if rsi14 > self.config.rsi_overheat_threshold:
+                penalty_score += self.config.rsi_overheat_penalty
+                reasons.append(
+                    f"RSI過熱(RSI14={rsi14:.1f} > {self.config.rsi_overheat_threshold:.1f})のため {self.config.rsi_overheat_penalty:.1f} 点を減点しました。"
+                )
+        else:
+            pullback_momentum = o001
+            breakout_momentum = o001
+
+        short_rsi = self._get_metadata_float(feature_map, ("O001_MomentumScore",), "short_rsi")
+        prev_short_rsi = self._get_metadata_float(feature_map, ("O001_MomentumScore",), "prev_short_rsi")
+        short_rsi_rebound_bonus = 0.0
+        if (
+            short_rsi is not None
+            and prev_short_rsi is not None
+            and prev_short_rsi <= 35.0
+            and short_rsi > prev_short_rsi
+        ):
+            short_rsi_rebound_bonus = self.config.short_rsi_rebound_bonus
+            reasons.append(
+                f"短期RSI反転(RSI5: {prev_short_rsi:.1f}→{short_rsi:.1f})により押し目買いへ +{short_rsi_rebound_bonus:.1f} 点加点しました。"
+            )
+
+        # 押し目売り枯れ→反発出来高増の加点
+        pullback_dryup_rebound_bonus = 0.0
+        v001_fr = feature_map.get("V001_VolumeScore")
+        if (
+            v001_fr is not None
+            and isinstance(v001_fr.metadata, dict)
+            and v001_fr.metadata.get("pullback_dryup_rebound") is True
+        ):
+            pullback_dryup_rebound_bonus = self.config.pullback_dryup_rebound_bonus
+            reasons.append(
+                f"押し目売り枯れ後の反発出来高増により押し目買いへ +{pullback_dryup_rebound_bonus:.1f} 点加点しました。"
+            )
+
+        # 75日移動平均線からの過熱乖離ペナルティ
+        if close_price is not None and sma75 is not None and sma75 > 0:
+            sma75_dev = (close_price - sma75) / sma75
+            if sma75_dev > self.config.sma75_dev_overheat_threshold:
+                penalty_score += self.config.sma75_dev_overheat_penalty
+                reasons.append(
+                    f"75日線乖離過熱({sma75_dev * 100:.1f}% > {self.config.sma75_dev_overheat_threshold * 100:.1f}%)のため {self.config.sma75_dev_overheat_penalty:.1f} 点を減点しました。"
+                )
+
+        # 大幅ギャップアップ過熱ペナルティ（ブレイクアウト戦略専用）
+        gap_pct = self._get_metadata_float(feature_map, ("P002_BreakoutScore",), "gap_pct")
+        gap_up_penalty = 0.0
+        if gap_pct is not None and gap_pct > self.config.gap_up_overheat_threshold:
+            gap_up_penalty = self.config.gap_up_overheat_penalty
+            reasons.append(
+                f"大幅ギャップアップ過熱(gap={gap_pct * 100:.1f}% > {self.config.gap_up_overheat_threshold * 100:.1f}%)のためブレイクアウト戦略から {gap_up_penalty:.1f} 点を減点しました。"
             )
 
         # パターン確認：押し目買い裏付け加点＆ダブルトップ弱気ペナルティ
@@ -264,20 +359,24 @@ class StrategyScoreCalculator(IScoreCalculator):
         raw_pullback = (
             p001 * self.config.pullback_weight_p001
             + trend_env_score * self.config.pullback_weight_trend_env
-            + o001 * self.config.pullback_weight_o001
+            + pullback_momentum * self.config.pullback_weight_o001
             + fundamental_score * self.config.pullback_weight_fundamental
             + volatility_stability * self.config.pullback_weight_volatility_stability
+            + v001 * self.config.pullback_weight_v001
             + double_bottom_bonus
             + hammer_bonus
+            + short_rsi_rebound_bonus
+            + pullback_dryup_rebound_bonus
             - penalty_score
         )
         raw_breakout = (
             p002 * self.config.breakout_weight_p002
             + v001 * self.config.breakout_weight_v001
-            + o001 * self.config.breakout_weight_o001
+            + breakout_momentum * self.config.breakout_weight_o001
             + trend_env_score * self.config.breakout_weight_trend_env
             + fundamental_score * self.config.breakout_weight_fundamental
             - penalty_score
+            - gap_up_penalty
         )
 
         # 第1関門未達・高信頼度ダブルトップによる上限キャップ適用
@@ -534,15 +633,34 @@ class StrategyScoreCalculator(IScoreCalculator):
         if val is None or isinstance(val, bool):
             return None
         try:
-            return float(val)
+            num = float(val)
         except (TypeError, ValueError):
             return None
+        return num if math.isfinite(num) else None
 
     @staticmethod
     def _calc_deviation_pct(close: Optional[float], level: Optional[float]) -> Optional[float]:
         if close is None or level is None or level == 0:
             return None
         return ((close - level) / level) * 100.0
+
+    @staticmethod
+    def _calc_rsi_bell_score(rsi: float, ideal_min: float, ideal_max: float) -> float:
+        """RSI を理想帯 [ideal_min, ideal_max] が 100 点となるベル型スコア（0〜100）へ変換する。"""
+        if not math.isfinite(rsi):
+            return 50.0
+        if ideal_min <= rsi <= ideal_max:
+            return 100.0
+        if rsi < ideal_min:
+            if ideal_min <= 0.0:
+                return 100.0
+            ratio = max(0.0, min(1.0, rsi / ideal_min))
+            return ratio * 100.0
+        # rsi > ideal_max
+        if ideal_max >= 100.0:
+            return 100.0
+        ratio = max(0.0, min(1.0, (100.0 - rsi) / (100.0 - ideal_max)))
+        return ratio * 100.0
 
     @staticmethod
     def _clip_score(val: float) -> float:

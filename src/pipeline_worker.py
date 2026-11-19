@@ -420,7 +420,7 @@ def evaluate_symbol_across_dates(
             }
 
         t_eval = time.perf_counter()
-        # 2. 全期間ベクトルテクニカル指標を1回だけ算出（全9指標は因果的）
+        # 2. 全期間ベクトルテクニカル指標を1回だけ算出（全15指標は因果的）
         batch_cache_suffix = (
             f"batch_{global_start.isoformat()}_{global_eval_end.isoformat()}"
         )
