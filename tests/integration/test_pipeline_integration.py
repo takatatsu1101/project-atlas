@@ -1284,7 +1284,8 @@ class TestPipelineIntegration(unittest.TestCase):
             bars: list[OhlcvModel] = []
             for i in range(160):
                 dt = start_dt + timedelta(days=i)
-                base_close = 1000.0 + i * 3.0
+                # 単調上昇のみだと RSI14=100 の過熱判定となるため、適度な押し目を混ぜる
+                base_close = 1000.0 + i * 3.0 - (5.0 if i % 3 == 2 else 0.0)
                 if spike_after_d1 and dt > d1:
                     # d1 より後の未来バーを極端な異常値へ改ざん
                     base_close = 999_999.0 if i % 2 == 0 else 1.0

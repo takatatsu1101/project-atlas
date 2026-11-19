@@ -645,7 +645,7 @@ def run_batch_backtest(
     Note:
         - ``global_start = start_date or (min_as_of - timedelta(days=lookback_days))`` から
           ``global_eval_end`` までの全期間 OHLCV を 1 回だけ読み込み、全期間ベクトル指標を 1 回算出する。
-        - 全 9 指標（SMA5/25/75, RSI14, MACD, HIGHEST_HIGH_20, LOWEST_LOW_20, ATR14, VOLUME_RATIO）は
+        - 全 15 指標（SMA5/25/75/200, RSI5/14, MACD, HIGHEST_HIGH_20/60/250, LOWEST_LOW_20, ATR5/14/20, VOLUME_RATIO）は
           因果的（未来バー非参照）であり、各基準日 ``d`` の断面評価には
           ``[d - timedelta(days=lookback_days), d]`` の範囲のみを厳密分離スライスして渡す。
           EMA 系指標（MACD）は ``global_start`` からの連続ウォームアップを後続断面へ引き継ぐ一方、

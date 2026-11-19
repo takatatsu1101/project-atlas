@@ -212,7 +212,7 @@ class TestIndicatorCalculator(unittest.TestCase):
             calc_mod.indicator_calculator.storage = orig_storage
 
     def test_vectorized_calculate_indicators_matches_individual_methods_all_dates(self):
-        """一括ベクトル版 calculate_indicators と個別メソッドが全日付・全9指標で完全一致する"""
+        """一括ベクトル版 calculate_indicators と個別メソッドが全日付・全15指標で完全一致する"""
         bars = []
         base = date(2025, 1, 1)
         for i in range(100):
@@ -235,11 +235,17 @@ class TestIndicatorCalculator(unittest.TestCase):
         sma5 = self.calculator.calculate_sma(bars, 5)
         sma25 = self.calculator.calculate_sma(bars, 25)
         sma75 = self.calculator.calculate_sma(bars, 75)
+        sma200 = self.calculator.calculate_sma(bars, 200)
+        rsi5 = self.calculator.calculate_rsi(bars, 5)
         rsi14 = self.calculator.calculate_rsi(bars, 14)
         macd = self.calculator.calculate_macd(bars)
         hh20 = self.calculator.calculate_highest_high(bars, 20)
+        hh60 = self.calculator.calculate_highest_high(bars, 60)
+        hh250 = self.calculator.calculate_highest_high(bars, 250)
         ll20 = self.calculator.calculate_lowest_low(bars, 20)
+        atr5 = self.calculator.calculate_atr(bars, 5)
         atr14 = self.calculator.calculate_atr(bars, 14)
+        atr20 = self.calculator.calculate_atr(bars, 20)
         vr20 = self.calculator.calculate_volume_ratio(bars, 20)
 
         for i, ind_set in enumerate(ind_sets):
@@ -248,10 +254,16 @@ class TestIndicatorCalculator(unittest.TestCase):
                 ("SMA5", sma5),
                 ("SMA25", sma25),
                 ("SMA75", sma75),
+                ("SMA200", sma200),
+                ("RSI5", rsi5),
                 ("RSI14", rsi14),
                 ("HIGHEST_HIGH_20", hh20),
+                ("HIGHEST_HIGH_60", hh60),
+                ("HIGHEST_HIGH_250", hh250),
                 ("LOWEST_LOW_20", ll20),
+                ("ATR5", atr5),
                 ("ATR14", atr14),
+                ("ATR20", atr20),
             ):
                 if math.isnan(arr[i]):
                     self.assertNotIn(key, ind)
@@ -270,7 +282,7 @@ class TestIndicatorCalculator(unittest.TestCase):
                 self.assertIs(type(ind["VOLUME_RATIO"]), float)
                 self.assertAlmostEqual(ind["VOLUME_RATIO"], vr20[i], places=12)
 
-        # キャッシュ再読込でも全日付・全9指標・型が一致することを確認
+        # キャッシュ再読込でも全日付・全15指標・型が一致することを確認
         cached_sets = self.calculator.calculate_indicators(bars, use_cache=True)
         self.assertEqual(len(cached_sets), len(ind_sets))
         for orig, cached in zip(ind_sets, cached_sets):
@@ -307,7 +319,15 @@ class TestIndicatorCalculator(unittest.TestCase):
             {
                 "symbol": self.symbol,
                 "date": o.date.isoformat(),
-                "indicators": {"SMA5": 7777.0, "LOWEST_LOW_20": 7777.0},
+                "indicators": {
+                    "SMA5": 7777.0,
+                    "LOWEST_LOW_20": 7777.0,
+                    "RSI5": 50.0,
+                    "ATR5": 5.0,
+                    "ATR20": 5.0,
+                    "HIGHEST_HIGH_60": 8000.0,
+                    "HIGHEST_HIGH_250": 8000.0,
+                },
             }
             for o in self.ohlcv_data
         ]
@@ -321,6 +341,42 @@ class TestIndicatorCalculator(unittest.TestCase):
             write_cache=False,
         )
         self.assertEqual(res_read[-1].indicators["SMA5"], 7777.0)
+
+    def test_stale_cache_without_new_keys_recalculates(self):
+        """LOWEST_LOW_20 はあるが新指標 (RSI5等) が無い旧キャッシュは再計算される"""
+        stale_cache = [
+            {
+                "symbol": self.symbol,
+                "date": o.date.isoformat(),
+                "indicators": {"SMA5": 9999.0, "LOWEST_LOW_20": 9999.0},
+            }
+            for o in self.ohlcv_data
+        ]
+        self.calculator.storage.save_json(stale_cache, f"cache/indicators_{self.symbol}.json")
+
+        recalculated = self.calculator.calculate_indicators(self.ohlcv_data, use_cache=True)
+        for key in ("RSI5", "ATR5", "ATR20", "HIGHEST_HIGH_60", "HIGHEST_HIGH_250"):
+            self.assertIn(key, recalculated[-1].indicators)
+        self.assertNotEqual(recalculated[-1].indicators["SMA5"], 9999.0)
+
+    def test_sma200_calculated_when_sufficient_length(self):
+        """200本以上のデータで SMA200 が計算され、199本までは欠落する"""
+        bars = [
+            OhlcvModel(
+                symbol="SMA200T",
+                date=date(2024, 1, 1) + timedelta(days=i),
+                open=100.0 + i,
+                high=105.0 + i,
+                low=95.0 + i,
+                close=100.0 + i,
+                volume=1000,
+            )
+            for i in range(205)
+        ]
+        ind_sets = self.calculator.calculate_indicators(bars, use_cache=False)
+        self.assertNotIn("SMA200", ind_sets[198].indicators)
+        self.assertIn("SMA200", ind_sets[199].indicators)
+        self.assertAlmostEqual(ind_sets[199].indicators["SMA200"], sum(100.0 + i for i in range(200)) / 200.0)
 
 if __name__ == '__main__':
     unittest.main()

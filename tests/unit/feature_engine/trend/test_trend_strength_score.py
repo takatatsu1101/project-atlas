@@ -1,95 +1,169 @@
 import unittest
-from datetime import date
+from datetime import date, timedelta
 
 from src.feature_engine.features.trend import TrendStrengthScore
-from src.model.data_models import OhlcvModel, IndicatorSetModel
+from src.model.data_models import IndicatorSetModel, OhlcvModel
+
 
 class TestTrendStrengthScore(unittest.TestCase):
-
     def setUp(self):
         self.feature = TrendStrengthScore()
         self.symbol = "TEST"
-
-        # 10日分のOHLCVデータをモック（徐々に値上がりする上昇相場）
-        self.ohlcv_data_up = [
-            OhlcvModel(symbol=self.symbol, date=date(2025, 1, d), open=100+d, high=102+d, low=99+d, close=101+d, volume=100)
-            for d in range(1, 11)
-        ]
-        # 徐々に値下がりする下降相場
-        self.ohlcv_data_down = [
-            OhlcvModel(symbol=self.symbol, date=date(2025, 1, d), open=100-d, high=101-d, low=98-d, close=99-d, volume=100)
-            for d in range(1, 11)
-        ]
 
     def test_feature_properties(self):
         self.assertEqual(self.feature.feature_id, "T001_TrendStrengthScore")
         self.assertEqual(self.feature.feature_name, "トレンド強度")
         self.assertEqual(self.feature.feature_category, "Trend")
 
-    def test_strong_uptrend(self):
-        # 完璧な強い上昇トレンド
-        # 10日目のデータ：
-        # - SMA並び: 5日 > 25日 > 75日 (40点) (SMA5: 110, SMA25: 105, SMA75: 100)
-        # - 傾き: 5日前(SMA5: 105, SMA25: 100, SMA75: 95)よりすべて高い (30点)
-        # - 株価位置: 終値115 > 105(SMA25) 且つ 115 > 100(SMA75) (20点)
-        # - 高値安値: 5日前の高値安値(High: 106, Low: 103)より高い(High: 116, Low: 113) (10点)
-        # 合計 100点
+    def test_strong_uptrend_with_long_term_base(self):
+        """適正なSMA75乖離(+10%) + 52週高値圏 + 長期基盤(SMA200)で高スコア"""
         ohlcv = [
-            OhlcvModel(symbol=self.symbol, date=date(2025, 1, d), open=100, high=100+d*2, low=98+d*2, close=100+d*2, volume=100)
-            for d in range(1, 11)
+            OhlcvModel(
+                symbol=self.symbol,
+                date=date(2025, 1, 1) + timedelta(days=i),
+                open=108.0,
+                high=111.0,
+                low=107.0,
+                close=110.0,
+                volume=1000,
+            )
+            for i in range(10)
         ]
         indicator_data = [
-            # 1〜5日目
-            IndicatorSetModel(symbol=self.symbol, date=date(2025, 1, 1), indicators={"SMA5": 101, "SMA25": 96, "SMA75": 91}),
-            IndicatorSetModel(symbol=self.symbol, date=date(2025, 1, 2), indicators={"SMA5": 102, "SMA25": 97, "SMA75": 92}),
-            IndicatorSetModel(symbol=self.symbol, date=date(2025, 1, 3), indicators={"SMA5": 103, "SMA25": 98, "SMA75": 93}),
-            IndicatorSetModel(symbol=self.symbol, date=date(2025, 1, 4), indicators={"SMA5": 104, "SMA25": 99, "SMA75": 94}),
-            IndicatorSetModel(symbol=self.symbol, date=date(2025, 1, 5), indicators={"SMA5": 105, "SMA25": 100, "SMA75": 95}),
-            # 6〜10日目
-            IndicatorSetModel(symbol=self.symbol, date=date(2025, 1, 6), indicators={"SMA5": 106, "SMA25": 101, "SMA75": 96}),
-            IndicatorSetModel(symbol=self.symbol, date=date(2025, 1, 7), indicators={"SMA5": 107, "SMA25": 102, "SMA75": 97}),
-            IndicatorSetModel(symbol=self.symbol, date=date(2025, 1, 8), indicators={"SMA5": 108, "SMA25": 103, "SMA75": 98}),
-            IndicatorSetModel(symbol=self.symbol, date=date(2025, 1, 9), indicators={"SMA5": 109, "SMA25": 104, "SMA75": 99}),
-            IndicatorSetModel(symbol=self.symbol, date=date(2025, 1, 10), indicators={"SMA5": 110, "SMA25": 105, "SMA75": 100}),
+            IndicatorSetModel(
+                symbol=self.symbol,
+                date=date(2025, 1, 1) + timedelta(days=i),
+                indicators={
+                    "SMA5": 109.0,
+                    "SMA25": 105.0,
+                    "SMA75": 100.0,
+                    "SMA200": 90.0,
+                    "HIGHEST_HIGH_20": 110.0,
+                    "HIGHEST_HIGH_60": 110.0,
+                    "HIGHEST_HIGH_250": 111.0,
+                },
+            )
+            for i in range(10)
         ]
         results = self.feature.calculate(ohlcv, indicator_data)
-        self.assertEqual(results[9].score, 100.0)
+        last = results[-1]
+        self.assertGreater(last.score, 90.0)
+        self.assertAlmostEqual(last.metadata["sma75_dev"], 0.10, places=4)
+        self.assertAlmostEqual(last.metadata["high_250_ratio"], 110.0 / 111.0, places=4)
+        self.assertEqual(last.metadata["highest_high_60"], 110.0)
+        self.assertEqual(last.metadata["highest_high_250"], 111.0)
+
+    def test_overheated_sma75_dev_penalized(self):
+        """SMA75から+40%超の過熱状態は適正帯(+10%)よりスコアが低い"""
+        ohlcv_healthy = [
+            OhlcvModel(symbol=self.symbol, date=date(2025, 1, 1), open=110, high=111, low=109, close=110, volume=100)
+        ]
+        ind_healthy = [
+            IndicatorSetModel(
+                symbol=self.symbol,
+                date=date(2025, 1, 1),
+                indicators={
+                    "SMA5": 109,
+                    "SMA25": 105,
+                    "SMA75": 100,
+                    "SMA200": 90,
+                    "HIGHEST_HIGH_250": 110,
+                },
+            )
+        ]
+        ohlcv_hot = [
+            OhlcvModel(symbol=self.symbol, date=date(2025, 1, 1), open=140, high=141, low=139, close=140, volume=100)
+        ]
+        ind_hot = [
+            IndicatorSetModel(
+                symbol=self.symbol,
+                date=date(2025, 1, 1),
+                indicators={
+                    "SMA5": 135,
+                    "SMA25": 120,
+                    "SMA75": 100,
+                    "SMA200": 90,
+                    "HIGHEST_HIGH_250": 140,
+                },
+            )
+        ]
+        s_healthy = self.feature.calculate(ohlcv_healthy, ind_healthy)[0].score
+        s_hot = self.feature.calculate(ohlcv_hot, ind_hot)[0].score
+        self.assertGreater(s_healthy, s_hot)
 
     def test_strong_downtrend(self):
-        # 完璧な強い下降トレンド (0点)
-        # 10日目のデータ：
-        # - SMA並び: SMA5 < SMA25 < SMA75 (0点) (SMA5: 90, SMA25: 95, SMA75: 100)
-        # - 傾き: すべて下向き (0点) (SMA5_prev: 95, SMA25_prev: 100, SMA75_prev: 105)
-        # - 株価位置: 終値80 < SMA25(95) 且つ < SMA75(100) (0点)
-        # - 高値安値: 5日前より切り下げ (0点)
+        """SMA75・SMA200割れかつ52週高値から大きく下落で低スコア"""
         ohlcv = [
-            OhlcvModel(symbol=self.symbol, date=date(2025, 1, d), open=100, high=100-d*2, low=98-d*2, close=100-d*2, volume=100)
-            for d in range(1, 11)
+            OhlcvModel(
+                symbol=self.symbol,
+                date=date(2025, 1, 1) + timedelta(days=i),
+                open=70.0,
+                high=71.0,
+                low=69.0,
+                close=70.0,
+                volume=100,
+            )
+            for i in range(6)
         ]
         indicator_data = [
-            # 1〜5日目
-            IndicatorSetModel(symbol=self.symbol, date=date(2025, 1, 1), indicators={"SMA5": 99, "SMA25": 104, "SMA75": 109}),
-            IndicatorSetModel(symbol=self.symbol, date=date(2025, 1, 2), indicators={"SMA5": 98, "SMA25": 103, "SMA75": 108}),
-            IndicatorSetModel(symbol=self.symbol, date=date(2025, 1, 3), indicators={"SMA5": 97, "SMA25": 102, "SMA75": 107}),
-            IndicatorSetModel(symbol=self.symbol, date=date(2025, 1, 4), indicators={"SMA5": 96, "SMA25": 101, "SMA75": 106}),
-            IndicatorSetModel(symbol=self.symbol, date=date(2025, 1, 5), indicators={"SMA5": 95, "SMA25": 100, "SMA75": 105}),
-            # 6〜10日目
-            IndicatorSetModel(symbol=self.symbol, date=date(2025, 1, 6), indicators={"SMA5": 94, "SMA25": 99, "SMA75": 104}),
-            IndicatorSetModel(symbol=self.symbol, date=date(2025, 1, 7), indicators={"SMA5": 93, "SMA25": 98, "SMA75": 103}),
-            IndicatorSetModel(symbol=self.symbol, date=date(2025, 1, 8), indicators={"SMA5": 92, "SMA25": 97, "SMA75": 102}),
-            IndicatorSetModel(symbol=self.symbol, date=date(2025, 1, 9), indicators={"SMA5": 91, "SMA25": 96, "SMA75": 101}),
-            IndicatorSetModel(symbol=self.symbol, date=date(2025, 1, 10), indicators={"SMA5": 90, "SMA25": 95, "SMA75": 100}),
+            IndicatorSetModel(
+                symbol=self.symbol,
+                date=date(2025, 1, 1) + timedelta(days=i),
+                indicators={
+                    "SMA5": 75.0,
+                    "SMA25": 85.0,
+                    "SMA75": 100.0 - i * 0.5,
+                    "SMA200": 110.0,
+                    "HIGHEST_HIGH_20": 90.0,
+                    "HIGHEST_HIGH_60": 105.0,
+                    "HIGHEST_HIGH_250": 120.0,
+                },
+            )
+            for i in range(6)
         ]
         results = self.feature.calculate(ohlcv, indicator_data)
-        self.assertEqual(results[9].score, 0.0)
+        self.assertLess(results[-1].score, 10.0)
+
+    def test_fallback_without_sma200_and_hh250(self):
+        """SMA200・HIGHEST_HIGH_250 欠損時でもフォールバックで評価できる"""
+        ohlcv = [
+            OhlcvModel(
+                symbol=self.symbol,
+                date=date(2025, 1, 1) + timedelta(days=i),
+                open=108.0,
+                high=111.0,
+                low=107.0,
+                close=110.0,
+                volume=100,
+            )
+            for i in range(6)
+        ]
+        indicator_data = [
+            IndicatorSetModel(
+                symbol=self.symbol,
+                date=date(2025, 1, 1) + timedelta(days=i),
+                indicators={
+                    "SMA5": 109.0,
+                    "SMA25": 105.0,
+                    "SMA75": 100.0 + i * 0.5,
+                    "HIGHEST_HIGH_60": 112.0,
+                },
+            )
+            for i in range(6)
+        ]
+        results = self.feature.calculate(ohlcv, indicator_data)
+        self.assertGreater(results[-1].score, 75.0)
+        self.assertIsNone(results[-1].metadata["sma200"])
 
     def test_missing_data(self):
-        # 必要な指標がない場合、一律50点
+        """必要な指標がない場合、一律50点"""
+        ohlcv = [OhlcvModel(symbol=self.symbol, date=date(2025, 1, 1), open=100, high=102, low=98, close=101, volume=100)]
         indicator_data = [
             IndicatorSetModel(symbol=self.symbol, date=date(2025, 1, 1), indicators={"SMA5": 100}),
         ]
-        results = self.feature.calculate(self.ohlcv_data_up[:1], indicator_data)
+        results = self.feature.calculate(ohlcv, indicator_data)
         self.assertEqual(results[0].score, 50.0)
+
 
 if __name__ == '__main__':
     unittest.main()

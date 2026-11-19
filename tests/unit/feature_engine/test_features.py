@@ -8,7 +8,6 @@ import numpy as np
 
 import src.feature_engine
 from src.common.storage import StorageManager
-from src.feature_engine.features.trend import TrendStrengthFeature
 from src.feature_engine.interfaces import IFeature
 from src.feature_engine.manager import FeatureManager
 from src.indicator_calculator.calculator import IndicatorCalculator
@@ -18,136 +17,6 @@ from src.model.data_models import (
     IndicatorSetModel,
     OhlcvModel,
 )
-
-class TestTrendStrengthFeature(unittest.TestCase):
-
-    def setUp(self):
-        self.feature = TrendStrengthFeature()
-        self.symbol = "TEST"
-
-        # テスト用のOHLCVデータ
-        self.ohlcv_data: List[OhlcvModel] = [
-            OhlcvModel(symbol=self.symbol, date=date(2025, 1, 1), open=100, high=110, low=90, close=100, volume=1000),
-            OhlcvModel(symbol=self.symbol, date=date(2025, 1, 2), open=100, high=115, low=95, close=105, volume=1100),
-            OhlcvModel(symbol=self.symbol, date=date(2025, 1, 3), open=105, high=120, low=100, close=110, volume=1200),
-            OhlcvModel(symbol=self.symbol, date=date(2025, 1, 4), open=110, high=125, low=105, close=115, volume=1300),
-            OhlcvModel(symbol=self.symbol, date=date(2025, 1, 5), open=115, high=130, low=110, close=120, volume=1400),
-        ]
-
-        # テスト用のIndicatorSetデータ (SMA5, SMA25, SMA75 を定義)
-        self.indicator_data: List[IndicatorSetModel] = [
-            IndicatorSetModel(symbol=self.symbol, date=date(2025, 1, 1), indicators={"SMA5": 100, "SMA25": 90, "SMA75": 80}),
-            IndicatorSetModel(symbol=self.symbol, date=date(2025, 1, 2), indicators={"SMA5": 102, "SMA25": 92, "SMA75": 82}),
-            IndicatorSetModel(symbol=self.symbol, date=date(2025, 1, 3), indicators={"SMA5": 105, "SMA25": 95, "SMA75": 85}),
-            IndicatorSetModel(symbol=self.symbol, date=date(2025, 1, 4), indicators={"SMA5": 110, "SMA25": 100, "SMA75": 90}),
-            IndicatorSetModel(symbol=self.symbol, date=date(2025, 1, 5), indicators={"SMA5": 115, "SMA25": 105, "SMA75": 95}),
-        ]
-
-    def test_feature_properties(self):
-        self.assertEqual(self.feature.feature_id, "F001_TrendStrength")
-        self.assertEqual(self.feature.feature_name, "トレンド強度スコア")
-        self.assertEqual(self.feature.feature_category, "Trend")
-
-    def test_calculate_strong_uptrend(self):
-        # close > SMA5 > SMA25 > SMA75 の場合
-        # 5日目のデータがこれに該当するように調整
-        ohlcv_data = [
-            self.ohlcv_data[0],
-            self.ohlcv_data[1],
-            self.ohlcv_data[2],
-            self.ohlcv_data[3],
-            OhlcvModel(symbol=self.symbol, date=date(2025, 1, 5), open=115, high=130, low=110, close=120, volume=1400), # close 120
-        ]
-        indicator_data = [
-            self.indicator_data[0],
-            self.indicator_data[1],
-            self.indicator_data[2],
-            self.indicator_data[3],
-            IndicatorSetModel(symbol=self.symbol, date=date(2025, 1, 5), indicators={"SMA5": 118, "SMA25": 110, "SMA75": 100}), # SMA5=118, SMA25=110, SMA75=100
-        ]
-
-        results = self.feature.calculate(ohlcv_data, indicator_data)
-        last_result = results[-1]
-        self.assertIsInstance(last_result, FeatureResultModel)
-        self.assertEqual(last_result.feature_id, self.feature.feature_id)
-        self.assertEqual(last_result.score, 100.0) # 強い上昇トレンド
-        self.assertEqual(last_result.raw_value, 100.0)
-
-    def test_calculate_strong_downtrend(self):
-        # close < SMA5 < SMA25 < SMA75 の場合
-        ohlcv_data = [
-            OhlcvModel(symbol=self.symbol, date=date(2025, 1, 1), open=100, high=110, low=90, close=80, volume=1000),
-            OhlcvModel(symbol=self.symbol, date=date(2025, 1, 2), open=80, high=90, low=70, close=70, volume=1100),
-            OhlcvModel(symbol=self.symbol, date=date(2025, 1, 3), open=70, high=80, low=60, close=60, volume=1200),
-        ]
-        indicator_data = [
-            IndicatorSetModel(symbol=self.symbol, date=date(2025, 1, 1), indicators={"SMA5": 90, "SMA25": 100, "SMA75": 110}),
-            IndicatorSetModel(symbol=self.symbol, date=date(2025, 1, 2), indicators={"SMA5": 80, "SMA25": 90, "SMA75": 100}),
-            IndicatorSetModel(symbol=self.symbol, date=date(2025, 1, 3), indicators={"SMA5": 70, "SMA25": 80, "SMA75": 90}),
-        ]
-        results = self.feature.calculate(ohlcv_data, indicator_data)
-        last_result = results[-1]
-        self.assertEqual(last_result.score, 0.0) # 強い下降トレンド
-        self.assertEqual(last_result.raw_value, 0.0)
-
-    def test_calculate_uptrend(self):
-        # SMA5 > SMA25 > SMA75 の場合
-        ohlcv_data = [
-            OhlcvModel(symbol=self.symbol, date=date(2025, 1, 1), open=100, high=110, low=90, close=100, volume=1000),
-            OhlcvModel(symbol=self.symbol, date=date(2025, 1, 2), open=100, high=115, low=95, close=105, volume=1100),
-        ]
-        indicator_data = [
-            IndicatorSetModel(symbol=self.symbol, date=date(2025, 1, 1), indicators={"SMA5": 105, "SMA25": 100, "SMA75": 95}),
-            IndicatorSetModel(symbol=self.symbol, date=date(2025, 1, 2), indicators={"SMA5": 108, "SMA25": 102, "SMA75": 98}),
-        ]
-        results = self.feature.calculate(ohlcv_data, indicator_data)
-        last_result = results[-1]
-        self.assertEqual(last_result.score, 75.0) # 上昇トレンド
-        self.assertEqual(last_result.raw_value, 75.0)
-
-    def test_calculate_downtrend(self):
-        # SMA5 < SMA25 < SMA75 の場合
-        ohlcv_data = [
-            OhlcvModel(symbol=self.symbol, date=date(2025, 1, 1), open=100, high=110, low=90, close=100, volume=1000),
-            OhlcvModel(symbol=self.symbol, date=date(2025, 1, 2), open=100, high=115, low=95, close=105, volume=1100),
-        ]
-        indicator_data = [
-            IndicatorSetModel(symbol=self.symbol, date=date(2025, 1, 1), indicators={"SMA5": 95, "SMA25": 100, "SMA75": 105}),
-            IndicatorSetModel(symbol=self.symbol, date=date(2025, 1, 2), indicators={"SMA5": 92, "SMA25": 98, "SMA75": 102}),
-        ]
-        results = self.feature.calculate(ohlcv_data, indicator_data)
-        last_result = results[-1]
-        self.assertEqual(last_result.score, 25.0) # 下降トレンド
-        self.assertEqual(last_result.raw_value, 25.0)
-
-    def test_calculate_range(self):
-        # それ以外（レンジ）の場合
-        ohlcv_data = [
-            OhlcvModel(symbol=self.symbol, date=date(2025, 1, 1), open=100, high=110, low=90, close=100, volume=1000),
-            OhlcvModel(symbol=self.symbol, date=date(2025, 1, 2), open=100, high=115, low=95, close=105, volume=1100),
-        ]
-        indicator_data = [
-            IndicatorSetModel(symbol=self.symbol, date=date(2025, 1, 1), indicators={"SMA5": 100, "SMA25": 95, "SMA75": 105}),
-            IndicatorSetModel(symbol=self.symbol, date=date(2025, 1, 2), indicators={"SMA5": 105, "SMA25": 100, "SMA75": 100}), # SMAが全て同じでレンジ
-        ]
-        results = self.feature.calculate(ohlcv_data, indicator_data)
-        last_result = results[-1]
-        # このケースではSMAの並び順が複雑なため、レンジまたは複雑な状況に該当し50.0となるはず
-        self.assertEqual(last_result.score, 50.0) 
-        self.assertEqual(last_result.raw_value, 50.0)
-
-    def test_calculate_empty_indicator_data(self):
-        results = self.feature.calculate(self.ohlcv_data, [])
-        self.assertEqual(len(results), 0)
-
-    def test_normalize_score(self):
-        self.assertEqual(self.feature._normalize_score(50, 0, 100), 50.0)
-        self.assertEqual(self.feature._normalize_score(0, 0, 100), 0.0)
-        self.assertEqual(self.feature._normalize_score(100, 0, 100), 100.0)
-        self.assertEqual(self.feature._normalize_score(10, 0, 50), 20.0)
-        self.assertEqual(self.feature._normalize_score(50, 50, 50), 50.0) # min_val == max_val
-        self.assertEqual(self.feature._normalize_score(-10, 0, 100), 0.0) # 範囲外の下限
-        self.assertEqual(self.feature._normalize_score(110, 0, 100), 100.0) # 範囲外の上限
 
 
 class TestFeatureLatestOnlyAndCacheIntegrity(unittest.TestCase):
@@ -199,10 +68,10 @@ class TestFeatureLatestOnlyAndCacheIntegrity(unittest.TestCase):
     def tearDown(self):
         self.temp_dir.cleanup()
 
-    def test_all_13_features_latest_only_matches_full_last_day(self):
-        """全13特徴量について latest_only=True が latest_only=False の最終日と完全一致する"""
+    def test_all_12_features_latest_only_matches_full_last_day(self):
+        """全12特徴量について latest_only=True が latest_only=False の最終日と完全一致する"""
         registered = self.manager.registry.list_features()
-        self.assertEqual(len(registered), 13)
+        self.assertEqual(len(registered), 12)
 
         full_sets = self.manager.calculate_features(
             self.ohlcv, self.indicators, self.fin, use_cache=False, latest_only=False
@@ -214,7 +83,7 @@ class TestFeatureLatestOnlyAndCacheIntegrity(unittest.TestCase):
         self.assertEqual(len(full_sets), len(self.ohlcv))
         self.assertEqual(len(latest_sets), 1)
         self.assertEqual(latest_sets[0].date, full_sets[-1].date)
-        self.assertEqual(len(latest_sets[0].results), 13)
+        self.assertEqual(len(latest_sets[0].results), 12)
 
         full_by_id = {r.feature_id: r for r in full_sets[-1].results}
         latest_by_id = {r.feature_id: r for r in latest_sets[0].results}
@@ -304,14 +173,26 @@ class TestFeatureLatestOnlyAndCacheIntegrity(unittest.TestCase):
 
     def test_mismatched_ohlcv_and_indicator_lengths_safe_and_consistent(self):
         """ohlcv_data と indicator_data の長さが異なっても IndexError にならず共通長基準で評価・キャッシュされる"""
+        from src.feature_engine.features.moving_average.ma_alignment_score import MAAlignmentScore
+        from src.feature_engine.features.oscillator.momentum_score import MomentumScore
         from src.feature_engine.features.price_action.breakout_score import BreakoutScore
+        from src.feature_engine.features.price_action.pullback_score import PullbackScore
         from src.feature_engine.features.risc.volatility_score import VolatilityScore
+        from src.feature_engine.features.trend import TrendStrengthScore
         from src.feature_engine.features.volume.volume_score import VolumeScore
 
         # 1. 個別特徴量クラスの単体呼び出しで len(ohlcv) < len(indicator) でも IndexError にならない
         short_ohlcv = self.ohlcv[:10]
         long_ind = self.indicators[:25]
-        for feat_cls in (BreakoutScore, VolatilityScore, VolumeScore):
+        for feat_cls in (
+            MAAlignmentScore,
+            TrendStrengthScore,
+            PullbackScore,
+            BreakoutScore,
+            VolatilityScore,
+            VolumeScore,
+            MomentumScore,
+        ):
             res_single = feat_cls().calculate(short_ohlcv, long_ind, self.fin)
             self.assertEqual(len(res_single), len(long_ind))
 
@@ -339,6 +220,43 @@ class TestFeatureLatestOnlyAndCacheIntegrity(unittest.TestCase):
         )
         self.assertEqual(len(res_mgr_long_latest), 1)
         self.assertEqual(res_mgr_long_latest[0].date, short_ind[11].date)
+
+    def test_260_bars_with_sma200_and_hh250_latest_only_matches_full(self):
+        """260本データ(SMA200・HIGHEST_HIGH_250有効時)で latest_only=True と False の最終日が一致する"""
+        start = date(2024, 1, 1)
+        long_ohlcv = []
+        for i in range(260):
+            close = 1000.0 + i * 2.0 + (i % 7) * 3.0
+            long_ohlcv.append(
+                OhlcvModel(
+                    symbol=self.symbol,
+                    date=start + timedelta(days=i),
+                    open=close - 3.0,
+                    high=close + 7.0,
+                    low=close - 7.0,
+                    close=close,
+                    volume=120_000 + i * 500,
+                )
+            )
+        long_ind = self.ind_calc.calculate_indicators(long_ohlcv, use_cache=False)
+        self.assertIn("SMA200", long_ind[-1].indicators)
+        self.assertIn("HIGHEST_HIGH_250", long_ind[-1].indicators)
+
+        full_sets = self.manager.calculate_features(
+            long_ohlcv, long_ind, self.fin, use_cache=False, latest_only=False
+        )
+        latest_sets = self.manager.calculate_features(
+            long_ohlcv, long_ind, self.fin, use_cache=False, latest_only=True
+        )
+        self.assertEqual(len(latest_sets), 1)
+        full_by_id = {r.feature_id: r for r in full_sets[-1].results}
+        latest_by_id = {r.feature_id: r for r in latest_sets[0].results}
+        self.assertEqual(set(latest_by_id.keys()), set(full_by_id.keys()))
+        for fid, full_res in full_by_id.items():
+            lat_res = latest_by_id[fid]
+            self.assertAlmostEqual(lat_res.score, full_res.score, places=12)
+            self.assertAlmostEqual(lat_res.raw_value, full_res.raw_value, places=12)
+            self.assertEqual(lat_res.metadata, full_res.metadata)
 
 if __name__ == '__main__':
     unittest.main()

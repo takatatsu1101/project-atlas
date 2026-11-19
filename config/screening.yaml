@@ -40,6 +40,23 @@ strategy_score:
   double_top_high_confidence_cap: 40.0
   extreme_volatility_threshold: 90.0
   extreme_volatility_penalty: 20.0
+  # 異常ボラティリティ過熱判定（tr_today / avg_atr >= この値 で減点）
+  extreme_volatility_ratio_threshold: 2.0
+  # 75日移動平均線からの過熱乖離ペナルティ（(close - SMA75) / SMA75 > 閾値）
+  sma75_dev_overheat_threshold: 0.25
+  sma75_dev_overheat_penalty: 12.0
+  # 大幅ギャップアップ過熱ペナルティ（ブレイクアウト戦略から減点）
+  gap_up_overheat_threshold: 0.07
+  gap_up_overheat_penalty: 10.0
+
+  # 戦略別 RSI ベル型評価・短期反転設定
+  pullback_rsi_ideal_min: 40.0
+  pullback_rsi_ideal_max: 60.0
+  breakout_rsi_ideal_min: 55.0
+  breakout_rsi_ideal_max: 75.0
+  rsi_overheat_threshold: 80.0
+  rsi_overheat_penalty: 8.0
+  short_rsi_rebound_bonus: 5.0
 
   # 第2関門・戦略判定設定
   min_pullback_setup_score: 55.0
@@ -47,16 +64,19 @@ strategy_score:
   min_entry_score: 60.0
   watch_score_cap: 59.0
 
-  # 押し目買い戦略（pullback）の重み・裏付け加点
-  pullback_weight_p001: 0.40
-  pullback_weight_trend_env: 0.25
+  # 押し目買い戦略（pullback）の重み・裏付け加点（重み合計 1.0）
+  pullback_weight_p001: 0.38
+  pullback_weight_trend_env: 0.22
   pullback_weight_o001: 0.15
   pullback_weight_fundamental: 0.10
   pullback_weight_volatility_stability: 0.10
+  pullback_weight_v001: 0.05
   double_bottom_bonus_factor: 0.10
   double_bottom_bonus_max: 10.0
   hammer_bonus_factor: 0.05
   hammer_bonus_max: 5.0
+  # 押し目売り枯れ後の反発出来高増加点
+  pullback_dryup_rebound_bonus: 5.0
 
   # ブレイクアウト戦略（breakout）の重み
   breakout_weight_p002: 0.35

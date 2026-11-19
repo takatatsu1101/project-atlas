@@ -44,13 +44,13 @@ related:
 
 | ID | カテゴリ | 特徴量名 | 説明 | ステータス |
 |----|----------|----------|------|------------|
-| M001 | Moving Average | MAAlignmentScore | 移動平均線の並び評価 | 実装済 |
-| P001 | Price Action | PullbackScore | 押し目の理想度（SMA25/75サポート距離を含む） | 実装済 |
-| P002 | Price Action | BreakoutScore | ブレイクアウトの強さ（過去20日高値レジスタンス距離を含む） | 実装済 |
-| T001 | Trend | TrendStrengthScore | トレンドの強さ | 実装済 |
-| V001 | Volume | VolumeScore | 出来高評価 | 実装済 |
-| O001 | Oscillator | MomentumScore | モメンタム評価 | 実装済 |
-| R001 | Risk | VolatilityScore | ボラティリティ評価 | 実装済 |
+| M001 | Moving Average | MAAlignmentScore | 移動平均線の並び・傾き（5日/20日）・スプレッドの連続評価 | 実装済 |
+| P001 | Price Action | PullbackScore | 押し目の理想度（SMA25/75乖離＋陽線転換・CLV・下ヒゲ反発確認） | 実装済 |
+| P002 | Price Action | BreakoutScore | ブレイクアウトの強さ（20日/60日高値突破＋CLV・上ヒゲだまし・ギャップ過熱評価） | 実装済 |
+| T001 | Trend | TrendStrengthScore | トレンドの強さ（SMA75適正帯・52週高値接近度・マルチ期間ブレイク・SMA200基盤） | 実装済 |
+| V001 | Volume | VolumeScore | 出来高の質（急増・短期トレンド・Up/Down Volume Ratio・押し目売り枯れ反発） | 実装済 |
+| O001 | Oscillator | MomentumScore | モメンタム評価（RSI14ベル型・MACD・短期反転RSI5メタデータ出力） | 実装済 |
+| R001 | Risk | VolatilityScore | リスク・VCP収縮健全性（ATR5/ATR20収縮率・定常ATR%・リスクリワード余地） | 実装済 |
 | F001 | Fundamental | ProfitabilityScore | 収益性（ROE・営業利益率など） | 実装済 |
 | F002 | Fundamental | GrowthScore | 成長性（EPS・売上・利益CAGRなど） | 実装済 |
 | F003 | Fundamental | ValuationScore | 割安性（PER・PBR） | 実装済 |

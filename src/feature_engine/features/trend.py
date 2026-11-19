@@ -1,78 +1,10 @@
-
 from typing import List, Optional, Sequence
-import numpy as np
 
 from src.common.indexing import resolve_target_indices
+from src.feature_engine.features.utils import linear_scale
 from src.feature_engine.interfaces import IFeature
-from src.model.data_models import OhlcvModel, IndicatorSetModel, FinancialModel, FeatureResultModel
 from src.feature_engine.registry import feature_registry
-
-class TrendStrengthFeature(IFeature):
-    feature_id: str = "F001_TrendStrength"
-    feature_name: str = "トレンド強度スコア"
-    feature_category: str = "Trend"
-
-    def calculate(
-        self,
-        ohlcv_data: List[OhlcvModel],
-        indicator_data: List[IndicatorSetModel],
-        financial_data: Optional[FinancialModel] = None,
-        target_indices: Optional[Sequence[int]] = None,
-    ) -> List[FeatureResultModel]:
-        
-        if not indicator_data:
-            return []
-
-        results: List[FeatureResultModel] = []
-        for i in resolve_target_indices(len(indicator_data), target_indices):
-            ind_set = indicator_data[i]
-            sma5 = ind_set.indicators.get("SMA5")
-            sma25 = ind_set.indicators.get("SMA25")
-            sma75 = ind_set.indicators.get("SMA75")
-            close_price = ohlcv_data[i].close if i < len(ohlcv_data) else None
-
-            raw_score = 0.0
-            metadata = {"sma5": sma5, "sma25": sma25, "sma75": sma75, "close": close_price}
-
-            if sma5 is not None and sma25 is not None and sma75 is not None and close_price is not None:
-                # ゴールデンクロス/デッドクロスに基づいた単純なトレンド強度
-                if close_price > sma5 > sma25 > sma75: # 強い上昇トレンド
-                    raw_score = 100.0
-                elif close_price < sma5 < sma25 < sma75: # 強い下降トレンド
-                    raw_score = 0.0
-                elif sma5 > sma25 and sma25 > sma75: # 上昇トレンド
-                    raw_score = 75.0
-                elif sma5 < sma25 and sma25 < sma75: # 下降トレンド
-                    raw_score = 25.0
-                else:
-                    # SMAの並び順が複雑な場合はレンジと判断
-                    raw_score = 50.0 
-            else:
-                raw_score = 50.0 # データ不足の場合は中間値
-            
-            # ここでは簡単のため、raw_scoreをそのままscoreとして利用。本来は別途正規化ロジックを適用。
-            normalized_score = self._normalize_score(raw_score, 0, 100) 
-
-            results.append(FeatureResultModel(
-                feature_id=self.feature_id,
-                feature_name=self.feature_name,
-                score=normalized_score,
-                raw_value=raw_score,
-                metadata=metadata,
-                date=ind_set.date
-            ))
-        return results
-
-    def _normalize_score(self, raw_value: float, min_val: float, max_val: float) -> float:
-        """
-        0-100の範囲でスコアを正規化する。
-        """
-        if max_val == min_val:
-            return 50.0 # ゼロ除算を避ける
-        return max(0.0, min(100.0, ((raw_value - min_val) / (max_val - min_val)) * 100.0))
-
-# レジストリに特徴量クラスを登録
-feature_registry.register(TrendStrengthFeature)
+from src.model.data_models import FeatureResultModel, FinancialModel, IndicatorSetModel, OhlcvModel
 
 
 class TrendStrengthScore(IFeature):
@@ -87,7 +19,6 @@ class TrendStrengthScore(IFeature):
         financial_data: Optional[FinancialModel] = None,
         target_indices: Optional[Sequence[int]] = None,
     ) -> List[FeatureResultModel]:
-        
         if not indicator_data or not ohlcv_data:
             return []
 
@@ -97,83 +28,158 @@ class TrendStrengthScore(IFeature):
             sma5 = ind_set.indicators.get("SMA5")
             sma25 = ind_set.indicators.get("SMA25")
             sma75 = ind_set.indicators.get("SMA75")
+            sma200 = ind_set.indicators.get("SMA200")
+            hh20 = ind_set.indicators.get("HIGHEST_HIGH_20")
+            hh60 = ind_set.indicators.get("HIGHEST_HIGH_60")
+            hh250 = ind_set.indicators.get("HIGHEST_HIGH_250")
             close_price = ohlcv_data[i].close if i < len(ohlcv_data) else None
 
-            # 5日前のインデックス
-            prev_idx = max(0, i - 5)
-            sma5_prev = indicator_data[prev_idx].indicators.get("SMA5") if prev_idx < len(indicator_data) else None
-            sma25_prev = indicator_data[prev_idx].indicators.get("SMA25") if prev_idx < len(indicator_data) else None
-            sma75_prev = indicator_data[prev_idx].indicators.get("SMA75") if prev_idx < len(indicator_data) else None
-
-            low_today = ohlcv_data[i].low if i < len(ohlcv_data) else None
-            high_today = ohlcv_data[i].high if i < len(ohlcv_data) else None
-            low_prev = ohlcv_data[prev_idx].low if prev_idx < len(ohlcv_data) else None
-            high_prev = ohlcv_data[prev_idx].high if prev_idx < len(ohlcv_data) else None
+            sma75_dev = (
+                (close_price - sma75) / sma75
+                if (close_price is not None and sma75 is not None and sma75 > 0)
+                else None
+            )
+            ref_high_for_ratio = hh250 if hh250 is not None else (hh60 if hh60 is not None else hh20)
+            high_250_ratio = (
+                close_price / ref_high_for_ratio
+                if (close_price is not None and ref_high_for_ratio is not None and ref_high_for_ratio > 0)
+                else None
+            )
 
             metadata = {
                 "close": close_price,
                 "sma5": sma5,
                 "sma25": sma25,
                 "sma75": sma75,
+                "sma200": sma200,
+                "sma75_dev": sma75_dev,
+                "high_250_ratio": high_250_ratio,
+                "highest_high_60": hh60,
+                "highest_high_250": hh250,
             }
 
-            # データ不足時は一律で中立(50.0)とする
-            if sma5 is None or sma25 is None or sma75 is None or close_price is None:
+            if sma75 is None or sma75 <= 0 or close_price is None:
                 raw_score = 50.0
             else:
-                score = 0.0
+                # 1. (close - SMA75) / SMA75 適正帯評価 (0〜35点)
+                dev_score = self._calc_sma75_dev_score(sma75_dev)
 
-                # 1. 移動平均線の並び (最大40点)
-                if sma5 > sma25 and sma25 > sma75:
-                    score += 40.0 # 完全上昇
-                elif sma5 > sma25 and sma25 <= sma75:
-                    score += 30.0 # 上昇の初期（短期は中期のうえだが中長期はデッドクロス）
-                elif sma5 <= sma25 and sma25 > sma75:
-                    score += 20.0 # 上昇トレンド中の押し目・一時調整
-                elif sma5 < sma25 and sma25 < sma75:
-                    score += 0.0  # 完全下降
-                else:
-                    score += 10.0 # その他
+                # 2. 52週高値接近度 close / HIGHEST_HIGH_250 (0〜30点)
+                high_prox_score = (
+                    linear_scale(high_250_ratio, 0.75, 0.98, 0.0, 30.0)
+                    if high_250_ratio is not None
+                    else 15.0
+                )
 
-                # 2. 移動平均線の傾き (最大30点)
-                # 5日前の値と比較して、上向きであるかどうかを評価
-                if sma5_prev is not None and sma5 > sma5_prev:
-                    score += 10.0
-                if sma25_prev is not None and sma25 > sma25_prev:
-                    score += 10.0
-                if sma75_prev is not None and sma75 > sma75_prev:
-                    score += 10.0
+                # 3. マルチ期間ブレイク強度 (0〜20点)
+                break_score = self._calc_multi_break_score(indicator_data, i, close_price)
 
-                # 3. 株価位置 (最大20点)
-                if close_price > sma25:
-                    score += 10.0
-                if close_price > sma75:
-                    score += 10.0
+                # 4. 長期トレンド基盤 (0〜15点)
+                long_term_score = self._calc_long_term_base_score(
+                    indicator_data, i, close_price, sma75, sma200
+                )
 
-                # 4. 高値・安値更新 (最大10点)
-                if low_today is not None and low_prev is not None and low_today > low_prev:
-                    score += 5.0  # 安値切り上げ
-                if high_today is not None and high_prev is not None and high_today > high_prev:
-                    score += 5.0  # 高値切り上げ
-
-                raw_score = score
+                raw_score = max(
+                    0.0,
+                    min(100.0, dev_score + high_prox_score + break_score + long_term_score),
+                )
 
             normalized_score = self._normalize_score(raw_score, 0, 100)
 
-            results.append(FeatureResultModel(
-                feature_id=self.feature_id,
-                feature_name=self.feature_name,
-                score=normalized_score,
-                raw_value=raw_score,
-                metadata=metadata,
-                date=ind_set.date
-            ))
+            results.append(
+                FeatureResultModel(
+                    feature_id=self.feature_id,
+                    feature_name=self.feature_name,
+                    score=normalized_score,
+                    raw_value=raw_score,
+                    metadata=metadata,
+                    date=ind_set.date,
+                )
+            )
         return results
+
+    def _calc_sma75_dev_score(self, dev: Optional[float]) -> float:
+        """(close - SMA75) / SMA75 の適正帯を連続評価する（0〜35点）。"""
+        if dev is None:
+            return 17.5
+        if 0.03 <= dev <= 0.18:
+            # +3%〜+18% を高評価帯（中心付近で満点35点）
+            if dev <= 0.06:
+                return linear_scale(dev, 0.03, 0.06, 32.0, 35.0)
+            if dev <= 0.14:
+                return 35.0
+            return linear_scale(dev, 0.14, 0.18, 35.0, 32.0)
+        if 0.0 <= dev < 0.03:
+            return linear_scale(dev, 0.0, 0.03, 18.0, 32.0)
+        if 0.18 < dev <= 0.25:
+            return linear_scale(dev, 0.18, 0.25, 32.0, 20.0)
+        if dev > 0.25:
+            # +25%超は過熱減点
+            return linear_scale(dev, 0.25, 0.45, 20.0, 5.0)
+        if -0.05 <= dev < 0.0:
+            return linear_scale(dev, -0.05, 0.0, 5.0, 18.0)
+        return linear_scale(dev, -0.15, -0.05, 0.0, 5.0)
+
+    def _calc_multi_break_score(
+        self,
+        indicator_data: List[IndicatorSetModel],
+        idx: int,
+        close_price: float,
+    ) -> float:
+        """前日までの20/60/250日高値への接近・突破度合いを連続評価する（0〜20点）。"""
+        ref_ind = indicator_data[idx - 1].indicators if idx > 0 else indicator_data[idx].indicators
+        hh20 = ref_ind.get("HIGHEST_HIGH_20")
+        hh60 = ref_ind.get("HIGHEST_HIGH_60")
+        hh250 = ref_ind.get("HIGHEST_HIGH_250")
+
+        periods = (
+            (hh20, 6.0),
+            (hh60 if hh60 is not None else hh20, 7.0),
+            (hh250 if hh250 is not None else (hh60 if hh60 is not None else hh20), 7.0),
+        )
+        total = 0.0
+        for ref_high, weight in periods:
+            if ref_high is not None and ref_high > 0:
+                ratio = close_price / ref_high
+                total += linear_scale(ratio, 0.92, 1.01, 0.0, weight)
+            else:
+                total += weight * 0.5
+        return total
+
+    def _calc_long_term_base_score(
+        self,
+        indicator_data: List[IndicatorSetModel],
+        idx: int,
+        close_price: float,
+        sma75: float,
+        sma200: Optional[float],
+    ) -> float:
+        """長期トレンド基盤を評価する（0〜15点）。"""
+        if sma200 is not None:
+            above_200 = close_price > sma200
+            golden_75_200 = sma75 > sma200
+            if above_200 and golden_75_200:
+                return 15.0
+            if above_200 or golden_75_200:
+                return 8.0
+            return 0.0
+
+        # SMA200 欠損時は close > SMA75 と SMA75 上向きで代替
+        prev_idx = max(0, idx - 5)
+        sma75_prev = indicator_data[prev_idx].indicators.get("SMA75")
+        above_75 = close_price > sma75
+        sma75_up = sma75_prev is not None and sma75 > sma75_prev
+        if above_75 and sma75_up:
+            return 15.0
+        if above_75 or sma75_up:
+            return 8.0
+        return 0.0
 
     def _normalize_score(self, raw_value: float, min_val: float, max_val: float) -> float:
         if max_val == min_val:
             return 50.0
         return max(0.0, min(100.0, ((raw_value - min_val) / (max_val - min_val)) * 100.0))
+
 
 # レジストリに特徴量クラスを登録
 feature_registry.register(TrendStrengthScore)
