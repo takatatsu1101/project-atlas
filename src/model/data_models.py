@@ -32,6 +32,33 @@ class FinancialModel(BaseModel):
     net_profit_growth_5y_avg: Optional[float] = None
     total_assets: Optional[float] = None  # 総資産
     equity_ratio: Optional[float] = None  # 自己資本比率
+    # BS 未抽出列
+    net_assets: Optional[float] = None  # 純資産
+    shareholders_equity: Optional[float] = None  # 株主資本
+    retained_earnings: Optional[float] = None  # 利益剰余金
+    short_term_debt: Optional[float] = None  # 短期借入金
+    long_term_debt: Optional[float] = None  # 長期借入金
+    # PL 未抽出列
+    ordinary_profit: Optional[float] = None  # 経常利益
+    # キャッシュフロー (CF) データ
+    operating_cf: Optional[float] = None  # 営業CF
+    investing_cf: Optional[float] = None  # 投資CF
+    financing_cf: Optional[float] = None  # 財務CF
+    capex: Optional[float] = None  # 設備投資（IR BANK 原値は通常負数）
+    free_cash_flow: Optional[float] = None  # フリーCF（operating_cf - abs(capex)）
+    cash_and_equivalents: Optional[float] = None  # 現金及び現金同等物
+    operating_cf_margin: Optional[float] = None  # 営業CFマージン（%）
+    # 株主還元データ
+    dividend_per_share: Optional[float] = None  # 一株配当
+    total_dividends: Optional[float] = None  # 剰余金の配当
+    share_buyback: Optional[float] = None  # 自社株買い
+    payout_ratio: Optional[float] = None  # 配当性向（%）
+    total_payout_ratio: Optional[float] = None  # 総還元性向（%）
+    doe: Optional[float] = None  # 純資産配当率（%）
+    # 複数年株主還元モメンタム
+    consecutive_dividend_increase_years: Optional[int] = None  # 連続増配年数
+    consecutive_non_decrease_years: Optional[int] = None  # 連続非減配年数
+    buyback_count_3y: Optional[int] = None  # 直近3期自社株買い実施回数
 
 
 class StockMasterModel(BaseModel):

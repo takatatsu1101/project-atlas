@@ -126,6 +126,7 @@ class TestPipelineIntegration(unittest.TestCase):
             "F003_ValuationScore",
             "F004_FinancialHealthScore",
             "F005_EarningsQualityScore",
+            "F006_ShareholderReturnScore",
         ]
         for ef in expected_features:
             self.assertIn(ef, feature_ids, f"Feature {ef} is not registered.")

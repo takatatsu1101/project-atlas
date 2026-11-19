@@ -10,3 +10,4 @@ from src.feature_engine.features.fundamental.growth_score import GrowthScore
 from src.feature_engine.features.fundamental.valuation_score import ValuationScore
 from src.feature_engine.features.fundamental.financial_health_score import FinancialHealthScore
 from src.feature_engine.features.fundamental.earnings_quality_score import EarningsQualityScore
+from src.feature_engine.features.fundamental.shareholder_return_score import ShareholderReturnScore

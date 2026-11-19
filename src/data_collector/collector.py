@@ -62,6 +62,8 @@ class DataCollector:
         self.URL_IRBANK_FILES = "https://f.irbank.net/files/"
         self.BALANCE_SHEET_FILE_NAME = "fy-balance-sheet.json"
         self.PROFIT_AND_LOSS_FILE_NAME = "fy-profit-and-loss.json"
+        self.CASH_FLOW_FILE_NAME = "fy-cash-flow-statement.json"
+        self.STOCK_DIVIDEND_FILE_NAME = "fy-stock-dividend.json"
         # IR BANK JSON のインメモリキャッシュとダウンロード失敗のネガティブキャッシュ
         self._irbank_json_cache: Dict[str, Dict] = {}
         self._irbank_failed_downloads: set[str] = set()
@@ -1037,7 +1039,7 @@ class DataCollector:
         allow_download: bool = True,
     ) -> None:
         """
-        並列ワーカー起動前に親プロセス側で指定年度群の BS / PL JSON を事前にロード・ダウンロードする。
+        並列ワーカー起動前に親プロセス側で指定年度群の BS / PL / 配当 / CF JSON を事前にロード・ダウンロードする。
         """
         unique_years = sorted({int(y) for y in fiscal_years if not isinstance(y, bool)})
         if not unique_years:
@@ -1049,6 +1051,12 @@ class DataCollector:
         for year in unique_years:
             self._load_irbank_json(year, self.BALANCE_SHEET_FILE_NAME, allow_download=allow_download)
             self._load_irbank_json(year, self.PROFIT_AND_LOSS_FILE_NAME, allow_download=allow_download)
+            self._load_irbank_json(year, self.STOCK_DIVIDEND_FILE_NAME, allow_download=allow_download)
+            # 年度別CFファイルはローカルキャッシュのみ参照（不要な404通信・スリープ防止）
+            self._load_irbank_json(year, self.CASH_FLOW_FILE_NAME, allow_download=False)
+        # 最新期 CF・配当ファイル（0000-*）を1回プリロード
+        self._load_irbank_json(0, self.CASH_FLOW_FILE_NAME, allow_download=allow_download)
+        self._load_irbank_json(0, self.STOCK_DIVIDEND_FILE_NAME, allow_download=allow_download)
         print(
             f"IR BANK 財務キャッシュ準備完了 ({len(unique_years)}期分)",
             flush=True,
@@ -1066,13 +1074,24 @@ class DataCollector:
 
     @staticmethod
     def _to_optional_float(val: Any) -> Optional[float]:
-        """欠損値('-')と0.0を区別するオプショナル数値変換ヘルパー"""
+        """欠損値('-')・NaN・infと0.0を区別するオプショナル数値変換ヘルパー"""
         if val is None or val == "-":
             return None
         try:
-            return float(val)
+            num = float(val)
         except (ValueError, TypeError):
             return None
+        return num if math.isfinite(num) else None
+
+    @staticmethod
+    def _is_expected_irbank_type(data: Optional[Dict], expected_type: str) -> bool:
+        """IR BANK JSON の構造と meta.type が期待種別と一致するか検証する。"""
+        if not isinstance(data, dict) or not isinstance(data.get("item"), dict):
+            return False
+        meta = data.get("meta")
+        if isinstance(meta, dict) and meta.get("type"):
+            return meta.get("type") == expected_type
+        return True
 
     @staticmethod
     def _parse_fiscal_year_month(ym_str: Any) -> Optional[date]:
@@ -1225,6 +1244,234 @@ class DataCollector:
 
         return None
 
+    def _parse_extra_bs_pl_fields(
+        self,
+        bs_val: Sequence[Any],
+        pl_val: Sequence[Any],
+    ) -> Dict[str, Optional[float]]:
+        """BS / PL の追加未抽出列をオプショナル数値としてパースする。"""
+        to_opt_float = self._to_optional_float
+        return {
+            "net_assets": to_opt_float(bs_val[2]) if len(bs_val) > 2 else None,
+            "shareholders_equity": to_opt_float(bs_val[3]) if len(bs_val) > 3 else None,
+            "retained_earnings": to_opt_float(bs_val[4]) if len(bs_val) > 4 else None,
+            "short_term_debt": to_opt_float(bs_val[5]) if len(bs_val) > 5 else None,
+            "long_term_debt": to_opt_float(bs_val[6]) if len(bs_val) > 6 else None,
+            "ordinary_profit": to_opt_float(pl_val[3]) if len(pl_val) > 3 else None,
+        }
+
+    def _resolve_cash_flow_entry(
+        self,
+        code: str,
+        adopted_year: int,
+        fiscal_date: date,
+        as_of_date: Optional[date],
+        disclosure_lag_days: int,
+        allow_download: bool,
+        read_only: bool,
+    ) -> Optional[List[Any]]:
+        """
+        採用決算期と完全一致（cf_date == fiscal_date）かつ開示済みの CF エントリを解決する。
+        検索順序: 1) 年度別ローカル CF (allow_download=False) -> 2) 最新期 CF (year=0)
+        """
+        def _extract_valid_cf_val(cf_data: Optional[Dict]) -> Optional[List[Any]]:
+            if not self._is_expected_irbank_type(cf_data, "CF"):
+                return None
+            cf_val = cf_data["item"].get(code)
+            if not isinstance(cf_val, list) or not cf_val:
+                return None
+            cf_date = self._parse_fiscal_year_month(cf_val[0])
+            if cf_date is None or cf_date != fiscal_date:
+                return None
+            if as_of_date is not None and not self._is_disclosed(cf_date, as_of_date, disclosure_lag_days):
+                return None
+            return cf_val
+
+        # 1. 年度別 CF（不要な404通信・スリープ防止のため allow_download=False 固定）
+        yearly_cf_data = self._load_irbank_json_with_mode(
+            adopted_year,
+            self.CASH_FLOW_FILE_NAME,
+            allow_download=False,
+            read_only=read_only,
+        )
+        cf_val = _extract_valid_cf_val(yearly_cf_data)
+        if cf_val is not None:
+            return cf_val
+
+        # 2. 最新期 CF (year=0) へのフォールバック
+        effective_allow_download = allow_download and not read_only
+        latest_cf_data = self._load_irbank_json_with_mode(
+            0,
+            self.CASH_FLOW_FILE_NAME,
+            allow_download=effective_allow_download,
+            read_only=read_only,
+        )
+        return _extract_valid_cf_val(latest_cf_data)
+
+    def _collect_dividend_metrics(
+        self,
+        code: str,
+        adopted_year: int,
+        fiscal_date: date,
+        as_of_date: Optional[date],
+        disclosure_lag_days: int,
+        allow_download: bool,
+        read_only: bool,
+    ) -> Dict[str, Any]:
+        """
+        adopted_year - 5 .. adopted_year の配当データを取得し、
+        当期株主還元指標および複数年モメンタム（連続増配・連続非減配・直近3期自社株買い回数）を算出する。
+        """
+        result: Dict[str, Any] = {
+            "dividend_per_share": None,
+            "total_dividends": None,
+            "share_buyback": None,
+            "payout_ratio": None,
+            "total_payout_ratio": None,
+            "doe": None,
+            "consecutive_dividend_increase_years": None,
+            "consecutive_non_decrease_years": None,
+            "buyback_count_3y": None,
+        }
+        effective_allow_download = allow_download and not read_only
+        to_opt_float = self._to_optional_float
+
+        def _extract_valid_div_entry(
+            div_data: Optional[Dict],
+            require_exact_fiscal_date: bool = False,
+            upper_date_exclusive: Optional[date] = None,
+        ) -> Optional[Tuple[date, List[Any]]]:
+            if not self._is_expected_irbank_type(div_data, "配当"):
+                return None
+            div_val = div_data["item"].get(code)
+            if not isinstance(div_val, list) or not div_val:
+                return None
+            div_date = self._parse_fiscal_year_month(div_val[0])
+            if div_date is None:
+                return None
+            if require_exact_fiscal_date:
+                if div_date != fiscal_date:
+                    return None
+            elif div_date > fiscal_date:
+                return None
+            if upper_date_exclusive is not None and div_date >= upper_date_exclusive:
+                return None
+            if as_of_date is not None and not self._is_disclosed(div_date, as_of_date, disclosure_lag_days):
+                return None
+            return div_date, div_val
+
+        # adopted_year から adopted_year - 5 まで新しい年から古い年へ走査
+        valid_entries: Dict[int, Tuple[date, List[Any]]] = {}
+        last_accepted_date: Optional[date] = None
+
+        for y in range(adopted_year, adopted_year - 6, -1):
+            div_data = self._load_irbank_json_with_mode(
+                y,
+                self.STOCK_DIVIDEND_FILE_NAME,
+                allow_download=effective_allow_download,
+                read_only=read_only,
+            )
+            if y == adopted_year:
+                entry = _extract_valid_div_entry(div_data, require_exact_fiscal_date=True)
+                if entry is None:
+                    # 年度別ファイルで取得できない場合のみ year=0 へフォールバック（div_date == fiscal_date 厳守）
+                    latest_div_data = self._load_irbank_json_with_mode(
+                        0,
+                        self.STOCK_DIVIDEND_FILE_NAME,
+                        allow_download=effective_allow_download,
+                        read_only=read_only,
+                    )
+                    entry = _extract_valid_div_entry(latest_div_data, require_exact_fiscal_date=True)
+            else:
+                # 過去期は当期または直近で採用したより新しい年度より確実に過去であることを確認
+                upper_bound = last_accepted_date if last_accepted_date is not None else fiscal_date
+                entry = _extract_valid_div_entry(
+                    div_data,
+                    require_exact_fiscal_date=False,
+                    upper_date_exclusive=upper_bound,
+                )
+
+            if entry is not None:
+                valid_entries[y] = entry
+                last_accepted_date = entry[0]
+
+        # 当期（adopted_year）の列パース
+        if adopted_year in valid_entries:
+            curr_div_val = valid_entries[adopted_year][1]
+            result["dividend_per_share"] = to_opt_float(curr_div_val[1]) if len(curr_div_val) > 1 else None
+            result["total_dividends"] = to_opt_float(curr_div_val[2]) if len(curr_div_val) > 2 else None
+            result["share_buyback"] = to_opt_float(curr_div_val[3]) if len(curr_div_val) > 3 else None
+            result["payout_ratio"] = to_opt_float(curr_div_val[4]) if len(curr_div_val) > 4 else None
+            result["total_payout_ratio"] = to_opt_float(curr_div_val[5]) if len(curr_div_val) > 5 else None
+            result["doe"] = to_opt_float(curr_div_val[6]) if len(curr_div_val) > 6 else None
+
+            # 連続増配・連続非減配年数計算用に、連続ペア (y, y - 1) の比較値列を構築
+            comparisons: List[Tuple[float, float]] = []
+            for y in range(adopted_year, adopted_year - 5, -1):
+                if y not in valid_entries or (y - 1) not in valid_entries:
+                    break
+                c_val = valid_entries[y][1]
+                p_val = valid_entries[y - 1][1]
+                curr_dps = to_opt_float(c_val[1]) if len(c_val) > 1 else None
+                prev_dps = to_opt_float(p_val[1]) if len(p_val) > 1 else None
+                curr_total = to_opt_float(c_val[2]) if len(c_val) > 2 else None
+                prev_total = to_opt_float(p_val[2]) if len(p_val) > 2 else None
+
+                if (
+                    curr_dps is not None
+                    and prev_dps is not None
+                    and curr_dps > 0
+                    and prev_dps > 0
+                    and curr_dps < prev_dps * 0.6
+                    and curr_total is not None
+                    and prev_total is not None
+                    and curr_total > 0
+                    and prev_total > 0
+                    and curr_total >= prev_total * 0.98
+                ):
+                    # 株式分割による一株配当の見かけ上の減少を剰余金の配当で補正
+                    comparisons.append((curr_total, prev_total))
+                elif curr_dps is not None and prev_dps is not None:
+                    comparisons.append((curr_dps, prev_dps))
+                elif curr_total is not None and prev_total is not None:
+                    comparisons.append((curr_total, prev_total))
+                else:
+                    break
+
+            if comparisons:
+                inc_years = 0
+                for curr_v, prev_v in comparisons:
+                    if curr_v > prev_v * 1.0001:
+                        inc_years += 1
+                    else:
+                        break
+
+                non_dec_years = 0
+                for curr_v, prev_v in comparisons:
+                    if curr_v >= prev_v * 0.999 and curr_v > 0:
+                        non_dec_years += 1
+                    else:
+                        break
+
+                result["consecutive_dividend_increase_years"] = inc_years
+                result["consecutive_non_decrease_years"] = non_dec_years
+
+        # 直近3期自社株買い実施回数（adopted_year, adopted_year - 1, adopted_year - 2）
+        recent_3y_entries = [
+            valid_entries[y][1]
+            for y in (adopted_year, adopted_year - 1, adopted_year - 2)
+            if y in valid_entries
+        ]
+        if recent_3y_entries:
+            buyback_cnt = 0
+            for div_val in recent_3y_entries:
+                buyback = to_opt_float(div_val[3]) if len(div_val) > 3 else None
+                if buyback is not None and buyback > 0:
+                    buyback_cnt += 1
+            result["buyback_count_3y"] = buyback_cnt
+
+        return result
+
     def collect_financial_data(
         self,
         symbol: str,
@@ -1292,6 +1539,48 @@ class DataCollector:
             eps = 0.0
         roe = to_float(pl_val[6]) if len(pl_val) > 6 else 0.0
         roa = to_float(pl_val[7]) if len(pl_val) > 7 else 0.0
+
+        # BS / PL 未抽出列のパース
+        extra_bs_pl = self._parse_extra_bs_pl_fields(bs_val, pl_val)
+
+        # キャッシュフロー (CF) データの解決・パース（先読みバイアス防止のため fiscal_date 完全一致・開示済みのみ採用）
+        cf_val = self._resolve_cash_flow_entry(
+            code=code,
+            adopted_year=adopted_year,
+            fiscal_date=fiscal_date,
+            as_of_date=as_of_date,
+            disclosure_lag_days=disclosure_lag_days,
+            allow_download=effective_allow_download,
+            read_only=read_only,
+        )
+        operating_cf: Optional[float] = None
+        investing_cf: Optional[float] = None
+        financing_cf: Optional[float] = None
+        capex: Optional[float] = None
+        free_cash_flow: Optional[float] = None
+        cash_and_equivalents: Optional[float] = None
+        operating_cf_margin: Optional[float] = None
+        if cf_val is not None:
+            operating_cf = to_opt_float(cf_val[1]) if len(cf_val) > 1 else None
+            investing_cf = to_opt_float(cf_val[2]) if len(cf_val) > 2 else None
+            financing_cf = to_opt_float(cf_val[3]) if len(cf_val) > 3 else None
+            capex = to_opt_float(cf_val[4]) if len(cf_val) > 4 else None
+            cash_and_equivalents = to_opt_float(cf_val[5]) if len(cf_val) > 5 else None
+            operating_cf_margin = to_opt_float(cf_val[6]) if len(cf_val) > 6 else None
+            if operating_cf is not None and capex is not None:
+                fcf = operating_cf - abs(capex)
+                free_cash_flow = fcf if math.isfinite(fcf) else None
+
+        # 株主還元データ＆複数年モメンタム計算
+        dividend_metrics = self._collect_dividend_metrics(
+            code=code,
+            adopted_year=adopted_year,
+            fiscal_date=fiscal_date,
+            as_of_date=as_of_date,
+            disclosure_lag_days=disclosure_lag_days,
+            allow_download=effective_allow_download,
+            read_only=read_only,
+        )
 
         # 2. 過去の売上高・純利益時系列をロードして成長率を計算する
         # CAGR計算用に直近5年分のPLを走査
@@ -1417,6 +1706,15 @@ class DataCollector:
             net_profit_growth_5y_avg=net_profit_growth_5y_avg,
             total_assets=total_assets,
             equity_ratio=equity_ratio,
+            operating_cf=operating_cf,
+            investing_cf=investing_cf,
+            financing_cf=financing_cf,
+            capex=capex,
+            free_cash_flow=free_cash_flow,
+            cash_and_equivalents=cash_and_equivalents,
+            operating_cf_margin=operating_cf_margin,
+            **extra_bs_pl,
+            **dividend_metrics,
         )
 
         logger.debug(f"実財務データの取得に成功しました。({symbol})")
@@ -1469,6 +1767,7 @@ class DataCollector:
                 continue
 
             _, bs_val, pl_val, fiscal_date = resolved
+            extra_bs_pl = self._parse_extra_bs_pl_fields(bs_val, pl_val)
             snapshot[code] = FinancialModel(
                 symbol=f"{code}.T",
                 fiscal_date=fiscal_date,
@@ -1481,6 +1780,7 @@ class DataCollector:
                 eps=to_float(pl_val[5]) if len(pl_val) > 5 else 0.0,
                 roe=to_float(pl_val[6]) if len(pl_val) > 6 else 0.0,
                 roa=to_float(pl_val[7]) if len(pl_val) > 7 else 0.0,
+                **extra_bs_pl,
             )
 
         return snapshot

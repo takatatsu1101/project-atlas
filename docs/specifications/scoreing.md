@@ -91,12 +91,12 @@ Score Engineは以下を担当する。
    - **主軸**: `P001: PullbackScore`（中期MA付近への調整度合い）
    - **環境**: `M001: MAAlignmentScore`, `T001: TrendStrengthScore`
    - **タイミング・反発裏付け**: `O001: MomentumScore`（売られすぎからの反転）、`R001: DoubleBottom` / `Hammer`（下値サポート確認）
-   - **補助**: ファンダメンタルズスコア（`F001〜F005`）、ボラティリティ安定度（`R001: VolatilityScore`）
+   - **補助**: ファンダメンタルズスコア（`F001〜F006`）、ボラティリティ安定度（`R001: VolatilityScore`）
 2. **ブレイクアウト戦略スコア (`BreakoutStrategyScore`)**
    - **主軸**: `P002: BreakoutScore`（直近高値への接近〜上抜け初動）
    - **需給・勢い裏付け**: `V001: VolumeScore`（出来高急増）、`O001: MomentumScore`
    - **環境**: `M001: MAAlignmentScore`, `T001: TrendStrengthScore`
-   - **補助**: ファンダメンタルズスコア（`F001〜F005`）、ボラティリティ評価（`R001: VolatilityScore`）
+   - **補助**: ファンダメンタルズスコア（`F001〜F006`）、ボラティリティ評価（`R001: VolatilityScore`）
 
 ---
 

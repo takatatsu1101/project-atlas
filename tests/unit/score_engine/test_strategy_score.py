@@ -13,7 +13,11 @@ from src.model.data_models import (
 )
 from src.score_engine.manager import ScoreManager
 from src.score_engine.registry import score_registry
-from src.score_engine.scores.strategy import StrategyScoreCalculator, StrategyScoreConfig
+from src.score_engine.scores.strategy import (
+    FUNDAMENTAL_FEATURE_IDS,
+    StrategyScoreCalculator,
+    StrategyScoreConfig,
+)
 
 
 class TestStrategyScoreCalculator(unittest.TestCase):
@@ -651,6 +655,47 @@ class TestStrategyScoreCalculator(unittest.TestCase):
             res_plain.sub_scores["breakout_strategy_score"],
         )
         self.assertAlmostEqual(res_nan.sub_scores["penalty_score"], 0.0)
+
+    def test_fundamental_score_includes_f006_shareholder_return_score(self):
+        self.assertIn("F006_ShareholderReturnScore", FUNDAMENTAL_FEATURE_IDS)
+        self.assertEqual(len(FUNDAMENTAL_FEATURE_IDS), 6)
+
+        base_tech = {
+            "M001_MAAlignmentScore": 80.0,
+            "T001_TrendStrengthScore": 80.0,
+            "P001_PullbackScore": 80.0,
+            "P002_BreakoutScore": 60.0,
+            "O001_MomentumScore": 70.0,
+            "V001_VolumeScore": 70.0,
+            "R001_VolatilityScore": 60.0,
+        }
+        fs_all_f = self._build_feature_set(
+            {
+                **base_tech,
+                "F001_ProfitabilityScore": 60.0,
+                "F002_GrowthScore": 60.0,
+                "F003_ValuationScore": 60.0,
+                "F004_FinancialHealthScore": 60.0,
+                "F005_EarningsQualityScore": 60.0,
+                "F006_ShareholderReturnScore": 90.0,
+            }
+        )
+        fs_f001_to_f005 = self._build_feature_set(
+            {
+                **base_tech,
+                "F001_ProfitabilityScore": 60.0,
+                "F002_GrowthScore": 60.0,
+                "F003_ValuationScore": 60.0,
+                "F004_FinancialHealthScore": 60.0,
+                "F005_EarningsQualityScore": 60.0,
+            }
+        )
+        res_all = self.calculator.calculate([fs_all_f], [])[0]
+        res_5 = self.calculator.calculate([fs_f001_to_f005], [])[0]
+
+        self.assertAlmostEqual(res_all.sub_scores["fundamental_score"], 65.0)
+        self.assertAlmostEqual(res_5.sub_scores["fundamental_score"], 60.0)
+        self.assertGreater(res_all.total_score, res_5.total_score)
 
 
 if __name__ == "__main__":

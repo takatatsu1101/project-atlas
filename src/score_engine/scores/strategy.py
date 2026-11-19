@@ -27,6 +27,7 @@ FUNDAMENTAL_FEATURE_IDS: Tuple[str, ...] = (
     "F003_ValuationScore",
     "F004_FinancialHealthScore",
     "F005_EarningsQualityScore",
+    "F006_ShareholderReturnScore",
 )
 
 
@@ -487,7 +488,7 @@ class StrategyScoreCalculator(IScoreCalculator):
     def _calculate_fundamental_score(
         self, feature_map: Dict[str, FeatureResultModel]
     ) -> Tuple[float, bool]:
-        """ファンダメンタルズ特徴量（F001〜F005）の平均を算出する。全欠損時は中立50.0を返す。"""
+        """ファンダメンタルズ特徴量（F001〜F006）の平均を算出する。全欠損時は中立50.0を返す。"""
         scores = [
             float(feature_map[fid].score)
             for fid in FUNDAMENTAL_FEATURE_IDS

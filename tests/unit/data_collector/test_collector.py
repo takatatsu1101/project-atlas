@@ -268,9 +268,15 @@ class TestDataCollector(unittest.TestCase):
 
         def side_effect(year, fy_type, allow_download=True):
             if year == 2025:
-                return bs_2025 if "balance-sheet" in fy_type else pl_2025
+                if "balance-sheet" in fy_type:
+                    return bs_2025
+                if "profit-and-loss" in fy_type:
+                    return pl_2025
             if year == 2024:
-                return bs_2024 if "balance-sheet" in fy_type else pl_2024
+                if "balance-sheet" in fy_type:
+                    return bs_2024
+                if "profit-and-loss" in fy_type:
+                    return pl_2024
             return None
 
         mock_load_json.side_effect = side_effect
@@ -334,9 +340,15 @@ class TestDataCollector(unittest.TestCase):
 
         def side_effect(year, fy_type, allow_download=True):
             if year == 2025:
-                return bs_2025 if "balance-sheet" in fy_type else pl_2025
+                if "balance-sheet" in fy_type:
+                    return bs_2025
+                if "profit-and-loss" in fy_type:
+                    return pl_2025
             if year == 2024:
-                return bs_2024 if "balance-sheet" in fy_type else pl_2024
+                if "balance-sheet" in fy_type:
+                    return bs_2024
+                if "profit-and-loss" in fy_type:
+                    return pl_2024
             return None
 
         mock_load_json.side_effect = side_effect
@@ -496,7 +508,10 @@ class TestDataCollector(unittest.TestCase):
 
         def side_effect(year, fy_type, allow_download=True):
             if year == 2025:
-                return bs_2025 if "balance-sheet" in fy_type else pl_2025
+                if "balance-sheet" in fy_type:
+                    return bs_2025
+                if "profit-and-loss" in fy_type:
+                    return pl_2025
             return None
 
         mock_load_json.side_effect = side_effect
@@ -538,7 +553,10 @@ class TestDataCollector(unittest.TestCase):
 
         def side_effect(year, fy_type, allow_download=True):
             if year == 2025:
-                return bs_2025 if "balance-sheet" in fy_type else pl_2025
+                if "balance-sheet" in fy_type:
+                    return bs_2025
+                if "profit-and-loss" in fy_type:
+                    return pl_2025
             return None
 
         mock_load_json.side_effect = side_effect
@@ -598,11 +616,15 @@ class TestDataCollector(unittest.TestCase):
         """モジュールレベル collect_financial_data(..., latest_close=0.0) でも collect_ohlcv_data を呼ばない"""
         bs_2025 = {"item": {"7203": ["2025/03", "90000", "0", "0", "0", "0", "0", "2000.0", "45.0"]}}
         pl_2025 = {"item": {"7203": ["2025/03", "50000", "5000", "5200", "3500", "200.0", "12.0", "6.0"]}}
-        mock_load_json.side_effect = (
-            lambda year, fy_type, allow_download=True: (
-                (bs_2025 if "balance-sheet" in fy_type else pl_2025) if year == 2025 else None
-            )
-        )
+        def _side_effect_module(year, fy_type, allow_download=True):
+            if year == 2025:
+                if "balance-sheet" in fy_type:
+                    return bs_2025
+                if "profit-and-loss" in fy_type:
+                    return pl_2025
+            return None
+
+        mock_load_json.side_effect = _side_effect_module
 
         with patch("src.data_collector.collector.data_collector.collect_ohlcv_data") as mock_ohlcv:
             fin = collect_financial_data("7203.T", fiscal_year=2025, latest_close=0.0)
@@ -1477,7 +1499,7 @@ class TestDataCollector(unittest.TestCase):
             self.assertTrue(corrupt_pl.exists())
 
     def test_warmup_irbank_cache_preloads_bs_and_pl_for_unique_years(self):
-        """warmup_irbank_cache が重複排除した全年度の BS / PL JSON を事前ロードする"""
+        """warmup_irbank_cache が重複排除した全年度の BS / PL / 配当 / CF(ローカル) と最新CF/配当を事前ロードする"""
         collector = DataCollector()
         with patch.object(collector, "_load_irbank_json", return_value={"item": {}}) as mock_load:
             collector.warmup_irbank_cache([2025, 2023, 2025, 2024], allow_download=False)
@@ -1485,12 +1507,34 @@ class TestDataCollector(unittest.TestCase):
         expected_calls = [
             unittest.mock.call(2023, collector.BALANCE_SHEET_FILE_NAME, allow_download=False),
             unittest.mock.call(2023, collector.PROFIT_AND_LOSS_FILE_NAME, allow_download=False),
+            unittest.mock.call(2023, collector.STOCK_DIVIDEND_FILE_NAME, allow_download=False),
+            unittest.mock.call(2023, collector.CASH_FLOW_FILE_NAME, allow_download=False),
             unittest.mock.call(2024, collector.BALANCE_SHEET_FILE_NAME, allow_download=False),
             unittest.mock.call(2024, collector.PROFIT_AND_LOSS_FILE_NAME, allow_download=False),
+            unittest.mock.call(2024, collector.STOCK_DIVIDEND_FILE_NAME, allow_download=False),
+            unittest.mock.call(2024, collector.CASH_FLOW_FILE_NAME, allow_download=False),
             unittest.mock.call(2025, collector.BALANCE_SHEET_FILE_NAME, allow_download=False),
             unittest.mock.call(2025, collector.PROFIT_AND_LOSS_FILE_NAME, allow_download=False),
+            unittest.mock.call(2025, collector.STOCK_DIVIDEND_FILE_NAME, allow_download=False),
+            unittest.mock.call(2025, collector.CASH_FLOW_FILE_NAME, allow_download=False),
+            unittest.mock.call(0, collector.CASH_FLOW_FILE_NAME, allow_download=False),
+            unittest.mock.call(0, collector.STOCK_DIVIDEND_FILE_NAME, allow_download=False),
         ]
         self.assertEqual(mock_load.call_args_list, expected_calls)
+
+        # allow_download=True 時も年度別 CF のみ allow_download=False となることを検証
+        with patch.object(collector, "_load_irbank_json", return_value={"item": {}}) as mock_load_dl:
+            collector.warmup_irbank_cache([2024], allow_download=True)
+
+        expected_calls_dl = [
+            unittest.mock.call(2024, collector.BALANCE_SHEET_FILE_NAME, allow_download=True),
+            unittest.mock.call(2024, collector.PROFIT_AND_LOSS_FILE_NAME, allow_download=True),
+            unittest.mock.call(2024, collector.STOCK_DIVIDEND_FILE_NAME, allow_download=True),
+            unittest.mock.call(2024, collector.CASH_FLOW_FILE_NAME, allow_download=False),
+            unittest.mock.call(0, collector.CASH_FLOW_FILE_NAME, allow_download=True),
+            unittest.mock.call(0, collector.STOCK_DIVIDEND_FILE_NAME, allow_download=True),
+        ]
+        self.assertEqual(mock_load_dl.call_args_list, expected_calls_dl)
 
     def test_prefetch_ohlcv_batch_and_warmup_progress_output(self):
         """prefetch_ohlcv_batch のチャンク進捗・開始/完了サマリーと warmup_irbank_cache のサマリー出力を検証"""
@@ -1825,6 +1869,586 @@ class TestDataCollector(unittest.TestCase):
                     self.assertAlmostEqual(fin.bps, expected_bps)
                     self.assertAlmostEqual(fin.per, expected_per)
                     self.assertAlmostEqual(fin.pbr, expected_pbr)
+
+    @staticmethod
+    def _make_isolated_collector(tmpdir: str) -> tuple[DataCollector, StorageManager]:
+        """テスト用に IR BANK キャッシュ先まで完全に隔離した DataCollector を生成する"""
+        tmp_path = Path(tmpdir)
+        storage = StorageManager(base_dir=tmp_path / "data")
+        local_irbank = tmp_path / "local_irbank"
+        user_irbank = tmp_path / "user_irbank"
+        local_irbank.mkdir(parents=True, exist_ok=True)
+        user_irbank.mkdir(parents=True, exist_ok=True)
+        collector = DataCollector(
+            storage=storage,
+            cache_dir=str(tmp_path / "cache"),
+            local_irbank_dir=str(local_irbank),
+            user_irbank_dir=str(user_irbank),
+        )
+        return collector, storage
+
+    def test_collect_financial_data_and_snapshot_extra_bs_pl_columns(self):
+        """BS/PL 未抽出列が collect_financial_data / load_financial_snapshot の双方で正しく設定・欠損時 None になる"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            collector, storage = self._make_isolated_collector(tmpdir)
+
+            bs_2024 = {
+                "meta": {"type": "BS"},
+                "item": {
+                    # ["年度","総資産","純資産","株主資本","利益剰余金","短期借入金","長期借入金","BPS","自己資本比率"]
+                    "7203": ["2024/03", "1000000", "500000", "450000", "300000", "0", "20000", "2000.0", "45.0"],
+                    "9984": ["2024/03", "800000", "-", "nan", "inf", "-inf", "-", "1500.0", "30.0"],
+                },
+            }
+            pl_2024 = {
+                "meta": {"type": "PL"},
+                "item": {
+                    # ["年度","売上高","営業利益","経常利益","当期純利益","EPS","ROE","ROA"]
+                    "7203": ["2024/03", "100000", "15000", "16500", "10000", "100.0", "12.0", "5.0"],
+                    "9984": ["2024/03", "50000", "5000", "-", "3000", "50.0", "8.0", "3.0"],
+                },
+            }
+            # load_financial_snapshot が CF / 配当を読まないことも併せて検証するため破損ファイルを置く
+            (storage.financial_dir / "0024-fy-balance-sheet.json").write_text(json.dumps(bs_2024), encoding="utf-8")
+            (storage.financial_dir / "0024-fy-profit-and-loss.json").write_text(json.dumps(pl_2024), encoding="utf-8")
+            (storage.financial_dir / "0000-fy-cash-flow-statement.json").write_text("{corrupt", encoding="utf-8")
+            (storage.financial_dir / "0024-fy-stock-dividend.json").write_text("{corrupt", encoding="utf-8")
+
+            fin_7203 = collector.collect_financial_data(
+                "7203.T",
+                fiscal_year=2024,
+                as_of_date=date(2024, 9, 30),
+                allow_download=False,
+                latest_close=1000.0,
+                read_only=True,
+            )
+            self.assertIsNotNone(fin_7203)
+            self.assertEqual(fin_7203.net_assets, 500000.0)
+            self.assertEqual(fin_7203.shareholders_equity, 450000.0)
+            self.assertEqual(fin_7203.retained_earnings, 300000.0)
+            self.assertEqual(fin_7203.short_term_debt, 0.0)
+            self.assertEqual(fin_7203.long_term_debt, 20000.0)
+            self.assertEqual(fin_7203.ordinary_profit, 16500.0)
+
+            fin_9984 = collector.collect_financial_data(
+                "9984.T",
+                fiscal_year=2024,
+                as_of_date=date(2024, 9, 30),
+                allow_download=False,
+                latest_close=1000.0,
+                read_only=True,
+            )
+            self.assertIsNotNone(fin_9984)
+            self.assertIsNone(fin_9984.net_assets)
+            self.assertIsNone(fin_9984.shareholders_equity)
+            self.assertIsNone(fin_9984.retained_earnings)
+            self.assertIsNone(fin_9984.short_term_debt)
+            self.assertIsNone(fin_9984.long_term_debt)
+            self.assertIsNone(fin_9984.ordinary_profit)
+
+            # load_financial_snapshot は CF / 配当を参照せず高速取得する
+            with patch.object(collector, "_load_irbank_json", wraps=collector._load_irbank_json) as spy_load:
+                snap = collector.load_financial_snapshot(
+                    fiscal_year=2024,
+                    as_of_date=date(2024, 9, 30),
+                )
+            loaded_types = {call_args.args[1] for call_args in spy_load.call_args_list}
+            self.assertNotIn(collector.CASH_FLOW_FILE_NAME, loaded_types)
+            self.assertNotIn(collector.STOCK_DIVIDEND_FILE_NAME, loaded_types)
+
+            self.assertIn("7203", snap)
+            self.assertEqual(snap["7203"].net_assets, 500000.0)
+            self.assertEqual(snap["7203"].shareholders_equity, 450000.0)
+            self.assertEqual(snap["7203"].retained_earnings, 300000.0)
+            self.assertEqual(snap["7203"].short_term_debt, 0.0)
+            self.assertEqual(snap["7203"].long_term_debt, 20000.0)
+            self.assertEqual(snap["7203"].ordinary_profit, 16500.0)
+
+            self.assertIn("9984", snap)
+            self.assertIsNone(snap["9984"].net_assets)
+            self.assertIsNone(snap["9984"].shareholders_equity)
+            self.assertIsNone(snap["9984"].retained_earnings)
+            self.assertIsNone(snap["9984"].short_term_debt)
+            self.assertIsNone(snap["9984"].long_term_debt)
+            self.assertIsNone(snap["9984"].ordinary_profit)
+
+    def test_collect_financial_data_cash_flow_resolution_and_fcf(self):
+        """CF 取得：年度別欠損時の0000フォールバック、capex負値・正値でのFCF計算、欠損時Noneを検証"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            collector, storage = self._make_isolated_collector(tmpdir)
+
+            bs_2024 = {
+                "item": {
+                    "7203": ["2024/03", "1000000", "500000", "450000", "300000", "10000", "20000", "2000.0", "45.0"],
+                    "6758": ["2024/03", "900000", "400000", "350000", "200000", "5000", "10000", "1500.0", "40.0"],
+                    "9984": ["2024/03", "800000", "300000", "250000", "150000", "5000", "10000", "1200.0", "35.0"],
+                }
+            }
+            pl_2024 = {
+                "item": {
+                    "7203": ["2024/03", "100000", "15000", "16000", "10000", "100.0", "12.0", "5.0"],
+                    "6758": ["2024/03", "80000", "12000", "13000", "8000", "80.0", "10.0", "4.0"],
+                    "9984": ["2024/03", "60000", "9000", "9500", "6000", "60.0", "8.0", "3.0"],
+                }
+            }
+            # 年度別 CF は 6758 のみ持つ（capex が正値で格納されているケースをテスト）
+            cf_2024 = {
+                "meta": {"type": "CF"},
+                "item": {
+                    "6758": ["2024/03", "12000", "-4000", "-3000", "2500", "50000", "15.0"],
+                },
+            }
+            # 最新期 CF (0000): 7203 は capex が負値（IR BANK 実データ準拠）、9984 は capex 欠損 "-"
+            # 6758 も 0000 にあるが、年度別 0024 が優先されること
+            cf_0000 = {
+                "meta": {"type": "CF"},
+                "item": {
+                    "7203": ["2024/03", "10000", "-3000", "-2000", "-2000", "40000", "10.5"],
+                    "6758": ["2024/03", "99999", "-9999", "-9999", "-9999", "99999", "99.9"],
+                    "9984": ["2024/03", "8000", "-1000", "500", "-", "20000", "nan"],
+                },
+            }
+            (storage.financial_dir / "0024-fy-balance-sheet.json").write_text(json.dumps(bs_2024), encoding="utf-8")
+            (storage.financial_dir / "0024-fy-profit-and-loss.json").write_text(json.dumps(pl_2024), encoding="utf-8")
+            (storage.financial_dir / "0024-fy-cash-flow-statement.json").write_text(json.dumps(cf_2024), encoding="utf-8")
+            (storage.financial_dir / "0000-fy-cash-flow-statement.json").write_text(json.dumps(cf_0000), encoding="utf-8")
+
+            # 1) 7203: 年度別不在 -> 0000 フォールバック、capex=-2000 -> FCF = 10000 - abs(-2000) = 8000
+            fin_7203 = collector.collect_financial_data(
+                "7203.T",
+                fiscal_year=2024,
+                as_of_date=date(2024, 9, 30),
+                allow_download=False,
+                latest_close=1000.0,
+                read_only=True,
+            )
+            self.assertIsNotNone(fin_7203)
+            self.assertEqual(fin_7203.operating_cf, 10000.0)
+            self.assertEqual(fin_7203.investing_cf, -3000.0)
+            self.assertEqual(fin_7203.financing_cf, -2000.0)
+            self.assertEqual(fin_7203.capex, -2000.0)
+            self.assertEqual(fin_7203.free_cash_flow, 8000.0)
+            self.assertEqual(fin_7203.cash_and_equivalents, 40000.0)
+            self.assertEqual(fin_7203.operating_cf_margin, 10.5)
+
+            # 2) 6758: 年度別優先、capex=2500（正値）でも FCF = 12000 - abs(2500) = 9500
+            fin_6758 = collector.collect_financial_data(
+                "6758.T",
+                fiscal_year=2024,
+                as_of_date=date(2024, 9, 30),
+                allow_download=False,
+                latest_close=1000.0,
+                read_only=True,
+            )
+            self.assertIsNotNone(fin_6758)
+            self.assertEqual(fin_6758.operating_cf, 12000.0)
+            self.assertEqual(fin_6758.capex, 2500.0)
+            self.assertEqual(fin_6758.free_cash_flow, 9500.0)
+            self.assertEqual(fin_6758.operating_cf_margin, 15.0)
+
+            # 3) 9984: capex="-" のため free_cash_flow は None、operating_cf_margin="nan" も None
+            fin_9984 = collector.collect_financial_data(
+                "9984.T",
+                fiscal_year=2024,
+                as_of_date=date(2024, 9, 30),
+                allow_download=False,
+                latest_close=1000.0,
+                read_only=True,
+            )
+            self.assertIsNotNone(fin_9984)
+            self.assertEqual(fin_9984.operating_cf, 8000.0)
+            self.assertIsNone(fin_9984.capex)
+            self.assertIsNone(fin_9984.free_cash_flow)
+            self.assertIsNone(fin_9984.operating_cf_margin)
+
+    def test_collect_financial_data_cf_and_dividend_lookahead_and_type_guard(self):
+        """CF / 配当の未来決算・未開示データ・meta.type 不一致が無視されることを検証"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            collector, storage = self._make_isolated_collector(tmpdir)
+
+            # 2025/03 は 2025-05-15 時点で未開示 -> 2024/03 (adopted_year=2024, fiscal_date=2024-03-31) を採用する状況
+            bs_2025 = {"item": {"7203": ["2025/03", "1100000", "0", "0", "0", "0", "0", "2200.0", "46.0"]}}
+            pl_2025 = {"item": {"7203": ["2025/03", "110000", "16000", "17000", "11000", "110.0", "13.0", "5.5"]}}
+            bs_2024 = {"item": {"7203": ["2024/03", "1000000", "0", "0", "0", "0", "0", "2000.0", "45.0"]}}
+            pl_2024 = {"item": {"7203": ["2024/03", "100000", "15000", "16000", "10000", "100.0", "12.0", "5.0"]}}
+
+            # Case A: 0000 CF / 0000 配当に未来期 2025/03 が入っている -> fiscal_date (2024-03-31) と不一致のため遮断
+            cf_0000_future = {
+                "meta": {"type": "CF"},
+                "item": {"7203": ["2025/03", "99999", "-1000", "-1000", "-500", "88888", "25.0"]},
+            }
+            div_0000_future = {
+                "meta": {"type": "配当"},
+                "item": {"7203": ["2025/03", "150.0", "15000", "5000", "35.0", "50.0", "3.0"]},
+            }
+            # 過去期 0023 配当にもし同日(2024/03)が誤混入していた場合も upper_bound により弾かれる
+            div_2023_dup = {
+                "meta": {"type": "配当"},
+                "item": {"7203": ["2024/03", "100.0", "10000", "2000", "30.0", "40.0", "2.5"]},
+            }
+            # Case B: 0024 配当が meta.type 不一致 ("PL") -> 無視されること
+            div_2024_wrong_type = {
+                "meta": {"type": "PL"},
+                "item": {"7203": ["2024/03", "120.0", "12000", "3000", "31.0", "41.0", "2.6"]},
+            }
+            # Case C: 0024 CF が meta.type 不一致 ("配当") -> 無視され 0000 へフォールバック（それも未来期なので最終的に None）
+            cf_2024_wrong_type = {
+                "meta": {"type": "配当"},
+                "item": {"7203": ["2024/03", "10000", "-2000", "-1000", "-1000", "30000", "10.0"]},
+            }
+
+            (storage.financial_dir / "0025-fy-balance-sheet.json").write_text(json.dumps(bs_2025), encoding="utf-8")
+            (storage.financial_dir / "0025-fy-profit-and-loss.json").write_text(json.dumps(pl_2025), encoding="utf-8")
+            (storage.financial_dir / "0024-fy-balance-sheet.json").write_text(json.dumps(bs_2024), encoding="utf-8")
+            (storage.financial_dir / "0024-fy-profit-and-loss.json").write_text(json.dumps(pl_2024), encoding="utf-8")
+            (storage.financial_dir / "0024-fy-cash-flow-statement.json").write_text(
+                json.dumps(cf_2024_wrong_type), encoding="utf-8"
+            )
+            (storage.financial_dir / "0000-fy-cash-flow-statement.json").write_text(
+                json.dumps(cf_0000_future), encoding="utf-8"
+            )
+            (storage.financial_dir / "0024-fy-stock-dividend.json").write_text(
+                json.dumps(div_2024_wrong_type), encoding="utf-8"
+            )
+            (storage.financial_dir / "0000-fy-stock-dividend.json").write_text(
+                json.dumps(div_0000_future), encoding="utf-8"
+            )
+            (storage.financial_dir / "0023-fy-stock-dividend.json").write_text(
+                json.dumps(div_2023_dup), encoding="utf-8"
+            )
+
+            fin = collector.collect_financial_data(
+                "7203.T",
+                fiscal_year=2025,
+                as_of_date=date(2025, 5, 15),
+                disclosure_lag_days=60,
+                allow_download=False,
+                latest_close=1000.0,
+                read_only=True,
+            )
+            self.assertIsNotNone(fin)
+            self.assertEqual(fin.fiscal_date, date(2024, 3, 31))
+            # CF は型不一致 & 未来期によりすべて None
+            self.assertIsNone(fin.operating_cf)
+            self.assertIsNone(fin.free_cash_flow)
+            self.assertIsNone(fin.operating_cf_margin)
+            # 配当も型不一致 & 未来期 & 同日付異常によりすべて None
+            self.assertIsNone(fin.dividend_per_share)
+            self.assertIsNone(fin.total_dividends)
+            self.assertIsNone(fin.share_buyback)
+            self.assertIsNone(fin.consecutive_dividend_increase_years)
+            self.assertIsNone(fin.consecutive_non_decrease_years)
+            self.assertIsNone(fin.buyback_count_3y)
+
+            # さらに、disclosure_lag_days 未満の未開示データのみが存在する場合も個別メソッドで遮断されることを直接確認
+            with tempfile.TemporaryDirectory() as tmpdir_unreleased:
+                collector_unrel, storage_unrel = self._make_isolated_collector(tmpdir_unreleased)
+                (storage_unrel.financial_dir / "0025-fy-cash-flow-statement.json").write_text(
+                    json.dumps(cf_0000_future), encoding="utf-8"
+                )
+                cf_unreleased = collector_unrel._resolve_cash_flow_entry(
+                    code="7203",
+                    adopted_year=2025,
+                    fiscal_date=date(2025, 3, 31),
+                    as_of_date=date(2025, 5, 15),
+                    disclosure_lag_days=60,
+                    allow_download=False,
+                    read_only=True,
+                )
+                self.assertIsNone(cf_unreleased)
+
+                (storage_unrel.financial_dir / "0025-fy-stock-dividend.json").write_text(
+                    json.dumps(div_0000_future), encoding="utf-8"
+                )
+                div_unreleased = collector_unrel._collect_dividend_metrics(
+                    code="7203",
+                    adopted_year=2025,
+                    fiscal_date=date(2025, 3, 31),
+                    as_of_date=date(2025, 5, 15),
+                    disclosure_lag_days=60,
+                    allow_download=False,
+                    read_only=True,
+                )
+                self.assertIsNone(div_unreleased["dividend_per_share"])
+                self.assertIsNone(div_unreleased["buyback_count_3y"])
+
+    def test_collect_financial_data_dividend_history_and_momentum(self):
+        """配当履歴・連続増配/連続非減配（横ばい含む）・直近3期自社株買い・株式分割補正を検証"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            collector, storage = self._make_isolated_collector(tmpdir)
+
+            bs_2025 = {
+                "item": {
+                    "1001": ["2025/03", "100000", "0", "0", "0", "0", "0", "1000.0", "40.0"],  # 横ばい含む非減配 + 自社株買い2回 + 0000フォールバック
+                    "1002": ["2025/03", "100000", "0", "0", "0", "0", "0", "1000.0", "40.0"],  # 連続増配 + 自社株買い3回
+                    "1003": ["2025/03", "100000", "0", "0", "0", "0", "0", "1000.0", "40.0"],  # 株式分割（見かけ半減だが配当総額維持）
+                    "1004": ["2025/03", "100000", "0", "0", "0", "0", "0", "1000.0", "40.0"],  # 株式分割＋総配当増配
+                    "1005": ["2025/03", "100000", "0", "0", "0", "0", "0", "1000.0", "40.0"],  # 実減配（総配当も半減）
+                    "1006": ["2025/03", "100000", "0", "0", "0", "0", "0", "1000.0", "40.0"],  # 無配継続 (0 -> 0)
+                    "1007": ["2025/03", "100000", "0", "0", "0", "0", "0", "1000.0", "40.0"],  # 前年比較不可（当期のみ）
+                    "1008": ["2025/03", "100000", "0", "0", "0", "0", "0", "1000.0", "40.0"],  # 当期欠損だが直近3期に過去期自社株買いあり
+                }
+            }
+            pl_2025 = {
+                "item": {
+                    code: ["2025/03", "50000", "5000", "5200", "3500", "100.0", "10.0", "5.0"]
+                    for code in bs_2025["item"]
+                }
+            }
+            (storage.financial_dir / "0025-fy-balance-sheet.json").write_text(json.dumps(bs_2025), encoding="utf-8")
+            (storage.financial_dir / "0025-fy-profit-and-loss.json").write_text(json.dumps(pl_2025), encoding="utf-8")
+
+            # 年度別配当データ（1001 は 0025 に存在せず 0000 へフォールバックさせる）
+            div_by_year = {
+                2025: {
+                    "meta": {"type": "配当"},
+                    "item": {
+                        "1002": ["2025/03", "130.0", "13000", "500", "30.0", "45.0", "3.0"],
+                        "1003": ["2025/03", "50.0", "10000", "0", "25.0", "25.0", "2.0"],
+                        "1004": ["2025/03", "55.0", "11000", "-", "28.0", "28.0", "2.2"],
+                        "1005": ["2025/03", "50.0", "5000", "0", "20.0", "20.0", "1.5"],
+                        "1006": ["2025/03", "0", "0", "0", "0", "0", "0"],
+                        "1007": ["2025/03", "80.0", "8000", "0", "25.0", "25.0", "2.0"],
+                    },
+                },
+                0: {
+                    "meta": {"type": "配当"},
+                    "item": {
+                        "1001": ["2025/03", "100.0", "10000", "1200", "32.0", "48.0", "2.8"],
+                    },
+                },
+                2024: {
+                    "meta": {"type": "配当"},
+                    "item": {
+                        "1001": ["2024/03", "100.0", "10000", "0"],
+                        "1002": ["2024/03", "120.0", "12000", "400"],
+                        "1003": ["2024/03", "100.0", "10000", "0"],
+                        "1004": ["2024/03", "100.0", "10000", "0"],
+                        "1005": ["2024/03", "100.0", "10000", "0"],
+                        "1006": ["2024/03", "0", "0", "0"],
+                        "1008": ["2024/03", "60.0", "6000", "300"],
+                    },
+                },
+                2023: {
+                    "meta": {"type": "配当"},
+                    "item": {
+                        "1001": ["2023/03", "90.0", "9000", "800"],
+                        "1002": ["2023/03", "110.0", "11000", "300"],
+                        "1003": ["2023/03", "90.0", "9000", "0"],
+                        "1004": ["2023/03", "90.0", "9000", "0"],
+                        "1008": ["2023/03", "50.0", "5000", "0"],
+                    },
+                },
+                2022: {
+                    "meta": {"type": "配当"},
+                    "item": {
+                        "1001": ["2022/03", "80.0", "8000", "0"],
+                        "1002": ["2022/03", "110.0", "11000", "0"],  # 2023==2022 のため増配はここで止まる
+                    },
+                },
+                2021: {
+                    "meta": {"type": "配当"},
+                    "item": {
+                        "1001": ["2021/03", "85.0", "8500", "0"],  # 2022<2021 なので非減配は3年で止まる
+                    },
+                },
+            }
+            for yr, payload in div_by_year.items():
+                suffix = "0000" if yr == 0 else f"00{str(yr)[-2:]}"
+                (storage.financial_dir / f"{suffix}-fy-stock-dividend.json").write_text(
+                    json.dumps(payload), encoding="utf-8"
+                )
+
+            as_of = date(2025, 9, 30)
+            # 1001: 0000 フォールバック、2025(100)==2024(100)>2023(90)>2022(80)<2021(85)
+            # -> 連続増配=0, 連続非減配=3, buyback_count_3y=2 (2025:1200, 2023:800)
+            f1001 = collector.collect_financial_data(
+                "1001.T", fiscal_year=2025, as_of_date=as_of, allow_download=False, latest_close=1000.0, read_only=True
+            )
+            self.assertEqual(f1001.dividend_per_share, 100.0)
+            self.assertEqual(f1001.total_dividends, 10000.0)
+            self.assertEqual(f1001.share_buyback, 1200.0)
+            self.assertEqual(f1001.payout_ratio, 32.0)
+            self.assertEqual(f1001.total_payout_ratio, 48.0)
+            self.assertEqual(f1001.doe, 2.8)
+            self.assertEqual(f1001.consecutive_dividend_increase_years, 0)
+            self.assertEqual(f1001.consecutive_non_decrease_years, 3)
+            self.assertEqual(f1001.buyback_count_3y, 2)
+
+            # 1002: 2025(130)>2024(120)>2023(110)==2022(110)
+            # -> 連続増配=2, 連続非減配=3, buyback_count_3y=3
+            f1002 = collector.collect_financial_data(
+                "1002.T", fiscal_year=2025, as_of_date=as_of, allow_download=False, latest_close=1000.0, read_only=True
+            )
+            self.assertEqual(f1002.consecutive_dividend_increase_years, 2)
+            self.assertEqual(f1002.consecutive_non_decrease_years, 3)
+            self.assertEqual(f1002.buyback_count_3y, 3)
+
+            # 1003: 株式分割で dps 100 -> 50 だが total 10000 -> 10000 維持（さらに 2024>2023）
+            # -> 連続増配=0, 連続非減配=2
+            f1003 = collector.collect_financial_data(
+                "1003.T", fiscal_year=2025, as_of_date=as_of, allow_download=False, latest_close=1000.0, read_only=True
+            )
+            self.assertEqual(f1003.consecutive_dividend_increase_years, 0)
+            self.assertEqual(f1003.consecutive_non_decrease_years, 2)
+
+            # 1004: 株式分割で dps 100 -> 55 だが total 10000 -> 11000 増加（2024>2023）
+            # -> 連続増配=2, 連続非減配=2
+            f1004 = collector.collect_financial_data(
+                "1004.T", fiscal_year=2025, as_of_date=as_of, allow_download=False, latest_close=1000.0, read_only=True
+            )
+            self.assertEqual(f1004.consecutive_dividend_increase_years, 2)
+            self.assertEqual(f1004.consecutive_non_decrease_years, 2)
+
+            # 1005: 実減配 (dps 100->50, total 10000->5000) -> 連続増配=0, 連続非減配=0
+            f1005 = collector.collect_financial_data(
+                "1005.T", fiscal_year=2025, as_of_date=as_of, allow_download=False, latest_close=1000.0, read_only=True
+            )
+            self.assertEqual(f1005.consecutive_dividend_increase_years, 0)
+            self.assertEqual(f1005.consecutive_non_decrease_years, 0)
+
+            # 1006: 無配継続 (0 -> 0) -> 連続増配=0, 連続非減配=0 (curr_val > 0 ガード)
+            f1006 = collector.collect_financial_data(
+                "1006.T", fiscal_year=2025, as_of_date=as_of, allow_download=False, latest_close=1000.0, read_only=True
+            )
+            self.assertEqual(f1006.consecutive_dividend_increase_years, 0)
+            self.assertEqual(f1006.consecutive_non_decrease_years, 0)
+
+            # 1007: 当期のみ -> 連続増配=None, 連続非減配=None, buyback_count_3y=0
+            f1007 = collector.collect_financial_data(
+                "1007.T", fiscal_year=2025, as_of_date=as_of, allow_download=False, latest_close=1000.0, read_only=True
+            )
+            self.assertIsNone(f1007.consecutive_dividend_increase_years)
+            self.assertIsNone(f1007.consecutive_non_decrease_years)
+            self.assertEqual(f1007.buyback_count_3y, 0)
+
+            # 1008: 当期欠損だが 2024 に自社株買いあり -> 連続系は None, buyback_count_3y=1
+            f1008 = collector.collect_financial_data(
+                "1008.T", fiscal_year=2025, as_of_date=as_of, allow_download=False, latest_close=1000.0, read_only=True
+            )
+            self.assertIsNone(f1008.dividend_per_share)
+            self.assertIsNone(f1008.consecutive_dividend_increase_years)
+            self.assertIsNone(f1008.consecutive_non_decrease_years)
+            self.assertEqual(f1008.buyback_count_3y, 1)
+
+    def test_collect_financial_data_cf_and_dividend_read_only_and_no_download(self):
+        """read_only=True / allow_download=False 時に CF・配当ファイルで DL や破損JSON削除が呼ばれないことを検証"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            collector, storage = self._make_isolated_collector(tmpdir)
+
+            bs_2024 = {"item": {"7203": ["2024/03", "1000000", "500000", "450000", "300000", "10000", "20000", "2000.0", "45.0"]}}
+            pl_2024 = {"item": {"7203": ["2024/03", "100000", "15000", "16000", "10000", "100.0", "12.0", "5.0"]}}
+            (storage.financial_dir / "0024-fy-balance-sheet.json").write_text(json.dumps(bs_2024), encoding="utf-8")
+            (storage.financial_dir / "0024-fy-profit-and-loss.json").write_text(json.dumps(pl_2024), encoding="utf-8")
+
+            corrupt_cf = storage.financial_dir / "0000-fy-cash-flow-statement.json"
+            corrupt_div = storage.financial_dir / "0024-fy-stock-dividend.json"
+            corrupt_cf.write_text("{corrupt cf", encoding="utf-8")
+            corrupt_div.write_text("{corrupt div", encoding="utf-8")
+
+            # 1) read_only=True（allow_download=True を渡しても DL・破損削除しない）
+            with patch.object(collector, "_download_irbank_file") as mock_dl:
+                fin_ro = collector.collect_financial_data(
+                    "7203.T",
+                    fiscal_year=2024,
+                    as_of_date=date(2024, 9, 30),
+                    allow_download=True,
+                    latest_close=1000.0,
+                    read_only=True,
+                )
+            self.assertIsNotNone(fin_ro)
+            self.assertIsNone(fin_ro.operating_cf)
+            self.assertIsNone(fin_ro.dividend_per_share)
+            mock_dl.assert_not_called()
+            self.assertTrue(corrupt_cf.exists())
+            self.assertTrue(corrupt_div.exists())
+
+            # 2) allow_download=False（ファイル未存在状態でも DL しない）
+            corrupt_cf.unlink()
+            corrupt_div.unlink()
+            collector._irbank_json_cache.clear()
+            collector._irbank_failed_downloads.clear()
+
+            with patch.object(collector, "_download_irbank_file") as mock_dl:
+                fin_nodl = collector.collect_financial_data(
+                    "7203.T",
+                    fiscal_year=2024,
+                    as_of_date=date(2024, 9, 30),
+                    allow_download=False,
+                    latest_close=1000.0,
+                    read_only=False,
+                )
+            self.assertIsNotNone(fin_nodl)
+            mock_dl.assert_not_called()
+
+    def test_collect_financial_data_dividend_requires_exact_fiscal_date_for_current_year(self):
+        """当期年度別配当の決算期が fiscal_date と異なる旧期の場合は無視し、0000一致採用または None とする"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            collector, storage = self._make_isolated_collector(tmpdir)
+
+            bs_2025 = {
+                "item": {
+                    "2001": ["2025/03", "100000", "0", "0", "0", "0", "0", "1000.0", "40.0"],
+                    "2002": ["2025/03", "100000", "0", "0", "0", "0", "0", "1000.0", "40.0"],
+                }
+            }
+            pl_2025 = {
+                "item": {
+                    "2001": ["2025/03", "50000", "5000", "5200", "3500", "100.0", "10.0", "5.0"],
+                    "2002": ["2025/03", "50000", "5000", "5200", "3500", "100.0", "10.0", "5.0"],
+                }
+            }
+            # 0025 配当には両銘柄とも旧決算期 (2024/12) が入っている
+            div_2025_old_period = {
+                "meta": {"type": "配当"},
+                "item": {
+                    "2001": ["2024/12", "40.0", "4000", "0", "20.0", "20.0", "1.5"],
+                    "2002": ["2024/12", "50.0", "5000", "100", "22.0", "25.0", "1.8"],
+                },
+            }
+            # 0000 配当: 2001 は 2025/03 一致データあり、2002 は 2024/12 のみで一致データなし
+            div_0000 = {
+                "meta": {"type": "配当"},
+                "item": {
+                    "2001": ["2025/03", "120.0", "12000", "500", "35.0", "45.0", "3.0"],
+                    "2002": ["2024/12", "50.0", "5000", "100", "22.0", "25.0", "1.8"],
+                },
+            }
+            (storage.financial_dir / "0025-fy-balance-sheet.json").write_text(json.dumps(bs_2025), encoding="utf-8")
+            (storage.financial_dir / "0025-fy-profit-and-loss.json").write_text(json.dumps(pl_2025), encoding="utf-8")
+            (storage.financial_dir / "0025-fy-stock-dividend.json").write_text(
+                json.dumps(div_2025_old_period), encoding="utf-8"
+            )
+            (storage.financial_dir / "0000-fy-stock-dividend.json").write_text(json.dumps(div_0000), encoding="utf-8")
+
+            as_of = date(2025, 9, 30)
+            # 1) 0025 が旧決算期でも、0000 に 2025/03 一致データがあれば 0000 側を採用する
+            fin_2001 = collector.collect_financial_data(
+                "2001.T", fiscal_year=2025, as_of_date=as_of, allow_download=False, latest_close=1000.0, read_only=True
+            )
+            self.assertIsNotNone(fin_2001)
+            self.assertEqual(fin_2001.dividend_per_share, 120.0)
+            self.assertEqual(fin_2001.total_dividends, 12000.0)
+            self.assertEqual(fin_2001.share_buyback, 500.0)
+            self.assertEqual(fin_2001.payout_ratio, 35.0)
+            self.assertEqual(fin_2001.total_payout_ratio, 45.0)
+            self.assertEqual(fin_2001.doe, 3.0)
+            self.assertEqual(fin_2001.buyback_count_3y, 1)
+
+            # 2) 0025 にも 0000 にも 2025/03 一致データが無ければ旧期データを誤採用せず None とする
+            fin_2002 = collector.collect_financial_data(
+                "2002.T", fiscal_year=2025, as_of_date=as_of, allow_download=False, latest_close=1000.0, read_only=True
+            )
+            self.assertIsNotNone(fin_2002)
+            self.assertIsNone(fin_2002.dividend_per_share)
+            self.assertIsNone(fin_2002.total_dividends)
+            self.assertIsNone(fin_2002.share_buyback)
+            self.assertIsNone(fin_2002.payout_ratio)
+            self.assertIsNone(fin_2002.total_payout_ratio)
+            self.assertIsNone(fin_2002.doe)
+            self.assertIsNone(fin_2002.consecutive_dividend_increase_years)
+            self.assertIsNone(fin_2002.consecutive_non_decrease_years)
+            self.assertIsNone(fin_2002.buyback_count_3y)
 
 if __name__ == '__main__':
     unittest.main()
