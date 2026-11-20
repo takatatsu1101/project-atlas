@@ -65,25 +65,33 @@ strategy_score:
   watch_score_cap: 59.0
 
   # 押し目買い戦略（pullback）の重み・裏付け加点（重み合計 1.0）
-  pullback_weight_p001: 0.38
-  pullback_weight_trend_env: 0.22
-  pullback_weight_o001: 0.15
-  pullback_weight_fundamental: 0.10
-  pullback_weight_volatility_stability: 0.10
-  pullback_weight_v001: 0.05
+  pullback_weight_p001: 0.32
+  pullback_weight_trend_env: 0.20
+  pullback_weight_o001: 0.10
+  pullback_weight_fundamental: 0.22
+  pullback_weight_volatility_stability: 0.12
+  pullback_weight_v001: 0.04
   double_bottom_bonus_factor: 0.10
-  double_bottom_bonus_max: 10.0
+  double_bottom_bonus_max: 6.0
   hammer_bonus_factor: 0.05
   hammer_bonus_max: 5.0
   # 押し目売り枯れ後の反発出来高増加点
   pullback_dryup_rebound_bonus: 5.0
 
-  # ブレイクアウト戦略（breakout）の重み
-  breakout_weight_p002: 0.35
-  breakout_weight_v001: 0.35
+  # ブレイクアウト戦略（breakout）の重み（重み合計 1.0）
+  breakout_weight_p002: 0.33
+  breakout_weight_v001: 0.22
   breakout_weight_o001: 0.10
-  breakout_weight_trend_env: 0.10
-  breakout_weight_fundamental: 0.10
+  breakout_weight_trend_env: 0.13
+  breakout_weight_fundamental: 0.22
+
+  # ファンダメンタルズ特徴量別の相対重み（欠損時は取得可能項目へ自動再配分）
+  fundamental_weight_f001: 0.05
+  fundamental_weight_f002: 0.20
+  fundamental_weight_f003: 0.50
+  fundamental_weight_f004: 0.05
+  fundamental_weight_f005: 0.05
+  fundamental_weight_f006: 0.15
 
   # 必須特徴量チェックを有効にするか
   require_core_features: true
@@ -170,7 +178,7 @@ market_context:
   # 押し目買い戦略における正のRS補正抑制係数（高β急騰株の過剰評価抑止）
   pullback_rs_positive_factor: 0.3
   # 各補正点の最大振れ幅（+/-）と合計補正キャップ
-  rs_adjustment_max: 4.0
-  sector_momentum_adjustment_max: 4.0
-  relative_valuation_adjustment_max: 4.0
-  total_adjustment_cap: 8.0
+  rs_adjustment_max: 4.5
+  sector_momentum_adjustment_max: 2.5
+  relative_valuation_adjustment_max: 5.5
+  total_adjustment_cap: 10.0
