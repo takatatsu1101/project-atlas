@@ -211,14 +211,16 @@ class TestGeminiBrief(unittest.TestCase):
                 sma75=2700.0,
                 above_sma25=True,
                 above_sma75=True,
-                return_20d=0.035,
+                return_20d=3.5,
+                return_60d=6.2,
+                return_120d=-1.4,
             ),
             sector_metrics={
                 "電気機器": SectorMetricsModel(
                     sector_33="電気機器",
                     member_count=10,
                     is_sufficient=True,
-                    avg_return_20d=0.05,
+                    avg_return_20d=5.0,
                     above_sma25_ratio=0.80,
                     sector_momentum_score=85.0,
                 ),
@@ -226,7 +228,7 @@ class TestGeminiBrief(unittest.TestCase):
                     sector_33="海運業",
                     member_count=6,
                     is_sufficient=True,
-                    avg_return_20d=-0.03,
+                    avg_return_20d=-3.0,
                     above_sma25_ratio=0.20,
                     sector_momentum_score=20.0,
                 ),
@@ -246,8 +248,11 @@ class TestGeminiBrief(unittest.TestCase):
             metadata={"processed_symbols_count": 50, "filtered_count": 5},
         )
         self.assertIn("1306.T", md)
+        self.assertIn("20d=+3.50%, 60d=+6.20%, 120d=-1.40%", md)
         self.assertIn("電気機器", md)
+        self.assertIn("+5.00%", md)
         self.assertIn("海運業", md)
+        self.assertIn("-3.00%", md)
         self.assertIn("6758.T", md)
         self.assertIn("9984.T", md)
         self.assertIn("直近15営業日 OHLCV", md)

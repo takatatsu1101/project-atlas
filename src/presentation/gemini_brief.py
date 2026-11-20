@@ -581,9 +581,9 @@ def _render_market_section(
         lines.append(
             f"- **ベンチマーク (`{bm.symbol}`)**: 終値 {_fmt_yen(bm.close)} | "
             f"SMA25({sma25_pos}): {_fmt_yen(bm.sma25)} | SMA75({sma75_pos}): {_fmt_yen(bm.sma75)} | "
-            f"騰落率 20d={_fmt_pct((bm.return_20d * 100.0) if bm.return_20d is not None else None)}, "
-            f"60d={_fmt_pct((bm.return_60d * 100.0) if bm.return_60d is not None else None)}, "
-            f"120d={_fmt_pct((bm.return_120d * 100.0) if bm.return_120d is not None else None)}"
+            f"騰落率 20d={_fmt_pct(bm.return_20d)}, "
+            f"60d={_fmt_pct(bm.return_60d)}, "
+            f"120d={_fmt_pct(bm.return_120d)}"
         )
 
     # 33業種ランキング（上位・下位）
@@ -604,7 +604,7 @@ def _render_market_section(
         lines.append("| 順位 | 業種 | 銘柄数 | 平均20日リターン | SMA25上回り率 | モメンタムスコア |")
         lines.append("|---:|---|---:|---:|---:|---:|")
         for idx, sm in enumerate(top_sectors, start=1):
-            ret20 = (sm.avg_return_20d * 100.0) if sm.avg_return_20d is not None else None
+            ret20 = sm.avg_return_20d
             above25 = (
                 (sm.above_sma25_ratio * 100.0)
                 if sm.above_sma25_ratio is not None
@@ -623,7 +623,7 @@ def _render_market_section(
         total_cnt = len(sufficient_sectors)
         for offset, sm in enumerate(bottom_sectors):
             rank_num = total_cnt - offset
-            ret20 = (sm.avg_return_20d * 100.0) if sm.avg_return_20d is not None else None
+            ret20 = sm.avg_return_20d
             above25 = (
                 (sm.above_sma25_ratio * 100.0)
                 if sm.above_sma25_ratio is not None
