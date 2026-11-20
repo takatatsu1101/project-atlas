@@ -270,6 +270,38 @@ Project Atlas は、スイングトレード（数週間〜3ヶ月保有）向�
         - 基準日厳密分離された `MarketContext` 構築、RS ランク・業種モメンタム・Market Breadth・少銘柄フォールバックの単体テスト追加と全テストパス。
         - 上昇相場・調整相場を含む複数基準日での `--mode backtest` を実行し、地合い悪化局面でのブレイクアウト勝率・MAE の改善、および RS 上位群の勝率優位性を検証する。
 
+### 3.6. フェーズ6: 後段AI（Gemini / Skill）連携基盤・高密度ブリーフ出力 (計画中・1要件1PR構成)
+
+`docs/GeminiPrompt.md` で運用している後段 AI（iPhone Gemini アプリ / Skill 定期実行）とシームレスに連携し、1次スクリーニング結果から判断材料（レジサポ・直近15日OHLCV・33業種ローテーション・既存監視銘柄の最新状態）を過不足なく引き渡せるようにする。また、当面は手元 Mac（Google ドライブ デスクトップ同期フォルダ出力）で運用を開始し、将来的な GitHub Actions 完全無人実行（Drive API 連携）へ段階的に移行できる構成とする。
+
+- [ ] **PR #1: Gemini 連携用高密度ブリーフ出力・監視銘柄同梱・Googleドライブ同期フォルダ出力 (`feat/gemini-brief-report`)**
+    - **目的**: 既存の `screening_report_*` の互換性を維持したまま、Gemini アプリへそのまま添付・同期して2次選別および既存監視銘柄の A〜D 判定を行える高密度 Markdown ブリーフ（`gemini_brief_YYYY-MM-DD.md` + `gemini_brief_latest.md`）、Google ドライブ同期フォルダへの自動コピー、および専用運用プリセット（`config/screening_gemini.yaml`）を整備する。
+    - **対象スコープ**:
+        - [ ] **株価上限（`max_close`）フィルタの追加**: `PreScreeningCriteria` に `max_close: Optional[float] = None` を追加し、`--config config/screening_gemini.yaml`（東証プライム、20日平均売買代金 30億円以上、`max_close: 5000.0`＝1単元 50万円以下）で実運用条件を適用可能にする。
+        - [ ] **多層レジサポ＆価格帯別出来高 POC・MA傾き算出**: 直近 15営業日 OHLCV、SMA5/25/75/200（価格・乖離率・傾き）、20日/60日/250日高値・安値、直近スイング高安（押し安値・戻り高値）、直近60日価格帯別出来高 POC、1単元必要資金・20日平均売買代金・`+3%` ギャップ上限目安をブリーフ向けに構造化抽出する（`as_of_date` 以前のバーのみ参照し先読み厳禁）。
+        - [ ] **市場環境・33業種ローテーション表**: `MarketContext`（地合いレジーム・Breadth・`1306.T` 状態・33業種モメンタム上位/下位ランキング）をブリーフ冒頭へ出力する。
+        - [ ] **既存監視銘柄（`--watch-symbols` / 監視設定）の同梱**: スクリーニング上位外の監視銘柄についても同一フォーマットの最新判断材料（OHLCV 15日・支持線/抵抗線・MA位置・流動性・現在スコア）を別セクションへ出力する。
+        - [ ] **Gemini 専用ブリーフ出力＆Google ドライブ同期フォルダ連携（方式A）**: `output.formats`（例：`gemini`）および `output.gemini_brief_copy_dir` / CLI（`--gemini-brief`, `--brief-copy-dir`）で `gemini_brief_YYYY-MM-DD.md` / `gemini_brief_latest.md` を出力し、Google ドライブ同期フォルダへ自動コピーする（未マウント時は警告ログに留めローカル出力を保護）。
+    - **変更予定ファイル**:
+        - `src/screener/pre_screener.py`, `src/pipeline_worker.py`
+        - `src/presentation/presenter.py`, `src/presentation/gemini_brief.py`（ブリーフ生成と配信・コピーを分離）
+        - `src/config/screening_config.py`, `config/screening_gemini.yaml`（新規）
+        - `src/main.py`
+        - 関連単体テスト・結合テストおよび仕様書
+    - **設計上の決定事項**:
+        - 既存の `screening_report_*` や `config/screening.yaml`、および並列ワーカーの読み取り専用制約は一切破壊しない。
+        - 監視銘柄データやブリーフ用OHLCV/レジサポ抽出は `as_of_date` 以前のスライスのみを使用し、先読みバイアスを完全に遮断する。
+        - 将来の GitHub Actions 移行（PR #2）を見据え、ブリーフ生成処理と配信（ファイルコピー / API アップロード）の責務を分離する。
+    - **完了条件（テストおよび動作確認）**:
+        - `max_close` フィルタ、スイング高安/POC/MA傾き算出、監視銘柄同梱、`gemini_brief_*.md` / `latest` 出力、コピー先フォールバックの単体・結合テストを追加し全テストがパスすること。
+        - 実際に `--config config/screening_gemini.yaml` 等で実行し、`gemini_brief_*.md` が `docs/GeminiPrompt.md` の判断材料要件を満たすことを確認する。
+
+- [ ] **PR #2（将来拡張）: GitHub Actions 定期実行＆Google Drive API 直接アップロード (`feat/github-actions-drive-sync`)**
+    - **目的**: 手元 Mac がスリープ／オフラインの状態でも、平日大引け後にクラウド上で自動スクリーニングを実行し、Google Drive API 経由で最新ブリーフを直接アップロードできるようにする。
+    - **対象スコープ**:
+        - [ ] Google Drive API（サービスアカウント / OAuth シークレット）を用いたアップロードアダプタ実装
+        - [ ] GitHub Actions ワークフロー（平日大引け後 cron）および `data/price/`, `data/financial/`, `data/master/` キャッシュ同期設計
+
 ## 4. 今後のマイルストーン
 - [x] 2026/08/31: フェーズ2の「特徴量・パターン追加およびパイプライン結合」完了
 - [x] 2026/11/15: 要件見直し（v0.2.0）および1要件1PR計画の策定完了（PR #1）
@@ -279,6 +311,8 @@ Project Atlas は、スイングトレード（数週間〜3ヶ月保有）向�
 - [x] フェーズ5 PR #2（Step 2）: Phase A テクニカル特徴量・スコア改善
 - [x] フェーズ5 PR #3（Step 3）: Phase A 財務データ拡張・`F004`/`F005` 刷新＆`F006` 新設
 - [x] フェーズ5 PR #4（Step 4）: Phase B 相対力（RS）・業種モメンタム・地合いレジーム導入
+- [ ] フェーズ6 PR #1: 後段AI（Gemini / Skill）連携向け高密度ブリーフ出力・監視銘柄追跡・Googleドライブ同期フォルダ連携
+- [ ] フェーズ6 PR #2（将来拡張）: GitHub Actions 自動定期実行＆Google Drive API 直接アップロード
 
 ## 5. 実行ログ (最新の作業のみ記載)
 - 2026/11/20: フェーズ5 PR #4（Step 4: `feat/phase-b-relative-strength-and-regime`）を実施。`src/score_engine/market_context.py`（`MarketContextConfig`, `extract_symbol_market_snapshot`, `compute_benchmark_metrics`, `build_market_context`）および読み取り専用 `MarketContextModel`（`frozen=True`）を新設し、並列ワーカー外（親プロセス側）で基準日 `d` 以前のデータのみからベンチマーク `1306.T`・対 TOPIX RS パーセンタイル順位（120日欠損フォールバック＆押し目買い戦略向け正の RS 抑制 `pullback_rs_positive_factor=0.3`）・33業種モメンタム・業種内相対バリュエーション（対数PER/対数PBR/ROE Zスコア）・Market Breadth 地合いレジーム（`breadth < 0.40` かつ TOPIX `< SMA25` または極端悪化 `breadth < 0.35` で `bearish` 判定し、ブレイクアウト要求閾値 `+8.0` 点引上げ＆ブレイクアウト減点 `6.0` 点を適用）を構築し、`StrategyScoreCalculator` と `Screener` へ注入（少銘柄/少業種/ベンチマーク欠損時安全フォールバック・`scale` 補正は Q4-4 に基づき別 PR 分離）。さらに `ForwardReturnEvaluator` / `Presenter` へ `MC_RS_Rank` / `MC_SectorMomentum` / `MC_RelativeValuation` 分位評価と地合いレジームサマリー出力を統合。全テスト363件（+4サブテスト）パスを確認。
