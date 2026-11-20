@@ -919,6 +919,97 @@ class TestStrategyScoreCalculator(unittest.TestCase):
         self.assertAlmostEqual(res_nan_ctx.sub_scores["breakout_strategy_score"], base_bo_score)
         self.assertAlmostEqual(res_nan_ctx.sub_scores["market_context_adjustment"], 0.0)
 
+    def test_fundamental_weighted_average_and_fallbacks(self):
+        """ファンダメンタルズ特徴量別重み（加重平均・欠損時再配分・非正/非有限重みガード）を検証する"""
+        base_tech = {
+            "M001_MAAlignmentScore": 80.0,
+            "T001_TrendStrengthScore": 80.0,
+            "P001_PullbackScore": 75.0,
+            "P002_BreakoutScore": 50.0,
+            "O001_MomentumScore": 65.0,
+            "V001_VolumeScore": 60.0,
+            "R001_VolatilityScore": 70.0,
+        }
+        full_fund = {
+            "F001_ProfitabilityScore": 40.0,
+            "F002_GrowthScore": 80.0,
+            "F003_ValuationScore": 100.0,
+            "F004_FinancialHealthScore": 20.0,
+            "F005_EarningsQualityScore": 60.0,
+            "F006_ShareholderReturnScore": 60.0,
+        }
+        fs_full = self._build_feature_set({**base_tech, **full_fund})
+
+        # 1. デフォルト設定（全て 1.0）では単純平均 (40+80+100+20+60+60)/6 = 60.0 と一致
+        res_default = self.calculator.calculate([fs_full], [])[0]
+        self.assertAlmostEqual(res_default.sub_scores["fundamental_score"], 60.0, places=4)
+
+        # 2. 非均等重み付けで加重平均が正しく算出される
+        weighted_cfg = StrategyScoreConfig(
+            fundamental_weight_f001=0.05,
+            fundamental_weight_f002=0.20,
+            fundamental_weight_f003=0.50,
+            fundamental_weight_f004=0.05,
+            fundamental_weight_f005=0.05,
+            fundamental_weight_f006=0.15,
+        )
+        weighted_calc = StrategyScoreCalculator(config=weighted_cfg)
+        res_weighted = weighted_calc.calculate([fs_full], [])[0]
+        expected_full = (
+            40.0 * 0.05
+            + 80.0 * 0.20
+            + 100.0 * 0.50
+            + 20.0 * 0.05
+            + 60.0 * 0.05
+            + 60.0 * 0.15
+        ) / 1.0
+        self.assertAlmostEqual(
+            res_weighted.sub_scores["fundamental_score"], expected_full, places=4
+        )
+
+        # 3. 一部欠損（F003, F006 のみ存在）時は取得可能項目の重み合計(0.65)で自動再配分
+        fs_partial = self._build_feature_set(
+            {
+                **base_tech,
+                "F003_ValuationScore": 100.0,
+                "F006_ShareholderReturnScore": 60.0,
+            }
+        )
+        res_partial = weighted_calc.calculate([fs_partial], [])[0]
+        expected_partial = (100.0 * 0.50 + 60.0 * 0.15) / (0.50 + 0.15)
+        self.assertAlmostEqual(
+            res_partial.sub_scores["fundamental_score"], expected_partial, places=4
+        )
+
+        # 4. すべての重みが 0 以下 / 非有限の場合は中立 50.0 へフォールバックする
+        zero_cfg = StrategyScoreConfig(
+            fundamental_weight_f001=0.0,
+            fundamental_weight_f002=-1.0,
+            fundamental_weight_f003=float("nan"),
+            fundamental_weight_f004=float("inf"),
+            fundamental_weight_f005=0.0,
+            fundamental_weight_f006=0.0,
+        )
+        zero_calc = StrategyScoreCalculator(config=zero_cfg)
+        res_zero = zero_calc.calculate([fs_full], [])[0]
+        self.assertAlmostEqual(res_zero.sub_scores["fundamental_score"], 50.0, places=4)
+        self.assertTrue(any("中立値(50.0)" in r for r in res_zero.reasons))
+
+        # 5. 一部の特徴量スコアが NaN / inf の場合は当該項目のみ除外し残りで加重平均する
+        fs_nan_score = self._build_feature_set(
+            {
+                **base_tech,
+                "F002_GrowthScore": float("nan"),
+                "F003_ValuationScore": 100.0,
+                "F004_FinancialHealthScore": float("inf"),
+                "F006_ShareholderReturnScore": 60.0,
+            }
+        )
+        res_nan_score = weighted_calc.calculate([fs_nan_score], [])[0]
+        self.assertAlmostEqual(
+            res_nan_score.sub_scores["fundamental_score"], expected_partial, places=4
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

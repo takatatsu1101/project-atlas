@@ -23,13 +23,17 @@ CORE_FEATURE_IDS: Tuple[str, ...] = (
     "P002_BreakoutScore",
 )
 
-FUNDAMENTAL_FEATURE_IDS: Tuple[str, ...] = (
-    "F001_ProfitabilityScore",
-    "F002_GrowthScore",
-    "F003_ValuationScore",
-    "F004_FinancialHealthScore",
-    "F005_EarningsQualityScore",
-    "F006_ShareholderReturnScore",
+FUNDAMENTAL_FEATURE_WEIGHT_FIELDS: Tuple[Tuple[str, str], ...] = (
+    ("F001_ProfitabilityScore", "fundamental_weight_f001"),
+    ("F002_GrowthScore", "fundamental_weight_f002"),
+    ("F003_ValuationScore", "fundamental_weight_f003"),
+    ("F004_FinancialHealthScore", "fundamental_weight_f004"),
+    ("F005_EarningsQualityScore", "fundamental_weight_f005"),
+    ("F006_ShareholderReturnScore", "fundamental_weight_f006"),
+)
+
+FUNDAMENTAL_FEATURE_IDS: Tuple[str, ...] = tuple(
+    fid for fid, _ in FUNDAMENTAL_FEATURE_WEIGHT_FIELDS
 )
 
 
@@ -88,6 +92,14 @@ class StrategyScoreConfig(BaseModel):
     breakout_weight_o001: float = 0.15
     breakout_weight_trend_env: float = 0.10
     breakout_weight_fundamental: float = 0.10
+
+    # ファンダメンタルズ特徴量別の相対重み（デフォルト均等 1.0、欠損時は取得可能項目へ自動再配分）
+    fundamental_weight_f001: float = 1.0
+    fundamental_weight_f002: float = 1.0
+    fundamental_weight_f003: float = 1.0
+    fundamental_weight_f004: float = 1.0
+    fundamental_weight_f005: float = 1.0
+    fundamental_weight_f006: float = 1.0
 
     # 必須特徴量チェック
     require_core_features: bool = True
@@ -662,15 +674,21 @@ class StrategyScoreCalculator(IScoreCalculator):
     def _calculate_fundamental_score(
         self, feature_map: Dict[str, FeatureResultModel]
     ) -> Tuple[float, bool]:
-        """ファンダメンタルズ特徴量（F001〜F006）の平均を算出する。全欠損時は中立50.0を返す。"""
-        scores = [
-            float(feature_map[fid].score)
-            for fid in FUNDAMENTAL_FEATURE_IDS
-            if fid in feature_map
-        ]
-        if not scores:
+        """ファンダメンタルズ特徴量（F001〜F006）の加重平均を算出する。全欠損・有効重みなし時は中立50.0を返す。"""
+        weighted_sum = 0.0
+        weight_sum = 0.0
+        for fid, weight_field in FUNDAMENTAL_FEATURE_WEIGHT_FIELDS:
+            if fid not in feature_map:
+                continue
+            score = self._to_optional_float(feature_map[fid].score)
+            weight = self._to_optional_float(getattr(self.config, weight_field, 1.0))
+            if score is None or weight is None or weight <= 0.0:
+                continue
+            weighted_sum += score * weight
+            weight_sum += weight
+        if weight_sum <= 0.0:
             return 50.0, True
-        return sum(scores) / len(scores), False
+        return weighted_sum / weight_sum, False
 
     def _extract_key_levels(
         self,
