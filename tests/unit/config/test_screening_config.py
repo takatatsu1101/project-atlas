@@ -198,6 +198,17 @@ ranking:
             custom_cfg = load_screening_config(yaml_path)
             self.assertFalse(custom_cfg.ranking.strict_date_match)
 
+    def test_load_gemini_preset_yaml(self):
+        """config/screening_gemini.yaml が運用プリセット要件どおりにロードできる"""
+        gemini_yaml = Path("config/screening_gemini.yaml")
+        self.assertTrue(gemini_yaml.exists())
+        cfg = load_screening_config(gemini_yaml)
+        self.assertEqual(cfg.pre_screening.target_markets, ["プライム"])
+        self.assertEqual(cfg.pre_screening.min_avg_trading_value, 3_000_000_000.0)
+        self.assertEqual(cfg.pre_screening.max_close, 5000.0)
+        self.assertIn("gemini", cfg.output.formats)
+        self.assertEqual(cfg.output.gemini_brief_latest_name, "gemini_brief_latest.md")
+
 
 if __name__ == "__main__":
     unittest.main()

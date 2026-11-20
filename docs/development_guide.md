@@ -44,6 +44,19 @@ which python
   ```
   *(※ `python src/main.py` ではなく、必ずルートディレクトリから `-m src.main` として実行してください。直接ファイルを実行すると `src` パッケージが認識されず `ModuleNotFoundError` になります)*
 
+### Gemini 連携ブリーフ出力の実行例
+- Gemini 専用プリセット（東証プライム・20日平均売買代金30億円以上・株価5,000円以下）＋既存監視銘柄同梱＋Google ドライブ同期フォルダへの自動コピー：
+  ```bash
+  python -m src.main \
+    --config config/screening_gemini.yaml \
+    --watch-symbols 7203.T 6758.T \
+    --brief-copy-dir "~/Library/CloudStorage/GoogleDrive-xxx/マイドライブ/ProjectAtlas"
+  ```
+- 主な関連 CLI オプション：
+  - `--gemini-brief`: `output.formats` に `"gemini"` が含まれていない設定でも `gemini_brief_YYYY-MM-DD.md` および `gemini_brief_latest.md` を追加出力する。
+  - `--brief-copy-dir <PATH>`: `output.gemini_brief_copy_dir` を上書きし、同期フォルダへ自動コピーする（未マウント時は警告ログのみ出力しローカル出力は維持）。
+  - `--watch-symbols <SYM...>`: スクリーニング上位外の既存監視銘柄について、同一フォーマットの最新判断材料を別セクションへ同梱する。
+
 ---
 
 ## 4. トラブルシューティング

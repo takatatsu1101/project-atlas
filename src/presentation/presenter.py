@@ -10,6 +10,14 @@ from src.model.data_models import (
     EvaluationSummaryModel,
     FeatureQuantileRowModel,
     HorizonSummaryModel,
+    MarketContextModel,
+)
+from src.presentation.gemini_brief import (
+    BriefDeliveryBackend,
+    GeminiStockBriefData,
+    LocalCopyBriefDelivery,
+    export_gemini_brief as _export_gemini_brief_files,
+    render_gemini_brief_markdown,
 )
 
 logger = get_logger(__name__)
@@ -1073,6 +1081,46 @@ class Presenter:
 
         return lines
 
+    def export_gemini_brief(
+        self,
+        candidate_items: Sequence[GeminiStockBriefData],
+        watch_items: Sequence[GeminiStockBriefData] = (),
+        output_dir: Union[str, Path] = "./output",
+        as_of_date: Optional[date] = None,
+        market_context: Optional[MarketContextModel] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        prefix: str = "gemini_brief",
+        latest_name: str = "gemini_brief_latest.md",
+        copy_dir: Optional[Union[str, Path]] = None,
+        deliveries: Optional[Iterable[BriefDeliveryBackend]] = None,
+    ) -> Dict[str, Path]:
+        """Gemini 連携用の高密度 Markdown ブリーフを出力し、必要に応じて同期先へコピーする。"""
+        combined_results = [item.result for item in candidate_items] + [
+            item.result for item in watch_items
+        ]
+        resolved_date = self._resolve_as_of_date(combined_results, as_of_date)
+        content = render_gemini_brief_markdown(
+            candidate_items=candidate_items,
+            watch_items=watch_items,
+            as_of_date=resolved_date,
+            market_context=market_context,
+            metadata=metadata,
+        )
+        delivery_list: List[BriefDeliveryBackend] = (
+            list(deliveries) if deliveries is not None else []
+        )
+        if copy_dir is not None and str(copy_dir).strip():
+            delivery_list.append(LocalCopyBriefDelivery(copy_dir))
+
+        return _export_gemini_brief_files(
+            markdown_content=content,
+            output_dir=output_dir,
+            as_of_date=resolved_date,
+            prefix=prefix,
+            latest_name=latest_name,
+            deliveries=delivery_list,
+        )
+
     def export_reports(
         self,
         analysis_results: List[AnalysisResultModel],
@@ -1083,9 +1131,16 @@ class Presenter:
         metadata: Optional[Dict[str, Any]] = None,
         evaluation_summary: Optional[EvaluationSummaryModel] = None,
         report_prefix: Optional[str] = None,
+        gemini_candidate_items: Optional[Sequence[GeminiStockBriefData]] = None,
+        gemini_watch_items: Optional[Sequence[GeminiStockBriefData]] = None,
+        market_context: Optional[MarketContextModel] = None,
+        gemini_brief_prefix: str = "gemini_brief",
+        gemini_brief_latest_name: str = "gemini_brief_latest.md",
+        gemini_brief_copy_dir: Optional[Union[str, Path]] = None,
+        gemini_as_of_date: Optional[date] = None,
     ) -> Dict[str, Path]:
         """
-        指定された複数フォーマット（json, markdown）のレポートをまとめて出力する。
+        指定された複数フォーマット（json, markdown, gemini）のレポートをまとめて出力する。
         """
         exported: Dict[str, Path] = {}
         for fmt in formats:
@@ -1110,6 +1165,28 @@ class Presenter:
                     evaluation_summary=evaluation_summary,
                     report_prefix=report_prefix,
                 )
+            elif norm_fmt in ("gemini", "gemini_brief"):
+                brief_results = list(analysis_results) + [
+                    item.result for item in (gemini_watch_items or ())
+                ]
+                has_result_date = any(r.date is not None for r in brief_results)
+                brief_as_of = self._resolve_as_of_date(
+                    brief_results,
+                    as_of_date if as_of_date is not None else (None if has_result_date else gemini_as_of_date),
+                    evaluation_summary=evaluation_summary,
+                )
+                brief_paths = self.export_gemini_brief(
+                    candidate_items=gemini_candidate_items or (),
+                    watch_items=gemini_watch_items or (),
+                    output_dir=output_dir,
+                    as_of_date=brief_as_of,
+                    market_context=market_context,
+                    metadata=metadata,
+                    prefix=gemini_brief_prefix,
+                    latest_name=gemini_brief_latest_name,
+                    copy_dir=gemini_brief_copy_dir,
+                )
+                exported.update(brief_paths)
             else:
                 logger.warning(f"未対応のレポートフォーマットが指定されました: {fmt}")
         return exported

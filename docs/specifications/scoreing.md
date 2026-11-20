@@ -82,6 +82,9 @@ Score Engineは以下を担当する。
   - `risk_metrics`: ボラティリティ比率、出来高倍率
   - `market_regime` / `market_breadth_ratio` / `breakout_threshold_delta` / `market_context`: `MarketContext` 適用時の地合いレジーム・補正内訳詳細
   - `reasons`: スコアに貢献した主な根拠リスト（例：`["中長期上昇トレンド(MA整列)", "25日線付近への理想的な押し目(+1.2%)", "ROE 15.2%と高収益"]`）
+- **後段AI向け高密度ブリーフ出力 (`output.formats` に `"gemini"` 指定または `--gemini-brief`)**:
+  - `gemini_brief_YYYY-MM-DD.md` および上書き固定名 `gemini_brief_latest.md` を出力（既存の `screening_report_*` と共存）。
+  - 市場環境（`MarketContext`・`1306.T`・33業種モメンタム上位/下位）、既存監視銘柄（`--watch-symbols`）、上位抽出候補の多層レジサポ（SMA5/25/75/200傾き、20/60/250日高安、直近スイング高安、60日POC）、直近15営業日 OHLCV 表を同梱する。
 
 ---
 
