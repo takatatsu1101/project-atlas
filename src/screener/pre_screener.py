@@ -25,6 +25,7 @@ class PreScreeningCriteria(BaseModel):
     liquidity_lookback_days: int = 20  # 流動性判定の直近営業日数
     min_avg_trading_value: Optional[float] = 100_000_000.0  # 最低平均売買代金（1億円）
     min_avg_volume: Optional[int] = None  # 最低平均出来高
+    max_close: Optional[float] = None  # 株価上限（円、例: 5000.0 で1単元50万円以下）
 
 
 class PreScreener:
@@ -119,6 +120,11 @@ class PreScreener:
         if cond.min_avg_volume is not None:
             avg_volume = sum(bar.volume for bar in recent) / count
             if avg_volume < cond.min_avg_volume:
+                return False
+
+        if cond.max_close is not None:
+            latest_close = recent[-1].close
+            if latest_close > cond.max_close:
                 return False
 
         return True

@@ -175,6 +175,32 @@ class TestPreScreener(unittest.TestCase):
         passed = self.screener.filter_by_liquidity(ohlcv_map, as_of_date=date(2025, 1, 10), criteria=criteria)
         self.assertEqual(passed, ["7203.T"])
 
+    def test_check_liquidity_max_close_with_as_of_date(self):
+        """max_close 指定時は as_of_date 時点の直近終値で上限判定を行い先読みしない"""
+        bars = [
+            OhlcvModel(symbol="7203.T", date=date(2025, 1, 10), open=4800, high=4950, low=4750, close=4900.0, volume=1_000_000),
+            OhlcvModel(symbol="7203.T", date=date(2025, 1, 11), open=5100, high=5250, low=5050, close=5200.0, volume=1_000_000),
+        ]
+        criteria = PreScreeningCriteria(
+            liquidity_lookback_days=1,
+            min_avg_trading_value=100_000_000.0,
+            max_close=5000.0,
+        )
+        # 1/10時点では 4900 <= 5000 のため合格
+        self.assertTrue(self.screener.check_liquidity(bars, as_of_date=date(2025, 1, 10), criteria=criteria))
+        # 1/11時点では 5200 > 5000 のため不合格
+        self.assertFalse(self.screener.check_liquidity(bars, as_of_date=date(2025, 1, 11), criteria=criteria))
+
+        # 境界値 close == max_close は合格
+        exact_bar = [
+            OhlcvModel(symbol="7203.T", date=date(2025, 1, 10), open=4950, high=5050, low=4900, close=5000.0, volume=1_000_000)
+        ]
+        self.assertTrue(self.screener.check_liquidity(exact_bar, as_of_date=date(2025, 1, 10), criteria=criteria))
+
+        # max_close=None の場合は高値でも合格
+        no_cap = PreScreeningCriteria(liquidity_lookback_days=1, min_avg_trading_value=100_000_000.0, max_close=None)
+        self.assertTrue(self.screener.check_liquidity(bars, as_of_date=date(2025, 1, 11), criteria=no_cap))
+
 
 if __name__ == "__main__":
     unittest.main()

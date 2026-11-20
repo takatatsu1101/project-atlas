@@ -50,6 +50,11 @@ from src.pipeline_worker import (
     process_batch_symbol_task,
     process_symbol_task,
 )
+from src.presentation.gemini_brief import (
+    GeminiStockBriefData,
+    build_gemini_stock_brief_data,
+    normalize_symbol,
+)
 from src.presentation.presenter import Presenter
 from src.ranking.generator import RankingGenerator
 import src.score_engine  # スコアクラスをインポートしてレジストリに登録させる
@@ -261,6 +266,248 @@ def _resolve_target_symbols(
     return target_symbols, should_check_liquidity
 
 
+def _resolve_watch_symbols(
+    cli_watch_symbols: Optional[Sequence[str]],
+    config_watch_symbols: Sequence[str],
+) -> List[str]:
+    """CLI 指定または設定ファイルから監視銘柄リストを解決し、重複排除して返す。"""
+    raw = cli_watch_symbols if cli_watch_symbols is not None else config_watch_symbols
+    resolved: List[str] = []
+    seen: set[str] = set()
+    for sym in raw:
+        norm = normalize_symbol(str(sym))
+        if norm and norm not in seen:
+            seen.add(norm)
+            resolved.append(norm)
+    return resolved
+
+
+def _merge_unique_symbols(*symbol_lists: Sequence[str]) -> List[str]:
+    merged: List[str] = []
+    seen: set[str] = set()
+    for seq in symbol_lists:
+        for sym in seq:
+            if sym not in seen:
+                seen.add(sym)
+                merged.append(sym)
+    return merged
+
+
+def _build_gemini_brief_items(
+    overall_ranking: Sequence[AnalysisResultModel],
+    watch_symbols: Sequence[str],
+    all_score_results: Sequence[ScoreResultModel],
+    all_feature_sets: Sequence[FeatureSetModel],
+    all_pattern_sets: Sequence[PatternSetModel],
+    financial_map: Dict[str, FinancialModel],
+    master_map: Dict[str, StockMasterModel],
+    market_context: Optional[MarketContextModel],
+    ranking_gen: RankingGenerator,
+    calculator: IndicatorCalculator,
+    effective_start: date,
+    fetch_end: date,
+    analysis_end: date,
+    fetch_as_of: Optional[date],
+    as_of_date: Optional[date],
+    effective_fiscal_year: int,
+    use_cache: bool,
+    use_feature_cache: bool,
+    cache_key_suffix: Optional[str],
+    allow_irbank_download: bool,
+    config: AtlasScreeningConfig,
+    pre_screener: PreScreener,
+    should_use_market_context: bool,
+    sequential_feature_calc: Callable[..., List[FeatureSetModel]],
+    verbose: bool,
+) -> Tuple[List[GeminiStockBriefData], List[GeminiStockBriefData]]:
+    """
+    上位抽出候補および既存監視銘柄の Gemini ブリーフ用判断材料を構築する。
+    監視銘柄が1次スクリーニング対象外・フィルタ落ちの場合は、ユニバース統計に影響を与えずに個別評価する。
+    """
+    brief_as_of = as_of_date or analysis_end
+
+    def _collect_brief_ohlcv_and_indicators(
+        sym: str,
+    ) -> Tuple[List[OhlcvModel], List[Any]]:
+        ohlcv_kwargs: Dict[str, Any] = {}
+        if fetch_as_of is not None:
+            ohlcv_kwargs["as_of_date"] = fetch_as_of
+        raw = collect_ohlcv_data(sym, effective_start, fetch_end, **ohlcv_kwargs)
+        sliced = [
+            b for b in raw if normalize_bar_date(b.date) <= brief_as_of
+        ]
+        sliced.sort(key=lambda b: normalize_bar_date(b.date))
+        if not sliced:
+            return [], []
+        inds = calculator.calculate_indicators(
+            sliced,
+            use_cache=use_cache,
+            cache_key_suffix=cache_key_suffix,
+        )
+        return sliced, inds
+
+    candidate_items: List[GeminiStockBriefData] = []
+    for res in overall_ranking:
+        try:
+            ohlcv_slice, inds = _collect_brief_ohlcv_and_indicators(res.symbol)
+            candidate_items.append(
+                build_gemini_stock_brief_data(
+                    result=res,
+                    ohlcv_list=ohlcv_slice,
+                    indicator_sets=inds,
+                    financial_data=financial_map.get(res.symbol),
+                    market_context=market_context,
+                    as_of_date=brief_as_of,
+                    is_watch_symbol=False,
+                )
+            )
+        except Exception as e:
+            logger.warning(f"ブリーフ用データ構築に失敗しました [{res.symbol}]: {e}")
+
+    # 既存評価済みスコアのルックアップ（銘柄ごとに最新日付を保持）
+    latest_score_by_symbol: Dict[str, ScoreResultModel] = {}
+    for sr in all_score_results:
+        prev = latest_score_by_symbol.get(sr.symbol)
+        if prev is None or normalize_bar_date(sr.date) >= normalize_bar_date(prev.date):
+            latest_score_by_symbol[sr.symbol] = sr
+
+    watch_items: List[GeminiStockBriefData] = []
+    for wsym in watch_symbols:
+        try:
+            score_obj = latest_score_by_symbol.get(wsym)
+            w_features = all_feature_sets
+            w_patterns = all_pattern_sets
+            w_financial_map = financial_map
+
+            if score_obj is None:
+                # 対象外または事前/流動性フィルタ除外の監視銘柄を個別評価（流動性フィルタはスキップ）
+                eval_res = evaluate_single_symbol(
+                    symbol=wsym,
+                    effective_start=effective_start,
+                    fetch_end=fetch_end,
+                    fetch_as_of=fetch_as_of,
+                    as_of_date=as_of_date,
+                    effective_fiscal_year=effective_fiscal_year,
+                    should_check_liquidity=False,
+                    use_bulk_eval_ohlcv=False,
+                    use_cache=use_cache,
+                    use_feature_cache=use_feature_cache,
+                    cache_key_suffix=cache_key_suffix,
+                    allow_irbank_download=allow_irbank_download,
+                    config=config,
+                    ohlcv_collector_fn=collect_ohlcv_data,
+                    financial_collector_fn=collect_financial_data,
+                    indicator_calc_fn=calculator.calculate_indicators,
+                    feature_calc_fn=sequential_feature_calc,
+                    pattern_detect_fn=detect_patterns,
+                    score_calc_fn=calculate_scores,
+                    pre_screener=pre_screener,
+                    read_only=False,
+                    verbose=verbose,
+                    skip_score_calculation=should_use_market_context,
+                )
+                if not eval_res.get("ok"):
+                    master = master_map.get(wsym) or master_map.get(wsym.split(".")[0])
+                    fallback_res = AnalysisResultModel(
+                        rank=0,
+                        symbol=wsym,
+                        company_name=(master.name or wsym) if master else wsym,
+                        market=(master.market or "") if master else "",
+                        sector=(master.sector_33 or master.sector_17 or "") if master else "",
+                        date=brief_as_of,
+                        total_score=0.0,
+                        strategy_type="watch",
+                        reasons=["データ取得不可または不足"],
+                    )
+                    watch_items.append(
+                        GeminiStockBriefData(
+                            result=fallback_res,
+                            is_watch_symbol=True,
+                            data_missing=True,
+                        )
+                    )
+                    continue
+
+                w_features = eval_res["feature_sets"]
+                w_patterns = eval_res["pattern_sets"]
+                w_fin = eval_res.get("financial_data")
+                w_financial_map = {wsym: w_fin} if w_fin is not None else {}
+
+                if should_use_market_context:
+                    s_list = calculate_scores(
+                        w_features,
+                        w_patterns,
+                        score_ids=["S002_StrategyScore"],
+                        ohlcv_data=eval_res.get("score_ohlcv") or [],
+                        indicator_sets=eval_res.get("score_indicators") or [],
+                        score_configs={"S002_StrategyScore": config.strategy_score},
+                        market_context=market_context,
+                    )
+                else:
+                    s_list = eval_res.get("score_results") or []
+
+                if s_list:
+                    s_list_sorted = sorted(
+                        s_list, key=lambda x: normalize_bar_date(x.date)
+                    )
+                    score_obj = s_list_sorted[-1]
+
+            if score_obj is None:
+                master = master_map.get(wsym) or master_map.get(wsym.split(".")[0])
+                fallback_res = AnalysisResultModel(
+                    rank=0,
+                    symbol=wsym,
+                    company_name=(master.name or wsym) if master else wsym,
+                    market=(master.market or "") if master else "",
+                    sector=(master.sector_33 or master.sector_17 or "") if master else "",
+                    date=brief_as_of,
+                    total_score=0.0,
+                    strategy_type="watch",
+                    reasons=["スコア算出不可"],
+                )
+                ohlcv_slice, inds = _collect_brief_ohlcv_and_indicators(wsym)
+                watch_items.append(
+                    build_gemini_stock_brief_data(
+                        result=fallback_res,
+                        ohlcv_list=ohlcv_slice,
+                        indicator_sets=inds,
+                        financial_data=w_financial_map.get(wsym),
+                        market_context=market_context,
+                        as_of_date=brief_as_of,
+                        is_watch_symbol=True,
+                    )
+                )
+                continue
+
+            ranked_watch = ranking_gen.generate_ranking(
+                [score_obj],
+                master_map=master_map,
+                feature_sets=w_features,
+                pattern_sets=w_patterns,
+                financial_map=w_financial_map,
+                top_n=None,
+            )
+            if not ranked_watch:
+                continue
+            watch_analysis = ranked_watch[0]
+            ohlcv_slice, inds = _collect_brief_ohlcv_and_indicators(wsym)
+            watch_items.append(
+                build_gemini_stock_brief_data(
+                    result=watch_analysis,
+                    ohlcv_list=ohlcv_slice,
+                    indicator_sets=inds,
+                    financial_data=w_financial_map.get(wsym),
+                    market_context=market_context,
+                    as_of_date=brief_as_of,
+                    is_watch_symbol=True,
+                )
+            )
+        except Exception as e:
+            logger.warning(f"監視銘柄のブリーフデータ構築に失敗しました [{wsym}]: {e}")
+
+    return candidate_items, watch_items
+
+
 def run_full_pipeline(
     symbols: Optional[List[str]] = None,
     start_date: Optional[date] = None,
@@ -281,6 +528,9 @@ def run_full_pipeline(
     workers: Optional[int] = None,
     parallel_min_symbols: int = DEFAULT_PARALLEL_MIN_SYMBOLS,
     verbose: bool = False,
+    watch_symbols: Optional[List[str]] = None,
+    gemini_brief: bool = False,
+    brief_copy_dir: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Project Atlas 全パイプラインを実行する。
@@ -416,19 +666,40 @@ def run_full_pipeline(
         processed_symbols: List[str] = []
         benchmark_ohlcv: List[OhlcvModel] = []
 
+        effective_formats = list(config.output.formats)
+        norm_formats = {str(f).strip().lower() for f in effective_formats}
+        enable_gemini_brief = (
+            gemini_brief
+            or ("gemini" in norm_formats)
+            or ("gemini_brief" in norm_formats)
+        )
+        if gemini_brief and not (
+            "gemini" in norm_formats or "gemini_brief" in norm_formats
+        ):
+            effective_formats.append("gemini")
+
+        resolved_watch_symbols = _resolve_watch_symbols(
+            watch_symbols, config.output.watch_symbols
+        )
+        prefetch_targets = (
+            _merge_unique_symbols(target_symbols, resolved_watch_symbols)
+            if (export_reports and enable_gemini_brief)
+            else list(target_symbols)
+        )
+
         # 対象銘柄の OHLCV を事前にチャンク並列で一括プリフェッチ
         print("[2/4] OHLCV・財務データ準備...", flush=True)
-        if target_symbols:
+        if prefetch_targets:
             t_prefetch = time.perf_counter()
             if fetch_as_of is not None:
                 prefetch_ohlcv_batch(
-                    target_symbols,
+                    prefetch_targets,
                     effective_start,
                     fetch_end,
                     as_of_date=fetch_as_of,
                 )
             else:
-                prefetch_ohlcv_batch(target_symbols, effective_start, fetch_end)
+                prefetch_ohlcv_batch(prefetch_targets, effective_start, fetch_end)
             timings_sec["ohlcv_collection"] += time.perf_counter() - t_prefetch
 
         if should_use_market_context:
@@ -652,14 +923,58 @@ def run_full_pipeline(
             resolved_output_dir = (
                 output_dir if output_dir is not None else config.output.output_dir
             )
+
+            gemini_candidate_items: List[GeminiStockBriefData] = []
+            gemini_watch_items: List[GeminiStockBriefData] = []
+            if enable_gemini_brief:
+                gemini_candidate_items, gemini_watch_items = _build_gemini_brief_items(
+                    overall_ranking=overall_ranking,
+                    watch_symbols=resolved_watch_symbols,
+                    all_score_results=all_score_results,
+                    all_feature_sets=all_feature_sets,
+                    all_pattern_sets=all_pattern_sets,
+                    financial_map=financial_map,
+                    master_map=master_map,
+                    market_context=market_context,
+                    ranking_gen=ranking_gen,
+                    calculator=calculator,
+                    effective_start=effective_start,
+                    fetch_end=fetch_end,
+                    analysis_end=analysis_end,
+                    fetch_as_of=fetch_as_of,
+                    as_of_date=as_of_date,
+                    effective_fiscal_year=effective_fiscal_year,
+                    use_cache=use_cache,
+                    use_feature_cache=use_feature_cache,
+                    cache_key_suffix=cache_key_suffix,
+                    allow_irbank_download=allow_irbank_download,
+                    config=config,
+                    pre_screener=pre_screener,
+                    should_use_market_context=should_use_market_context,
+                    sequential_feature_calc=sequential_feature_calc,
+                    verbose=verbose,
+                )
+
+            resolved_copy_dir = (
+                brief_copy_dir
+                if brief_copy_dir is not None
+                else config.output.gemini_brief_copy_dir
+            )
             report_paths = presenter_instance.export_reports(
                 overall_ranking,
                 output_dir=resolved_output_dir,
-                formats=config.output.formats,
+                formats=effective_formats,
                 as_of_date=as_of_date,
                 strategy_rankings=strategy_rankings,
                 metadata=run_metadata,
                 evaluation_summary=evaluation_summary,
+                gemini_candidate_items=gemini_candidate_items,
+                gemini_watch_items=gemini_watch_items,
+                market_context=market_context,
+                gemini_brief_prefix=config.output.gemini_brief_prefix,
+                gemini_brief_latest_name=config.output.gemini_brief_latest_name,
+                gemini_brief_copy_dir=resolved_copy_dir,
+                gemini_as_of_date=analysis_end,
             )
 
         if report_paths:
@@ -1226,6 +1541,23 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="JSON / Markdown レポートのファイル出力を無効化する",
     )
     parser.add_argument(
+        "--gemini-brief",
+        action="store_true",
+        help="後段AI（Gemini）連携用の高密度 Markdown ブリーフを追加出力する",
+    )
+    parser.add_argument(
+        "--brief-copy-dir",
+        type=str,
+        default=None,
+        help="Gemini ブリーフの自動コピー先ディレクトリ（Google ドライブ同期フォルダ等）",
+    )
+    parser.add_argument(
+        "--watch-symbols",
+        nargs="+",
+        default=None,
+        help="継続評価対象の既存監視銘柄コード（例: 7203.T 6758.T）",
+    )
+    parser.add_argument(
         "--use-pre-screening",
         action="store_true",
         help="--symbols 指定時にも事前スクリーニングフィルタを適用する",
@@ -1319,6 +1651,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             allow_irbank_download=not args.no_irbank_download,
             workers=args.workers,
             verbose=args.verbose,
+            watch_symbols=args.watch_symbols,
+            gemini_brief=args.gemini_brief,
+            brief_copy_dir=args.brief_copy_dir,
         )
         return 0
     except Exception as e:

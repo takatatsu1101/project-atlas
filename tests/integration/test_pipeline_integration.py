@@ -2335,6 +2335,168 @@ market_context:
             self.assertFalse(res_fallback["market_context"].benchmark.available)
             self.assertEqual(len(res_fallback["processed_symbols"]), len(symbols))
 
+    def test_gemini_brief_and_watch_symbols_integration(self):
+        """
+        --gemini-brief / --watch-symbols / --brief-copy-dir を用いたパイプライン結合テスト。
+        1次スクリーニング対象外の監視銘柄も別セクションへ同梱され、既存レポートと共存することを確認する。
+        """
+        parsed = parse_args(
+            [
+                "--gemini-brief",
+                "--brief-copy-dir",
+                "/tmp/gdrive",
+                "--watch-symbols",
+                "9984",
+                "6758.T",
+            ]
+        )
+        self.assertTrue(parsed.gemini_brief)
+        self.assertEqual(parsed.brief_copy_dir, "/tmp/gdrive")
+        self.assertEqual(parsed.watch_symbols, ["9984", "6758.T"])
+
+        cand_bars = _build_uptrend_breakout_ohlcv("7203.T", days=90)
+        watch_bars = _build_uptrend_breakout_ohlcv("9984.T", days=90)
+        # 監視銘柄は終値を高値にして max_close=5000 を超えていても監視セクションに同梱されることを確認
+        for b in watch_bars:
+            b.close = 6200.0
+            b.high = 6250.0
+            b.low = 6150.0
+            b.open = 6180.0
+
+        as_of = cand_bars[-1].date
+        ohlcv_map = {"7203.T": cand_bars, "9984.T": watch_bars}
+        fin_map = {
+            "7203.T": _build_sample_financial("7203.T"),
+            "9984.T": _build_sample_financial("9984.T"),
+        }
+        masters = [
+            StockMasterModel(
+                code="7203",
+                symbol="7203.T",
+                name="トヨタ自動車",
+                market="プライム",
+                sector_33="輸送用機器",
+            ),
+            StockMasterModel(
+                code="9984",
+                symbol="9984.T",
+                name="ソフトバンクG",
+                market="プライム",
+                sector_33="情報・通信業",
+            ),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_dir = Path(tmpdir) / "output"
+            copy_dir = Path(tmpdir) / "gdrive_sync"
+            copy_dir.mkdir(parents=True, exist_ok=True)
+            cfg_path = Path(tmpdir) / "gemini_test.yaml"
+            cfg_path.write_text(
+                "pre_screening:\n"
+                "  max_close: 5000.0\n"
+                "screener:\n"
+                "  min_total_score: 50.0\n"
+                "  require_gate1_passed: false\n"
+                "  exclude_watch: false\n",
+                encoding="utf-8",
+            )
+
+            with patch("src.main.prefetch_ohlcv_batch"), \
+                 patch("src.main.collect_ohlcv_data", side_effect=lambda sym, *a, **kw: ohlcv_map.get(sym, [])), \
+                 patch("src.main.collect_financial_data", side_effect=lambda sym, *a, **kw: fin_map.get(sym)), \
+                 patch("src.main.MasterManager") as mock_master_cls, \
+                 redirect_stdout(io.StringIO()):
+                mock_master_cls.return_value.load_master.return_value = masters
+
+                res = run_full_pipeline(
+                    symbols=["7203.T"],
+                    start_date=cand_bars[0].date,
+                    end_date=as_of,
+                    as_of_date=as_of,
+                    config_path=cfg_path,
+                    output_dir=out_dir,
+                    export_reports=True,
+                    use_cache=False,
+                    allow_irbank_download=False,
+                    workers=1,
+                    watch_symbols=["9984"],
+                    gemini_brief=True,
+                    brief_copy_dir=str(copy_dir),
+                )
+
+            report_paths = res["report_paths"]
+            self.assertIn("json", report_paths)
+            self.assertIn("markdown", report_paths)
+            self.assertIn("gemini", report_paths)
+            self.assertIn("gemini_latest", report_paths)
+            self.assertIn("gemini_copy", report_paths)
+
+            brief_text = report_paths["gemini"].read_text(encoding="utf-8")
+            self.assertIn("7203.T", brief_text)
+            self.assertIn("9984.T", brief_text)
+            self.assertIn("既存監視銘柄", brief_text)
+            self.assertIn("直近15営業日 OHLCV", brief_text)
+            self.assertTrue((copy_dir / "gemini_brief_latest.md").exists())
+            self.assertTrue((copy_dir / f"gemini_brief_{as_of.isoformat()}.md").exists())
+
+            # 2) MarketContext 有効時・watch_symbols 欠損(sector_33=None)・as_of_date=None(end_date指定) の検証
+            out_dir2 = Path(tmpdir) / "output2"
+            cfg_path2 = Path(tmpdir) / "gemini_ctx_test.yaml"
+            cfg_path2.write_text(
+                "market_context:\n"
+                "  enabled: true\n"
+                "  min_universe_size: 1\n"
+                "screener:\n"
+                "  min_total_score: 50.0\n"
+                "  require_gate1_passed: false\n"
+                "  exclude_watch: false\n",
+                encoding="utf-8",
+            )
+            masters_with_etf = masters + [
+                StockMasterModel(
+                    code="1321",
+                    symbol="1321.T",
+                    name="日経225連動型上場投信",
+                    market="プライム",
+                    sector_33=None,
+                )
+            ]
+            with patch("src.main.prefetch_ohlcv_batch"), \
+                 patch("src.main.collect_ohlcv_data", side_effect=lambda sym, *a, **kw: ohlcv_map.get(sym, [])), \
+                 patch("src.main.collect_benchmark_ohlcv", return_value=cand_bars), \
+                 patch("src.main.collect_financial_data", side_effect=lambda sym, *a, **kw: fin_map.get(sym)), \
+                 patch("src.main.MasterManager") as mock_master_cls, \
+                 redirect_stdout(io.StringIO()):
+                mock_master_cls.return_value.load_master.return_value = masters_with_etf
+
+                res2 = run_full_pipeline(
+                    symbols=["7203.T"],
+                    start_date=cand_bars[0].date,
+                    end_date=as_of,
+                    as_of_date=None,
+                    config_path=cfg_path2,
+                    output_dir=out_dir2,
+                    export_reports=True,
+                    use_cache=False,
+                    allow_irbank_download=False,
+                    workers=1,
+                    watch_symbols=["1321"],
+                    gemini_brief=True,
+                )
+
+            # MarketContext と overall_ranking は target_symbols のみで算出され watch_symbols に汚染されない
+            self.assertTrue(res2["market_context"].is_active)
+            self.assertEqual(res2["market_context"].universe_size, 1)
+            self.assertEqual([r.symbol for r in res2["analysis_results"]], ["7203.T"])
+            # as_of_date=None でも end_date 基準日と一致したファイル名になる
+            self.assertEqual(
+                res2["report_paths"]["gemini"].name,
+                f"gemini_brief_{as_of.isoformat()}.md",
+            )
+            brief_text2 = res2["report_paths"]["gemini"].read_text(encoding="utf-8")
+            self.assertIn("1321.T", brief_text2)
+            self.assertIn("OHLCV データが取得できないため", brief_text2)
+
 
 if __name__ == "__main__":
     unittest.main()
