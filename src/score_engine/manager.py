@@ -5,6 +5,7 @@ from src.common.logger import get_logger
 from src.model.data_models import (
     FeatureSetModel,
     IndicatorSetModel,
+    MarketContextModel,
     OhlcvModel,
     PatternSetModel,
     ScoreResultModel,
@@ -27,11 +28,12 @@ class ScoreManager:
         ohlcv_data: Optional[List[OhlcvModel]] = None,
         indicator_sets: Optional[List[IndicatorSetModel]] = None,
         score_configs: Optional[Dict[str, Any]] = None,
+        market_context: Optional[MarketContextModel] = None,
     ) -> List[ScoreResultModel]:
         """
         特徴量セットとパターンセットから評価スコアを計算し、結果のリストを返す。
         score_idsが指定された場合は、そのスコアのみを計算する。
-        ohlcv_data / indicator_sets は計算機が受け取れる場合のみ渡す。
+        ohlcv_data / indicator_sets / market_context は計算機が受け取れる場合のみ渡す。
         score_configs が指定された場合は score_id ごとの設定オブジェクトを注入する。
         """
         if not feature_sets and not pattern_sets:
@@ -62,6 +64,7 @@ class ScoreManager:
                 pattern_sets,
                 ohlcv_data=ohlcv_data,
                 indicator_sets=indicator_sets,
+                market_context=market_context,
             )
             all_score_results.extend(results)
 
@@ -75,6 +78,7 @@ class ScoreManager:
         pattern_sets: List[PatternSetModel],
         ohlcv_data: Optional[List[OhlcvModel]] = None,
         indicator_sets: Optional[List[IndicatorSetModel]] = None,
+        market_context: Optional[MarketContextModel] = None,
     ) -> List[ScoreResultModel]:
         """計算機の calculate シグネチャを確認し、対応する引数のみを渡して呼び出す。"""
         sig = inspect.signature(calculator.calculate)
@@ -87,6 +91,8 @@ class ScoreManager:
             kwargs["ohlcv_data"] = ohlcv_data
         if accepts_kwargs or "indicator_sets" in params:
             kwargs["indicator_sets"] = indicator_sets
+        if accepts_kwargs or "market_context" in params:
+            kwargs["market_context"] = market_context
         return calculator.calculate(feature_sets, pattern_sets, **kwargs)
 
 
@@ -101,6 +107,7 @@ def calculate_scores(
     ohlcv_data: Optional[List[OhlcvModel]] = None,
     indicator_sets: Optional[List[IndicatorSetModel]] = None,
     score_configs: Optional[Dict[str, Any]] = None,
+    market_context: Optional[MarketContextModel] = None,
 ) -> List[ScoreResultModel]:
     return score_manager.calculate_scores(
         feature_sets,
@@ -109,4 +116,5 @@ def calculate_scores(
         ohlcv_data=ohlcv_data,
         indicator_sets=indicator_sets,
         score_configs=score_configs,
+        market_context=market_context,
     )

@@ -1,5 +1,5 @@
 import unittest
-from datetime import date
+from datetime import date, timedelta
 from typing import Dict, List, Optional
 
 import src.score_engine  # レジストリ登録を確認するためパッケージをインポート
@@ -7,9 +7,11 @@ from src.model.data_models import (
     FeatureResultModel,
     FeatureSetModel,
     IndicatorSetModel,
+    MarketContextModel,
     OhlcvModel,
     PatternResultModel,
     PatternSetModel,
+    SymbolMarketMetricsModel,
 )
 from src.score_engine.manager import ScoreManager
 from src.score_engine.registry import score_registry
@@ -696,6 +698,226 @@ class TestStrategyScoreCalculator(unittest.TestCase):
         self.assertAlmostEqual(res_all.sub_scores["fundamental_score"], 65.0)
         self.assertAlmostEqual(res_5.sub_scores["fundamental_score"], 60.0)
         self.assertGreater(res_all.total_score, res_5.total_score)
+
+    def test_market_context_adjustment_and_bearish_breakout_threshold(self):
+        """MarketContext 注入時の加減点・sub_scores/metadata記録・bearishレジーム時のブレイクアウト閾値引き上げを検証"""
+        base_tech = {
+            "M001_MAAlignmentScore": 70.0,
+            "T001_TrendStrengthScore": 70.0,
+            "P001_PullbackScore": 70.0,
+            "P002_BreakoutScore": 65.0,
+            "O001_MomentumScore": 65.0,
+            "V001_VolumeScore": 65.0,
+            "R001_VolatilityScore": 65.0,
+        }
+        fs = self._build_feature_set(base_tech)
+        base_res = self.calculator.calculate([fs], [])[0]
+        base_bo_score = base_res.sub_scores["breakout_strategy_score"]
+        base_pb_score = base_res.sub_scores["pullback_strategy_score"]
+
+        # 1. プラス補正 (+5.0) & bullish レジーム -> 両戦略とも +5.0 点され、sub_scores / metadata / reasons に記録される
+        bull_ctx = MarketContextModel(
+            as_of_date=self.target_date,
+            is_active=True,
+            universe_size=30,
+            breadth_ratio=0.72,
+            regime="bullish",
+            breakout_threshold_delta=0.0,
+            symbol_metrics={
+                self.symbol: SymbolMarketMetricsModel(
+                    symbol=self.symbol,
+                    bar_date=self.target_date,
+                    sector_33="電気機器",
+                    rs_percentile=88.0,
+                    sector_momentum_score=76.0,
+                    relative_valuation_z=1.25,
+                    relative_valuation_score=75.0,
+                    rs_adjustment=3.0,
+                    sector_momentum_adjustment=1.0,
+                    relative_valuation_adjustment=1.0,
+                    total_adjustment=5.0,
+                )
+            },
+        )
+        bull_res = self.calculator.calculate([fs], [], market_context=bull_ctx)[0]
+        self.assertAlmostEqual(bull_res.sub_scores["pullback_strategy_score"], base_pb_score + 5.0)
+        self.assertAlmostEqual(bull_res.sub_scores["breakout_strategy_score"], base_bo_score + 5.0)
+        self.assertAlmostEqual(bull_res.sub_scores["market_context_adjustment"], 5.0)
+        self.assertAlmostEqual(bull_res.sub_scores["rs_score"], 88.0)
+        self.assertAlmostEqual(bull_res.sub_scores["sector_momentum_score"], 76.0)
+        self.assertAlmostEqual(bull_res.sub_scores["relative_valuation_score"], 75.0)
+        self.assertEqual(bull_res.metadata["market_regime"], "bullish")
+        self.assertAlmostEqual(bull_res.metadata["market_breadth_ratio"], 0.72)
+        self.assertTrue(any("市場コンテキスト補正" in r for r in bull_res.reasons))
+
+        # 2. bearish レジーム (breakout_threshold_delta=8.0):
+        #    ブレイクアウト専用銘柄 (breakout_score=65.0 >= 60.0 だが < 68.0) は watch 落ちし、
+        #    押し目買い銘柄 (pullback_score=65.0 >= 60.0) は通常閾値のまま pullback 採用される
+        fs_bo_only = self._build_feature_set(
+            {
+                "M001_MAAlignmentScore": 70.0,
+                "T001_TrendStrengthScore": 70.0,
+                "P001_PullbackScore": 40.0,  # < 55
+                "P002_BreakoutScore": 70.0,  # >= 55
+                "O001_MomentumScore": 65.0,
+                "V001_VolumeScore": 65.0,
+                "R001_VolatilityScore": 65.0,
+            }
+        )
+        fs_pb_only = self._build_feature_set(
+            {
+                "M001_MAAlignmentScore": 70.0,
+                "T001_TrendStrengthScore": 70.0,
+                "P001_PullbackScore": 70.0,  # >= 55
+                "P002_BreakoutScore": 40.0,  # < 55
+                "O001_MomentumScore": 65.0,
+                "V001_VolumeScore": 65.0,
+                "R001_VolatilityScore": 65.0,
+            }
+        )
+        bear_ctx = MarketContextModel(
+            as_of_date=self.target_date,
+            is_active=True,
+            universe_size=30,
+            breadth_ratio=0.30,
+            regime="bearish",
+            breakout_threshold_delta=8.0,
+            symbol_metrics={
+                self.symbol: SymbolMarketMetricsModel(
+                    symbol=self.symbol,
+                    bar_date=self.target_date,
+                    total_adjustment=0.0,
+                )
+            },
+        )
+        res_bo_bear = self.calculator.calculate([fs_bo_only], [], market_context=bear_ctx)[0]
+        res_pb_bear = self.calculator.calculate([fs_pb_only], [], market_context=bear_ctx)[0]
+        self.assertGreaterEqual(res_bo_bear.sub_scores["breakout_strategy_score"], 60.0)
+        self.assertLess(res_bo_bear.sub_scores["breakout_strategy_score"], 68.0)
+        self.assertEqual(res_bo_bear.strategy_type, "watch")
+        self.assertTrue(any("地合い悪化レジーム" in r for r in res_bo_bear.reasons))
+        self.assertEqual(res_pb_bear.strategy_type, "pullback")
+
+        # 3. 第1関門未達キャップ (35.0) や高信頼度ダブルトップキャップ (40.0) は +10.0 補正後も維持される
+        fs_gate1_fail = self._build_feature_set(
+            {
+                "M001_MAAlignmentScore": 30.0,
+                "T001_TrendStrengthScore": 30.0,
+                "P001_PullbackScore": 90.0,
+                "P002_BreakoutScore": 90.0,
+            }
+        )
+        boost_ctx = MarketContextModel(
+            as_of_date=self.target_date,
+            is_active=True,
+            universe_size=30,
+            regime="bullish",
+            symbol_metrics={
+                self.symbol: SymbolMarketMetricsModel(
+                    symbol=self.symbol,
+                    bar_date=self.target_date,
+                    total_adjustment=10.0,
+                )
+            },
+        )
+        res_cap = self.calculator.calculate([fs_gate1_fail], [], market_context=boost_ctx)[0]
+        self.assertLessEqual(res_cap.total_score, self.calculator.config.gate1_failed_cap)
+        self.assertEqual(res_cap.strategy_type, "watch")
+
+        # 4. 過去日データや is_active=False の MarketContext では無補正結果と一致する
+        past_dt = self.target_date - timedelta(days=5)
+        fs_past = FeatureSetModel(symbol=self.symbol, date=past_dt, results=fs.results)
+        res_past_plain = self.calculator.calculate([fs_past], [])[0]
+        res_past_with_ctx = self.calculator.calculate([fs_past], [], market_context=bull_ctx)[0]
+        self.assertEqual(res_past_with_ctx.total_score, res_past_plain.total_score)
+        self.assertNotIn("market_context_adjustment", res_past_with_ctx.sub_scores)
+
+        inactive_ctx = MarketContextModel(
+            as_of_date=self.target_date,
+            is_active=False,
+            inactive_reason="insufficient_universe",
+            universe_size=5,
+        )
+        res_inactive = self.calculator.calculate([fs], [], market_context=inactive_ctx)[0]
+        self.assertEqual(res_inactive.total_score, base_res.total_score)
+        self.assertNotIn("market_context_adjustment", res_inactive.sub_scores)
+
+        # 5. pullback_adjustment / breakout_adjustment の戦略別適用と breakout_score_penalty のブレイク限定減点
+        asym_ctx = MarketContextModel(
+            as_of_date=self.target_date,
+            is_active=True,
+            universe_size=30,
+            breadth_ratio=0.30,
+            regime="bearish",
+            breakout_threshold_delta=8.0,
+            breakout_score_penalty=6.0,
+            symbol_metrics={
+                self.symbol: SymbolMarketMetricsModel(
+                    symbol=self.symbol,
+                    bar_date=self.target_date,
+                    pullback_adjustment=2.5,
+                    breakout_adjustment=5.0,
+                    total_adjustment=5.0,
+                )
+            },
+        )
+        res_asym = self.calculator.calculate([fs], [], market_context=asym_ctx)[0]
+        self.assertAlmostEqual(res_asym.sub_scores["pullback_strategy_score"], base_pb_score + 2.5)
+        self.assertAlmostEqual(
+            res_asym.sub_scores["breakout_strategy_score"],
+            base_bo_score + 5.0 - 6.0,
+        )
+        self.assertEqual(res_asym.metadata["market_context"]["breakout_score_penalty"], 6.0)
+        self.assertAlmostEqual(res_asym.metadata["market_context"]["pullback_adjustment"], 2.5)
+        self.assertAlmostEqual(res_asym.metadata["market_context"]["breakout_adjustment"], 5.0)
+
+        # 6. bar_date=None かつ as_of_date != feature_set.date の場合は過去日へ誤適用されない
+        future_as_of = self.target_date + timedelta(days=3)
+        none_bar_future_ctx = MarketContextModel(
+            as_of_date=future_as_of,
+            is_active=True,
+            universe_size=30,
+            regime="bearish",
+            breakout_threshold_delta=8.0,
+            breakout_score_penalty=6.0,
+            symbol_metrics={
+                self.symbol: SymbolMarketMetricsModel(
+                    symbol=self.symbol,
+                    bar_date=None,
+                    pullback_adjustment=5.0,
+                    breakout_adjustment=5.0,
+                    total_adjustment=5.0,
+                )
+            },
+        )
+        res_mismatch = self.calculator.calculate(
+            [fs], [], market_context=none_bar_future_ctx
+        )[0]
+        self.assertAlmostEqual(res_mismatch.total_score, base_res.total_score)
+        self.assertNotIn("market_context_adjustment", res_mismatch.sub_scores)
+
+        # 7. MarketContext 内の補正・閾値・ペナルティに NaN/inf が混入しても 100.0 へ化けず 0.0 フォールバック
+        nan_ctx = MarketContextModel(
+            as_of_date=self.target_date,
+            is_active=True,
+            universe_size=30,
+            regime="bearish",
+            breakout_threshold_delta=float("nan"),
+            breakout_score_penalty=float("inf"),
+            symbol_metrics={
+                self.symbol: SymbolMarketMetricsModel(
+                    symbol=self.symbol,
+                    bar_date=self.target_date,
+                    pullback_adjustment=float("nan"),
+                    breakout_adjustment=float("inf"),
+                    total_adjustment=float("nan"),
+                )
+            },
+        )
+        res_nan_ctx = self.calculator.calculate([fs], [], market_context=nan_ctx)[0]
+        self.assertAlmostEqual(res_nan_ctx.sub_scores["pullback_strategy_score"], base_pb_score)
+        self.assertAlmostEqual(res_nan_ctx.sub_scores["breakout_strategy_score"], base_bo_score)
+        self.assertAlmostEqual(res_nan_ctx.sub_scores["market_context_adjustment"], 0.0)
 
 
 if __name__ == "__main__":

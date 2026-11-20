@@ -7,7 +7,7 @@ from datetime import date, datetime, timedelta
 import logging
 from pathlib import Path
 import time
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from src.common.logger import get_logger, set_project_log_level
 from src.common.storage import StorageManager
@@ -22,9 +22,11 @@ from src.model.data_models import (
     OhlcvModel,
     PatternSetModel,
     ScoreResultModel,
+    SymbolMarketSnapshot,
 )
 from src.pattern_detector.manager import PatternManager
 from src.score_engine.manager import ScoreManager
+from src.score_engine.market_context import extract_symbol_market_snapshot
 from src.screener.pre_screener import PreScreener
 
 logger = get_logger(__name__)
@@ -36,6 +38,27 @@ _WORKER_STATE: Dict[str, Any] = {}
 def normalize_bar_date(value: date) -> date:
     """OhlcvModel.date が datetime の場合でも date 型へ正規化する。"""
     return value.date() if isinstance(value, datetime) else value
+
+
+def _slice_score_inputs(
+    feature_sets: List[FeatureSetModel],
+    ohlcv_slice: List[OhlcvModel],
+    indicator_slice: List[IndicatorSetModel],
+) -> Tuple[List[OhlcvModel], List[IndicatorSetModel]]:
+    """
+    親プロセスでのスコア計算に必要な日付分のみの OHLCV / 指標レコードを抽出する
+    （プロセス間通信の pickle 転送量を最小化するため）。
+    """
+    target_dates = {normalize_bar_date(fs.date) for fs in feature_sets}
+    if not target_dates:
+        return [], []
+    score_ohlcv = [
+        b for b in ohlcv_slice if normalize_bar_date(b.date) in target_dates
+    ]
+    score_indicators = [
+        ind for ind in indicator_slice if normalize_bar_date(ind.date) in target_dates
+    ]
+    return score_ohlcv, score_indicators
 
 
 def init_pipeline_worker(
@@ -118,6 +141,7 @@ def evaluate_single_symbol(
     pre_screener: PreScreener,
     read_only: bool = False,
     verbose: bool = True,
+    skip_score_calculation: bool = False,
 ) -> Dict[str, Any]:
     """
     単一銘柄の OHLCV 取得・流動性判定・財務取得・指標/特徴量/パターン/スコア算出を行う共通ヘルパー。
@@ -270,19 +294,35 @@ def evaluate_single_symbol(
         if verbose:
             print(f"  パターン検出成功: {len(pattern_sets)} 件の日付データ")
 
-        # 6. 戦略スコア計算（設定注入）
-        t_score = time.perf_counter()
-        score_results = score_calc_fn(
-            feature_sets,
-            pattern_sets,
-            score_ids=["S002_StrategyScore"],
-            ohlcv_data=analysis_ohlcv,
-            indicator_sets=indicator_sets,
-            score_configs={"S002_StrategyScore": config.strategy_score},
+        # 6. MarketContext 用スナップショット抽出＆戦略スコア計算（必要時は親プロセス側へ委譲）
+        market_snapshot: SymbolMarketSnapshot = extract_symbol_market_snapshot(
+            symbol=symbol,
+            ohlcv_slice=analysis_ohlcv,
+            indicator_slice=indicator_sets,
+            financial_data=financial_data,
+            config=config.market_context,
         )
-        phase_timings["score_calculation"] = time.perf_counter() - t_score
-        if verbose:
-            print(f"  スコア計算成功: {len(score_results)} 件")
+
+        score_ohlcv: List[OhlcvModel] = []
+        score_indicators: List[IndicatorSetModel] = []
+        if skip_score_calculation:
+            score_results: List[ScoreResultModel] = []
+            score_ohlcv, score_indicators = _slice_score_inputs(
+                feature_sets, analysis_ohlcv, indicator_sets
+            )
+        else:
+            t_score = time.perf_counter()
+            score_results = score_calc_fn(
+                feature_sets,
+                pattern_sets,
+                score_ids=["S002_StrategyScore"],
+                ohlcv_data=analysis_ohlcv,
+                indicator_sets=indicator_sets,
+                score_configs={"S002_StrategyScore": config.strategy_score},
+            )
+            phase_timings["score_calculation"] = time.perf_counter() - t_score
+            if verbose:
+                print(f"  スコア計算成功: {len(score_results)} 件")
 
         return {
             "symbol": symbol,
@@ -294,6 +334,9 @@ def evaluate_single_symbol(
             "score_results": score_results,
             "financial_data": financial_data,
             "eval_ohlcv": eval_ohlcv,
+            "market_snapshot": market_snapshot,
+            "score_ohlcv": score_ohlcv,
+            "score_indicators": score_indicators,
             "phase_timings": phase_timings,
         }
     except Exception as e:
@@ -352,6 +395,7 @@ def process_symbol_task(task: Dict[str, Any]) -> Dict[str, Any]:
         pre_screener=pre_screener,
         read_only=True,
         verbose=bool(_WORKER_STATE.get("verbose", False)),
+        skip_score_calculation=bool(task.get("skip_score_calculation", False)),
     )
 
 
@@ -376,6 +420,7 @@ def evaluate_symbol_across_dates(
     pre_screener: PreScreener,
     read_only: bool = False,
     verbose: bool = False,
+    skip_score_calculation: bool = False,
 ) -> Dict[str, Any]:
     """
     複数基準日バックテスト向けの共通単一銘柄評価ヘルパー。
@@ -490,20 +535,39 @@ def evaluate_symbol_across_dates(
                 latest_only=latest_only_eval,
             )
 
-            score_results = score_calc_fn(
-                feature_sets,
-                pattern_sets,
-                score_ids=["S002_StrategyScore"],
-                ohlcv_data=slice_ohlcv,
-                indicator_sets=slice_ind,
-                score_configs={"S002_StrategyScore": config.strategy_score},
+            market_snapshot = extract_symbol_market_snapshot(
+                symbol=symbol,
+                ohlcv_slice=slice_ohlcv,
+                indicator_slice=slice_ind,
+                financial_data=financial_data,
+                config=config.market_context,
             )
+
+            score_ohlcv: List[OhlcvModel] = []
+            score_indicators: List[IndicatorSetModel] = []
+            if skip_score_calculation:
+                score_results: List[ScoreResultModel] = []
+                score_ohlcv, score_indicators = _slice_score_inputs(
+                    feature_sets, slice_ohlcv, slice_ind
+                )
+            else:
+                score_results = score_calc_fn(
+                    feature_sets,
+                    pattern_sets,
+                    score_ids=["S002_StrategyScore"],
+                    ohlcv_data=slice_ohlcv,
+                    indicator_sets=slice_ind,
+                    score_configs={"S002_StrategyScore": config.strategy_score},
+                )
 
             per_date_outputs[d] = {
                 "feature_sets": feature_sets,
                 "pattern_sets": pattern_sets,
                 "score_results": score_results,
                 "financial_data": financial_data,
+                "market_snapshot": market_snapshot,
+                "score_ohlcv": score_ohlcv,
+                "score_indicators": score_indicators,
             }
 
         eval_elapsed = time.perf_counter() - t_eval
@@ -583,4 +647,5 @@ def process_batch_symbol_task(task: Dict[str, Any]) -> Dict[str, Any]:
         pre_screener=pre_screener,
         read_only=True,
         verbose=bool(_WORKER_STATE.get("verbose", False)),
+        skip_score_calculation=bool(task.get("skip_score_calculation", False)),
     )

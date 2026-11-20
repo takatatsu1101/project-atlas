@@ -29,6 +29,7 @@ settings = load_settings()
 
 # collect_ohlcv_data 用の Parquet 列限定読込対象
 OHLCV_READ_COLUMNS: Tuple[str, ...] = ("date", "open", "high", "low", "close", "volume")
+DEFAULT_BENCHMARK_SYMBOL: str = "1306.T"
 
 class DataCollector:
     def __init__(
@@ -252,7 +253,7 @@ class DataCollector:
     def _get_cached_market_latest_date(
         self,
         schedule_end: date,
-        benchmark_symbol: str = "1306.T",
+        benchmark_symbol: str = DEFAULT_BENCHMARK_SYMBOL,
     ) -> Optional[date]:
         """TTL を考慮してキャッシュ済みの市場最新完了営業日を返す（期限切れ時は None）。"""
         entry = self._market_latest_date_cache.get((schedule_end, benchmark_symbol))
@@ -267,7 +268,7 @@ class DataCollector:
     def resolve_latest_completed_trading_day(
         self,
         ref_date: Optional[date] = None,
-        benchmark_symbol: str = "1306.T",
+        benchmark_symbol: str = DEFAULT_BENCHMARK_SYMBOL,
         use_remote_precheck: bool = True,
     ) -> date:
         """スケジュール基準の最新完了営業日を解決し、必要に応じベンチマーク銘柄で実市場日を確認する。"""
@@ -301,7 +302,7 @@ class DataCollector:
         req_start: date,
         req_end: date,
         market_latest_date: Optional[date] = None,
-        benchmark_symbol: str = "1306.T",
+        benchmark_symbol: str = DEFAULT_BENCHMARK_SYMBOL,
     ) -> Tuple[date, date]:
         """要求期間の期待営業日開始日・終了日を算出する。"""
         expected_start = get_first_trading_day_on_or_after(req_start)
@@ -637,7 +638,7 @@ class DataCollector:
         as_of_date: Optional[date] = None,
         chunk_size: int = 100,
         precheck_market: bool = True,
-        benchmark_symbol: str = "1306.T",
+        benchmark_symbol: str = DEFAULT_BENCHMARK_SYMBOL,
     ) -> Dict[str, Any]:
         """複数銘柄の OHLCV データをキャッシュ判定・市場プリチェック付きでチャンク並列バッチ取得する。"""
         if chunk_size <= 0:
@@ -930,6 +931,32 @@ class DataCollector:
                 dates, opens, highs, lows, closes, volumes
             )
         ]
+
+    def collect_benchmark_ohlcv(
+        self,
+        start_date: date,
+        end_date: date,
+        as_of_date: Optional[date] = None,
+        benchmark_symbol: str = DEFAULT_BENCHMARK_SYMBOL,
+        read_only: bool = False,
+    ) -> List[OhlcvModel]:
+        """
+        市場ベンチマーク銘柄（デフォルト 1306.T）の OHLCV データを安全に取得する。
+        取得に失敗しても例外を送出せず警告ログを出力して空リストを返す。
+        """
+        try:
+            return self.collect_ohlcv_data(
+                benchmark_symbol,
+                start_date,
+                end_date,
+                as_of_date=as_of_date,
+                read_only=read_only,
+            )
+        except Exception as e:
+            logger.warning(
+                f"市場ベンチマーク ({benchmark_symbol}) のOHLCVデータ取得に失敗したため代替基準へフォールバックします: {e}"
+            )
+            return []
 
     def _get_irbank_file_path(self, year_suffix: str, file_name: str) -> str:
         """
@@ -1815,7 +1842,7 @@ def prefetch_ohlcv_batch(
     as_of_date: Optional[date] = None,
     chunk_size: int = 100,
     precheck_market: bool = True,
-    benchmark_symbol: str = "1306.T",
+    benchmark_symbol: str = DEFAULT_BENCHMARK_SYMBOL,
 ) -> Dict[str, Any]:
     """複数銘柄の OHLCV データを事前にバッチ取得してローカルキャッシュを更新する。"""
     return data_collector.prefetch_ohlcv_batch(
@@ -1826,6 +1853,23 @@ def prefetch_ohlcv_batch(
         chunk_size=chunk_size,
         precheck_market=precheck_market,
         benchmark_symbol=benchmark_symbol,
+    )
+
+
+def collect_benchmark_ohlcv(
+    start_date: date,
+    end_date: date,
+    as_of_date: Optional[date] = None,
+    benchmark_symbol: str = DEFAULT_BENCHMARK_SYMBOL,
+    read_only: bool = False,
+) -> List[OhlcvModel]:
+    """市場ベンチマーク銘柄（デフォルト 1306.T）の OHLCV データを安全に取得する。"""
+    return data_collector.collect_benchmark_ohlcv(
+        start_date=start_date,
+        end_date=end_date,
+        as_of_date=as_of_date,
+        benchmark_symbol=benchmark_symbol,
+        read_only=read_only,
     )
 
 

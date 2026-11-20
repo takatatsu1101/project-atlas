@@ -1,7 +1,7 @@
 
-from datetime import date as DateType
+from datetime import date as DateType, datetime
 from typing import Dict, List, Any, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 class OhlcvModel(BaseModel):
     symbol: str
@@ -200,6 +200,127 @@ class FeatureQuantileRowModel(BaseModel):
     spread_win_rate_pct: Optional[float] = None
 
 
+class SymbolMarketSnapshot(BaseModel):
+    """個別銘柄の基準日時点スナップショット（MarketContext 横断集計用軽量モデル）"""
+
+    symbol: str
+    bar_date: Optional[DateType] = None
+    close: Optional[float] = None
+    sma25: Optional[float] = None
+    above_sma25: Optional[bool] = None
+    return_20d: Optional[float] = None
+    return_60d: Optional[float] = None
+    return_120d: Optional[float] = None
+    per: Optional[float] = None
+    pbr: Optional[float] = None
+    roe: Optional[float] = None
+
+
+class BenchmarkMetricsModel(BaseModel):
+    """市場ベンチマーク（例: 1306.T）の基準日時点指標モデル（読み取り専用）"""
+
+    model_config = ConfigDict(frozen=True)
+
+    symbol: str = "1306.T"
+    available: bool = False
+    bar_date: Optional[DateType] = None
+    close: Optional[float] = None
+    sma25: Optional[float] = None
+    sma75: Optional[float] = None
+    above_sma25: Optional[bool] = None
+    above_sma75: Optional[bool] = None
+    return_20d: Optional[float] = None
+    return_60d: Optional[float] = None
+    return_120d: Optional[float] = None
+
+
+class SectorMetricsModel(BaseModel):
+    """33業種ごとのモメンタム・騰落統計モデル（読み取り専用）"""
+
+    model_config = ConfigDict(frozen=True)
+
+    sector_33: str
+    member_count: int = 0
+    is_sufficient: bool = False
+    avg_return_20d: Optional[float] = None
+    above_sma25_ratio: Optional[float] = None
+    sector_return_percentile: Optional[float] = None
+    sector_momentum_score: Optional[float] = None
+
+
+class SymbolMarketMetricsModel(BaseModel):
+    """銘柄別の対市場相対力・業種モメンタム・業種内相対バリュエーション評価モデル（読み取り専用）"""
+
+    model_config = ConfigDict(frozen=True)
+
+    symbol: str
+    bar_date: Optional[DateType] = None
+    sector_33: Optional[str] = None
+    return_20d: Optional[float] = None
+    return_60d: Optional[float] = None
+    return_120d: Optional[float] = None
+    excess_return_20d: Optional[float] = None
+    excess_return_60d: Optional[float] = None
+    excess_return_120d: Optional[float] = None
+    composite_excess_return: Optional[float] = None
+    rs_percentile: Optional[float] = None
+    sector_momentum_score: Optional[float] = None
+    relative_valuation_z: Optional[float] = None
+    relative_valuation_score: Optional[float] = None
+    rs_adjustment: float = 0.0
+    sector_momentum_adjustment: float = 0.0
+    relative_valuation_adjustment: float = 0.0
+    pullback_adjustment: Optional[float] = None
+    breakout_adjustment: Optional[float] = None
+    total_adjustment: float = 0.0
+
+
+class MarketContextModel(BaseModel):
+    """基準日断面のユニバース横断コンテキスト（読み取り専用）"""
+
+    model_config = ConfigDict(frozen=True)
+
+    as_of_date: DateType
+    is_active: bool = False
+    inactive_reason: Optional[str] = None
+    universe_size: int = 0
+    valid_sma25_count: int = 0
+    above_sma25_count: int = 0
+    breadth_ratio: Optional[float] = None
+    universe_median_return_20d: Optional[float] = None
+    universe_median_return_60d: Optional[float] = None
+    universe_median_return_120d: Optional[float] = None
+    regime: str = "unknown"
+    breakout_threshold_delta: float = 0.0
+    breakout_score_penalty: float = 0.0
+    benchmark: BenchmarkMetricsModel = Field(default_factory=BenchmarkMetricsModel)
+    sector_metrics: Dict[str, SectorMetricsModel] = Field(default_factory=dict)
+    symbol_metrics: Dict[str, SymbolMarketMetricsModel] = Field(default_factory=dict)
+
+    def to_regime_summary(self) -> Dict[str, Any]:
+        """地合いレジーム・ベンチマーク状態のサマリー辞書を返す。"""
+        as_of_norm = (
+            self.as_of_date.date()
+            if isinstance(self.as_of_date, datetime)
+            else self.as_of_date
+        )
+        return {
+            "as_of_date": as_of_norm.isoformat(),
+            "is_active": self.is_active,
+            "regime": self.regime,
+            "universe_size": self.universe_size,
+            "breadth_ratio": self.breadth_ratio,
+            "breakout_threshold_delta": self.breakout_threshold_delta,
+            "breakout_score_penalty": self.breakout_score_penalty,
+            "benchmark_symbol": self.benchmark.symbol,
+            "benchmark_available": self.benchmark.available,
+            "benchmark_above_sma25": self.benchmark.above_sma25,
+            "benchmark_above_sma75": self.benchmark.above_sma75,
+            "benchmark_return_20d": self.benchmark.return_20d,
+            "benchmark_return_60d": self.benchmark.return_60d,
+        }
+
+
 class EvaluationSummaryModel(BaseModel):
     """フォワードリターン検証全体のサマリーモデル"""
 
@@ -214,6 +335,7 @@ class EvaluationSummaryModel(BaseModel):
     passed_overall_summary: Dict[int, HorizonSummaryModel] = Field(default_factory=dict)
     passed_strategy_summary: Dict[str, Dict[int, HorizonSummaryModel]] = Field(default_factory=dict)
     feature_quantile_summary: Dict[str, Dict[int, FeatureQuantileRowModel]] = Field(default_factory=dict)
+    market_regime_summary: Optional[Dict[str, Any]] = None
 
 
 class BatchBacktestSummaryModel(BaseModel):

@@ -19,6 +19,11 @@ from src.model.data_models import (
 logger = get_logger(__name__)
 
 _ALLOWED_ENTRY_MODES = ("signal_close", "next_open")
+_MARKET_CONTEXT_QUANTILE_SPECS: Tuple[Tuple[str, str, str], ...] = (
+    ("rs_score", "MC_RS_Rank", "対TOPIX相対力(RSランク)"),
+    ("sector_momentum_score", "MC_SectorMomentum", "33業種モメンタム"),
+    ("relative_valuation_score", "MC_RelativeValuation", "業種内相対バリュエーション"),
+)
 
 
 class ForwardReturnEvaluator:
@@ -478,10 +483,14 @@ class ForwardReturnEvaluator:
         grouped: Dict[str, Dict[int, List[Tuple[float, str, date, HorizonMetricsModel]]]] = {}
 
         for candidate, item in passed_records:
+            sub_scores = candidate.sub_scores or {}
             for fr in candidate.feature_results:
                 fid = fr.feature_id
                 if fid not in feature_names or (not feature_names[fid] and fr.feature_name):
                     feature_names[fid] = fr.feature_name or ""
+            for sub_key, mc_fid, mc_fname in _MARKET_CONTEXT_QUANTILE_SPECS:
+                if sub_key in sub_scores and mc_fid not in feature_names:
+                    feature_names[mc_fid] = mc_fname
 
             if item.status != "evaluated":
                 continue
@@ -503,6 +512,23 @@ class ForwardReturnEvaluator:
                     hm = item.horizons.get(h)
                     if hm is not None and hm.available and hm.return_pct is not None:
                         fid_map.setdefault(h, []).append((score_f, item.symbol, sig_dt, hm))
+
+            for sub_key, mc_fid, _ in _MARKET_CONTEXT_QUANTILE_SPECS:
+                if sub_key not in sub_scores:
+                    continue
+                mc_val = sub_scores.get(sub_key)
+                if (
+                    isinstance(mc_val, bool)
+                    or not isinstance(mc_val, (int, float))
+                    or not math.isfinite(float(mc_val))
+                ):
+                    continue
+                mc_f = float(mc_val)
+                mc_map = grouped.setdefault(mc_fid, {})
+                for h in resolved_horizons:
+                    hm = item.horizons.get(h)
+                    if hm is not None and hm.available and hm.return_pct is not None:
+                        mc_map.setdefault(h, []).append((mc_f, item.symbol, sig_dt, hm))
 
         result: Dict[str, Dict[int, FeatureQuantileRowModel]] = {}
         for fid in sorted(feature_names.keys()):

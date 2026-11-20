@@ -112,6 +112,8 @@ screener:
   score_id: "S002_StrategyScore"
   # 銘柄ごとに最新日のレコードのみを対象とするか
   latest_only_per_symbol: true
+  # 地合い悪化レジーム時にブレイクアウト閾値を動的引き上げするか
+  apply_market_regime_adjustment: true
 
 # 4. ランキング設定
 ranking:
@@ -140,3 +142,35 @@ evaluation:
     - 60
   # エントリー価格基準（"signal_close" または "next_open"）
   entry_price_mode: "signal_close"
+
+# 7. 市場コンテキスト・相対力・地合いレジーム設定（Phase B）
+market_context:
+  # MarketContext（対TOPIX相対力・業種モメンタム・業種内相対バリュエーション・地合いレジーム）を有効にするか
+  enabled: true
+  # 市場ベンチマーク銘柄（TOPIX連動型ETF）
+  benchmark_symbol: "1306.T"
+  # 横断統計・レジーム判定を有効化する最小ユニバース銘柄数（少銘柄テスト時は中立フォールバック）
+  min_universe_size: 20
+  # 業種モメンタム・業種内相対評価を有効化する最小同一33業種銘柄数
+  min_sector_size: 5
+  # 対市場超過リターン算出の営業日ホライズンと合成重み
+  rs_lookback_short: 20
+  rs_lookback_medium: 60
+  rs_lookback_long: 120
+  rs_weight_short: 0.25
+  rs_weight_medium: 0.45
+  rs_weight_long: 0.30
+  # Market Breadth（close > SMA25 比率）による地合いレジーム閾値
+  breadth_severe_bearish_threshold: 0.35
+  breadth_bearish_threshold: 0.40
+  breadth_bullish_threshold: 0.60
+  # 地合い悪化（bearish）時にブレイクアウト戦略へ適用する動的閾値引き上げ幅・スコア減点幅
+  breakout_bearish_threshold_delta: 8.0
+  breakout_bearish_score_penalty: 6.0
+  # 押し目買い戦略における正のRS補正抑制係数（高β急騰株の過剰評価抑止）
+  pullback_rs_positive_factor: 0.3
+  # 各補正点の最大振れ幅（+/-）と合計補正キャップ
+  rs_adjustment_max: 4.0
+  sector_momentum_adjustment_max: 4.0
+  relative_valuation_adjustment_max: 4.0
+  total_adjustment_cap: 8.0

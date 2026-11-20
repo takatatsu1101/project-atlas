@@ -8,6 +8,7 @@ import yaml
 from pydantic import BaseModel, Field, field_validator
 
 from src.config.settings import Settings
+from src.score_engine.market_context import MarketContextConfig
 from src.score_engine.scores.strategy import StrategyScoreConfig
 from src.screener.pre_screener import PreScreeningCriteria
 from src.screener.screener import ScreeningCriteria
@@ -65,6 +66,7 @@ class AtlasScreeningConfig(BaseModel):
 
     pre_screening: PreScreeningCriteria = Field(default_factory=PreScreeningCriteria)
     strategy_score: StrategyScoreConfig = Field(default_factory=StrategyScoreConfig)
+    market_context: MarketContextConfig = Field(default_factory=MarketContextConfig)
     screener: ScreeningCriteria = Field(default_factory=ScreeningCriteria)
     ranking: RankingConfig = Field(default_factory=RankingConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)

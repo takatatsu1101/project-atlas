@@ -2450,5 +2450,51 @@ class TestDataCollector(unittest.TestCase):
             self.assertIsNone(fin_2002.consecutive_non_decrease_years)
             self.assertIsNone(fin_2002.buyback_count_3y)
 
+    def test_collect_benchmark_ohlcv_and_failure_fallback(self):
+        """collect_benchmark_ohlcv が基準日分離して取得でき、失敗時は例外にせず空リストへフォールバックする"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            storage = StorageManager(base_dir=Path(tmpdir))
+            collector = DataCollector(storage=storage)
+            df = pd.DataFrame(
+                [
+                    {
+                        "date": date(2025, 1, 6),
+                        "open": 2500.0,
+                        "high": 2520.0,
+                        "low": 2490.0,
+                        "close": 2510.0,
+                        "volume": 500_000,
+                    },
+                    {
+                        "date": date(2025, 1, 7),
+                        "open": 2510.0,
+                        "high": 2530.0,
+                        "low": 2500.0,
+                        "close": 2525.0,
+                        "volume": 520_000,
+                    },
+                ]
+            )
+            storage.save_parquet(df, "price/1306.T.parquet")
+
+            bars = collector.collect_benchmark_ohlcv(
+                date(2025, 1, 6),
+                date(2025, 1, 7),
+                as_of_date=date(2025, 1, 6),
+                read_only=True,
+            )
+            self.assertEqual(len(bars), 1)
+            self.assertEqual(bars[0].symbol, "1306.T")
+            self.assertEqual(bars[0].date, date(2025, 1, 6))
+
+            with patch.object(
+                collector, "collect_ohlcv_data", side_effect=RuntimeError("network error")
+            ):
+                fallback = collector.collect_benchmark_ohlcv(
+                    date(2025, 1, 6),
+                    date(2025, 1, 7),
+                )
+            self.assertEqual(fallback, [])
+
 if __name__ == '__main__':
     unittest.main()

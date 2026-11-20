@@ -1,4 +1,5 @@
 import argparse
+from bisect import bisect_right
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from contextlib import nullcontext
 from datetime import date, datetime, timedelta
@@ -14,6 +15,7 @@ from src.common.storage import StorageManager
 from src.config.screening_config import AtlasScreeningConfig, load_screening_config
 from src.config.settings import load_settings
 from src.data_collector.collector import (
+    collect_benchmark_ohlcv,
     collect_financial_data,
     collect_ohlcv_data,
     data_collector,
@@ -31,10 +33,12 @@ from src.model.data_models import (
     FeatureSetModel,
     FinancialModel,
     ForwardEvaluationItemModel,
+    MarketContextModel,
     OhlcvModel,
     PatternSetModel,
     ScoreResultModel,
     StockMasterModel,
+    SymbolMarketSnapshot,
 )
 import src.pattern_detector  # パターンクラスをインポートしてレジストリに登録させる
 from src.pattern_detector.manager import detect_patterns
@@ -50,6 +54,7 @@ from src.presentation.presenter import Presenter
 from src.ranking.generator import RankingGenerator
 import src.score_engine  # スコアクラスをインポートしてレジストリに登録させる
 from src.score_engine.manager import calculate_scores
+from src.score_engine.market_context import build_market_context
 from src.screener.pre_screener import PreScreener
 from src.screener.screener import Screener
 
@@ -392,6 +397,10 @@ def run_full_pipeline(
             len(target_symbols),
             parallel_min_symbols=parallel_min_symbols,
         )
+        should_use_market_context = bool(
+            config.market_context.enabled
+            and len(target_symbols) >= config.market_context.min_universe_size
+        )
         timings_sec["setup_and_prescreen"] = time.perf_counter() - t_setup
         print(
             f"  対象銘柄: {len(target_symbols)}銘柄 (workers={effective_workers})",
@@ -405,6 +414,7 @@ def run_full_pipeline(
         financial_map: Dict[str, FinancialModel] = {}
         eval_ohlcv_map: Dict[str, List[OhlcvModel]] = {}
         processed_symbols: List[str] = []
+        benchmark_ohlcv: List[OhlcvModel] = []
 
         # 対象銘柄の OHLCV を事前にチャンク並列で一括プリフェッチ
         print("[2/4] OHLCV・財務データ準備...", flush=True)
@@ -420,6 +430,16 @@ def run_full_pipeline(
             else:
                 prefetch_ohlcv_batch(target_symbols, effective_start, fetch_end)
             timings_sec["ohlcv_collection"] += time.perf_counter() - t_prefetch
+
+        if should_use_market_context:
+            t_bench = time.perf_counter()
+            benchmark_ohlcv = collect_benchmark_ohlcv(
+                effective_start,
+                analysis_end,
+                as_of_date=analysis_end,
+                benchmark_symbol=config.market_context.benchmark_symbol,
+            )
+            timings_sec["ohlcv_collection"] += time.perf_counter() - t_bench
 
         if effective_workers > 1 and target_symbols:
             # 並列ワーカーは完全読取専用で動かすため、親プロセス側で IR BANK キャッシュを事前ウォームアップする
@@ -450,6 +470,7 @@ def run_full_pipeline(
                 "use_cache": use_cache,
                 "use_feature_cache": use_feature_cache,
                 "cache_key_suffix": cache_key_suffix,
+                "skip_score_calculation": should_use_market_context,
             },
             sequential_fn=lambda sym: evaluate_single_symbol(
                 symbol=sym,
@@ -474,6 +495,7 @@ def run_full_pipeline(
                 pre_screener=pre_screener,
                 read_only=False,
                 verbose=verbose,
+                skip_score_calculation=should_use_market_context,
             ),
             build_error_result_fn=lambda sym, e: {
                 "symbol": sym,
@@ -485,6 +507,8 @@ def run_full_pipeline(
         )
 
         # 決定性を保証するため、target_symbols の元の順序で結果を結合する
+        all_snapshots: List[SymbolMarketSnapshot] = []
+        pending_score_items: List[Dict[str, Any]] = []
         for res in symbol_eval_results:
             sym = res["symbol"]
             for phase_key, elapsed in (res.get("phase_timings") or {}).items():
@@ -501,18 +525,56 @@ def run_full_pipeline(
                 eval_ohlcv_map[sym] = res["eval_ohlcv"]
             if res.get("financial_data") is not None:
                 financial_map[sym] = res["financial_data"]
+            if res.get("market_snapshot") is not None:
+                all_snapshots.append(res["market_snapshot"])
 
             all_feature_sets.extend(res["feature_sets"])
             all_pattern_sets.extend(res["pattern_sets"])
-            all_score_results.extend(res["score_results"])
+            if should_use_market_context:
+                pending_score_items.append(
+                    {
+                        "feature_sets": res["feature_sets"],
+                        "pattern_sets": res["pattern_sets"],
+                        "score_ohlcv": res.get("score_ohlcv") or [],
+                        "score_indicators": res.get("score_indicators") or [],
+                    }
+                )
+            else:
+                all_score_results.extend(res["score_results"])
             processed_symbols.append(sym)
+
+        market_context: Optional[MarketContextModel] = None
+        if should_use_market_context:
+            t_score = time.perf_counter()
+            ctx_as_of = as_of_date or analysis_end
+            market_context = build_market_context(
+                as_of_date=ctx_as_of,
+                snapshots=all_snapshots,
+                master_map=master_map,
+                benchmark_ohlcv=benchmark_ohlcv,
+                config=config.market_context,
+            )
+            for item in pending_score_items:
+                s_res = calculate_scores(
+                    item["feature_sets"],
+                    item["pattern_sets"],
+                    score_ids=["S002_StrategyScore"],
+                    ohlcv_data=item["score_ohlcv"],
+                    indicator_sets=item["score_indicators"],
+                    score_configs={"S002_StrategyScore": config.strategy_score},
+                    market_context=market_context,
+                )
+                all_score_results.extend(s_res)
+            timings_sec["score_calculation"] += time.perf_counter() - t_score
 
         # 7. スクリーニング適用 & 8. 総合・戦略別ランキング生成
         print("[4/4] スクリーニング・ランキング生成...", flush=True)
         t_screen_rank = time.perf_counter()
         screener_instance = Screener()
         filtered_scores = screener_instance.apply_screener(
-            all_score_results, criteria=config.screener
+            all_score_results,
+            criteria=config.screener,
+            market_context=market_context,
         )
 
         ranking_gen = RankingGenerator(strict_date_match=config.ranking.strict_date_match)
@@ -551,6 +613,8 @@ def run_full_pipeline(
                 eval_end_date=eval_end_arg,
                 passed_candidates=passed_candidates,
             )
+            if market_context is not None and market_context.is_active:
+                evaluation_summary.market_regime_summary = market_context.to_regime_summary()
             timings_sec["forward_evaluation"] = time.perf_counter() - t_eval
 
         print(
@@ -572,6 +636,8 @@ def run_full_pipeline(
             "fiscal_year": effective_fiscal_year,
             "elapsed_sec": rounded_timings["total"],
         }
+        if market_context is not None and market_context.is_active:
+            run_metadata["market_regime"] = market_context.to_regime_summary()
 
         # 9. プレゼンテーション出力（CLI表示 ＋ レポート出力）
         presenter_instance = Presenter()
@@ -612,6 +678,7 @@ def run_full_pipeline(
             "analysis_results": overall_ranking,
             "strategy_rankings": strategy_rankings,
             "evaluation_summary": evaluation_summary,
+            "market_context": market_context,
             "report_paths": report_paths,
             "config": config,
             "timings_sec": rounded_timings,
@@ -766,6 +833,13 @@ def run_batch_backtest(
             len(union_symbols),
             parallel_min_symbols=parallel_min_symbols,
         )
+        any_date_uses_market_context = bool(
+            config.market_context.enabled
+            and any(
+                len(target_symbols_by_date[d]) >= config.market_context.min_universe_size
+                for d in sorted_dates
+            )
+        )
         timings_sec["setup_and_prescreen"] += time.perf_counter() - t_setup
         print(
             f"  対象期間: {len(sorted_dates)}基準日 ({min_as_of.isoformat()} 〜 {max_as_of.isoformat()}), "
@@ -784,6 +858,23 @@ def run_batch_backtest(
                 as_of_date=global_eval_end,
             )
             timings_sec["ohlcv_collection"] += time.perf_counter() - t_prefetch
+
+        benchmark_sorted: List[OhlcvModel] = []
+        bench_dates: List[date] = []
+        if any_date_uses_market_context:
+            t_bench = time.perf_counter()
+            raw_bench = collect_benchmark_ohlcv(
+                global_start,
+                max_as_of,
+                as_of_date=max_as_of,
+                benchmark_symbol=config.market_context.benchmark_symbol,
+            )
+            benchmark_sorted = sorted(
+                raw_bench,
+                key=lambda b: normalize_bar_date(b.date),
+            )
+            bench_dates = [normalize_bar_date(b.date) for b in benchmark_sorted]
+            timings_sec["ohlcv_collection"] += time.perf_counter() - t_bench
 
         # 4. 銘柄ごとの「全期間1回読込・ベクトル指標1回算出・基準日断面評価」
         print(f"[3/5] 全期間指標・基準日断面評価 ({len(union_symbols)}銘柄)...", flush=True)
@@ -805,6 +896,7 @@ def run_batch_backtest(
                 "should_check_liquidity": should_check_liquidity,
                 "use_cache": use_cache,
                 "use_feature_cache": use_feature_cache,
+                "skip_score_calculation": any_date_uses_market_context,
             },
             sequential_fn=lambda sym: evaluate_symbol_across_dates(
                 symbol=sym,
@@ -827,6 +919,7 @@ def run_batch_backtest(
                 pre_screener=pre_screener,
                 read_only=False,
                 verbose=verbose,
+                skip_score_calculation=any_date_uses_market_context,
             ),
             build_error_result_fn=lambda sym, e: {
                 "symbol": sym,
@@ -846,6 +939,8 @@ def run_batch_backtest(
         date_scores: Dict[date, List[ScoreResultModel]] = {d: [] for d in sorted_dates}
         date_financial_map: Dict[date, Dict[str, FinancialModel]] = {d: {} for d in sorted_dates}
         date_processed_symbols: Dict[date, List[str]] = {d: [] for d in sorted_dates}
+        date_snapshots: Dict[date, List[SymbolMarketSnapshot]] = {d: [] for d in sorted_dates}
+        date_pending_scores: Dict[date, List[Dict[str, Any]]] = {d: [] for d in sorted_dates}
 
         # union_symbols の決定性を維持したまま各基準日の結果へ振り分ける
         per_symbol_map: Dict[str, Dict[str, Any]] = {}
@@ -872,7 +967,19 @@ def run_batch_backtest(
                 date_processed_symbols[d].append(sym)
                 date_features[d].extend(d_out["feature_sets"])
                 date_patterns[d].extend(d_out["pattern_sets"])
-                date_scores[d].extend(d_out["score_results"])
+                if d_out.get("market_snapshot") is not None:
+                    date_snapshots[d].append(d_out["market_snapshot"])
+                if any_date_uses_market_context:
+                    date_pending_scores[d].append(
+                        {
+                            "feature_sets": d_out["feature_sets"],
+                            "pattern_sets": d_out["pattern_sets"],
+                            "score_ohlcv": d_out.get("score_ohlcv") or [],
+                            "score_indicators": d_out.get("score_indicators") or [],
+                        }
+                    )
+                else:
+                    date_scores[d].extend(d_out["score_results"])
                 if d_out["financial_data"] is not None:
                     date_financial_map[d][sym] = d_out["financial_data"]
 
@@ -892,9 +999,41 @@ def run_batch_backtest(
         )
 
         for idx, d in enumerate(sorted_dates, start=1):
+            market_context_d: Optional[MarketContextModel] = None
+            if any_date_uses_market_context:
+                t_mc_score = time.perf_counter()
+                date_uses_mc = (
+                    config.market_context.enabled
+                    and len(target_symbols_by_date[d]) >= config.market_context.min_universe_size
+                )
+                if date_uses_mc:
+                    bench_right = bisect_right(bench_dates, d)
+                    bench_slice_d = benchmark_sorted[:bench_right]
+                    market_context_d = build_market_context(
+                        as_of_date=d,
+                        snapshots=date_snapshots[d],
+                        master_map=master_map,
+                        benchmark_ohlcv=bench_slice_d,
+                        config=config.market_context,
+                    )
+                for item in date_pending_scores[d]:
+                    s_res = calculate_scores(
+                        item["feature_sets"],
+                        item["pattern_sets"],
+                        score_ids=["S002_StrategyScore"],
+                        ohlcv_data=item["score_ohlcv"],
+                        indicator_sets=item["score_indicators"],
+                        score_configs={"S002_StrategyScore": config.strategy_score},
+                        market_context=market_context_d,
+                    )
+                    date_scores[d].extend(s_res)
+                timings_sec["symbol_evaluation"] += time.perf_counter() - t_mc_score
+
             t_rank = time.perf_counter()
             filtered_scores = screener_instance.apply_screener(
-                date_scores[d], criteria=config.screener
+                date_scores[d],
+                criteria=config.screener,
+                market_context=market_context_d,
             )
             strategy_rankings = ranking_gen.generate_strategy_rankings(
                 filtered_scores,
@@ -926,6 +1065,8 @@ def run_batch_backtest(
                 eval_end_date=end_date,
                 passed_candidates=passed_candidates,
             )
+            if market_context_d is not None and market_context_d.is_active:
+                eval_summary.market_regime_summary = market_context_d.to_regime_summary()
             timings_sec["forward_evaluation"] += time.perf_counter() - t_eval
 
             all_passed_items.extend(passed_items)
@@ -940,6 +1081,7 @@ def run_batch_backtest(
                 "analysis_results": overall_ranking,
                 "strategy_rankings": strategy_rankings,
                 "evaluation_summary": eval_summary,
+                "market_context": market_context_d,
             }
             date_tracker.update(
                 idx,
