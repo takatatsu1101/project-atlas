@@ -190,8 +190,10 @@
 - **当面の実行環境（ローカル Mac 運用）**:
   - macOS 上の Python 環境で実行し、ローカルキャッシュ（`data/price/`, `data/financial/`）と組み合わせて平日大引け後に CLI 1コマンドで完結すること（手動実行または `launchd` による定期実行を想定）。
   - Google ドライブ デスクトップ版のローカル同期フォルダ（例：`~/Library/CloudStorage/GoogleDrive-.../マイドライブ/ProjectAtlas`）をコピー先として指定することで、追加 OAuth 認証やトークン失効管理なしで iPhone の Gemini アプリへ自動連携できること。
-- **将来のクラウド自動実行（GitHub Actions 移行予定）**:
-  - 将来的に GitHub Actions（平日大引け後のスケジュール実行）へ移行する際は、Google Drive API（サービスアカウントまたは OAuth シークレット）を用いた直接アップロード、および `data/price/`, `data/financial/`, `data/master/` キャッシュの引き継ぎ構成を追加できるよう、ブリーフ生成層と保存・配信層を分離しておくこと。
+- **クラウド自動実行（GitHub Actions 方式B・フェーズ6 PR #2）**:
+  - 平日大引け後（JST 16:30 頃）に GitHub Actions で自動実行し、個人 Google アカウントのマイドライブへ直接アップロードできること（手動実行 `workflow_dispatch` も併用可能）。
+  - 認証方式は個人マイドライブへの新規作成・上書きに対応するため **OAuth 2.0（Client ID / Client Secret / Refresh Token + 保存先 Folder ID を GitHub Secrets で管理）** とし、追加 SDK なしで既存の `requests` を用いて Drive REST API v3 で同名検索のうえ「既存なら上書き更新、未存在なら新規作成」を行うこと。
+  - `data/price/`, `data/financial/`, `data/master/` キャッシュは `actions/cache`（`restore-keys` 方式）で引き継ぎ、監視銘柄は GitHub Repository Variables（`WATCH_SYMBOLS`）または手動実行入力で差し替え可能とすること。
 
 ---
 

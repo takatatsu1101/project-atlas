@@ -296,11 +296,35 @@ Project Atlas は、スイングトレード（数週間〜3ヶ月保有）向�
         - `max_close` フィルタ、スイング高安/POC/MA傾き算出、監視銘柄同梱、`gemini_brief_*.md` / `latest` 出力、コピー先フォールバックの単体・結合テストを追加し全テストがパスすること。
         - 実際に `--config config/screening_gemini.yaml` 等で実行し、`gemini_brief_*.md` が `docs/GeminiPrompt.md` の判断材料要件を満たすことを確認する。
 
-- [ ] **PR #2（将来拡張）: GitHub Actions 定期実行＆Google Drive API 直接アップロード (`feat/github-actions-drive-sync`)**
-    - **目的**: 手元 Mac がスリープ／オフラインの状態でも、平日大引け後にクラウド上で自動スクリーニングを実行し、Google Drive API 経由で最新ブリーフを直接アップロードできるようにする。
+- [ ] **PR #2: GitHub Actions 定期実行＆Google Drive API 直接アップロード (`feat/github-actions-drive-sync`)**
+    - **目的**: 手元 Mac がスリープ／オフラインの状態でも、平日大引け後に GitHub Actions 上で自動スクリーニングを実行し、個人 Google アカウントのマイドライブへ最新ブリーフを自動アップロードできるようにする。
     - **対象スコープ**:
-        - [ ] Google Drive API（サービスアカウント / OAuth シークレット）を用いたアップロードアダプタ実装
-        - [ ] GitHub Actions ワークフロー（平日大引け後 cron）および `data/price/`, `data/financial/`, `data/master/` キャッシュ同期設計
+        - [ ] **Google Drive API 直接アップロードアダプタ（`GoogleDriveBriefDelivery`）実装**:
+          - `src/presentation/gemini_brief.py` の `BriefDeliveryBackend` プロトコルを実装。
+          - 追加パッケージを入れず既存の `requests` で Google Drive REST API v3（OAuth 2.0 トークン更新・フォルダ内同名検索・multipart 新規作成 `files.create` / 上書き更新 `files.update`）を直接実装する。
+          - `gemini_brief_latest.md` 等は指定フォルダ内で同名検索し、存在すればファイル ID を維持して上書き更新、なければ新規作成する（重複防止・外部参照維持）。
+        - [ ] **CLI / Presenter 連携**:
+          - `src/main.py`, `src/presentation/presenter.py` に Drive API 配信オプション（`--brief-drive-folder-id` / 環境変数 `GOOGLE_DRIVE_FOLDER_ID`, `GOOGLE_DRIVE_CLIENT_ID`, `GOOGLE_DRIVE_CLIENT_SECRET`, `GOOGLE_DRIVE_REFRESH_TOKEN` 等）を統合。
+        - [ ] **GitHub Actions ワークフロー（`.github/workflows/daily_gemini_brief.yml`）構築**:
+          - 実行タイミング: 平日 JST 16:30（`cron: '30 7 * * 1-5'`）の定期実行＋`workflow_dispatch` 手動実行。
+          - キャッシュ引き継ぎ: `actions/cache`（`key: atlas-data-${{ github.run_id }}` / `restore-keys: atlas-data-`）により `data/price/`, `data/financial/`, `data/master/`（合計約 60MB）を引き継ぎ、初回・長期連休後の失効時は自動再取得する（3.3GB の `data/cache/` は対象外）。
+          - 監視銘柄の受け渡し: `workflow_dispatch` 入力 ＞ GitHub Repository Variables（`WATCH_SYMBOLS`） ＞ `config/screening_gemini.yaml` の優先順位で `--watch-symbols` を適用する。
+          - 出力ファイル（`output/gemini_brief_*.md` 等）を Actions Artifacts にも保存する。
+        - [ ] **運用・セットアップ手順書整備**:
+          - `docs/specifications/github_actions_drive_sync.md` に OAuth 2.0 リフレッシュトークン取得手順、GitHub Secrets / Variables 設定一覧、および「7日失効防止のため OAuth 同意画面を本番公開にする」運用注意点を記載する。
+    - **変更予定ファイル**:
+        - `src/presentation/gemini_brief.py`（`GoogleDriveBriefDelivery` 追加）
+        - `src/presentation/presenter.py`, `src/main.py`, `src/config/screening_config.py`
+        - `.github/workflows/daily_gemini_brief.yml`（新規）
+        - `docs/specifications/github_actions_drive_sync.md`（設計・セットアップ手順書）
+        - 関連単体テスト（`requests` モックによる OAuth 更新・同名検索・create/update・リトライ・エラー分離テスト）
+    - **設計上の決定事項**:
+        - 個人マイドライブはサービスアカウントによる新規ファイル作成が不可（Storage Quota 制約）のため、**OAuth 2.0（リフレッシュトークン）** を採用する。
+        - 依存関係の肥大化・CI 速度低下を避けるため `google-api-python-client` 等は追加せず、`requests` で直接 REST API v3 を実装する。
+        - 既存の `LocalCopyBriefDelivery`（方式A）およびローカル出力・並列ワーカー制約・先読みバイアス防止は一切破壊しない。
+    - **完了条件（テストおよび動作確認）**:
+        - `GoogleDriveBriefDelivery` の単体テスト（トークン更新、同名検索ヒット時の `update`、未ヒット時の `create`、API エラー・リトライ時の挙動）および既存全テストがパスすること。
+        - GitHub Actions ワークフロー YAML の構文・ステップが整合しており、`workflow_dispatch` で実データ実行〜Drive アップロードまで疎通確認できること。
 
 ## 4. 今後のマイルストーン
 - [x] 2026/08/31: フェーズ2の「特徴量・パターン追加およびパイプライン結合」完了
