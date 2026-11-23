@@ -706,6 +706,60 @@ class TestPresenter(unittest.TestCase):
             self.assertIn("| 基準日 | 候補数 | 地合い (Breadth) |", md_text)
             self.assertIn("bearish (Breadth=31.2%, BO閾値+8)", md_text)
 
+    def test_export_reports_gemini_multiple_deliveries_and_strict_error(self):
+        """export_reports で gemini_brief_deliveries の複数併用と fail_on_brief_delivery_error を検証する"""
+        presenter = Presenter()
+        results = self._sample_results()
+        target_date = date(2026, 2, 15)
+
+        class _DummyDriveDelivery:
+            key_suffix = "drive"
+
+            def __init__(self, should_fail: bool = False):
+                self.should_fail = should_fail
+
+            def deliver(self, files, as_of_date):
+                if self.should_fail:
+                    raise RuntimeError("drive upload failed")
+                return {k: f"gdrive://id_{k}" for k in files}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_dir = Path(tmpdir) / "out_ok"
+            copy_dir = Path(tmpdir) / "copy_ok"
+            copy_dir.mkdir(parents=True, exist_ok=True)
+
+            exported = presenter.export_reports(
+                results,
+                output_dir=out_dir,
+                formats=("gemini",),
+                as_of_date=target_date,
+                gemini_brief_copy_dir=copy_dir,
+                gemini_brief_deliveries=[_DummyDriveDelivery(should_fail=False)],
+                fail_on_brief_delivery_error=True,
+            )
+            self.assertTrue(exported["gemini"].exists())
+            self.assertTrue(exported["gemini_latest"].exists())
+            self.assertEqual(exported["gemini_drive"], "gdrive://id_gemini")
+            self.assertEqual(exported["gemini_latest_drive"], "gdrive://id_gemini_latest")
+            self.assertTrue(Path(exported["gemini_copy"]).exists())
+            self.assertTrue(Path(exported["gemini_latest_copy"]).exists())
+
+            out_fail_dir = Path(tmpdir) / "out_fail"
+            with self.assertRaises(RuntimeError):
+                presenter.export_reports(
+                    results,
+                    output_dir=out_fail_dir,
+                    formats=("gemini", "json", "markdown"),
+                    as_of_date=target_date,
+                    gemini_brief_deliveries=[_DummyDriveDelivery(should_fail=True)],
+                    fail_on_brief_delivery_error=True,
+                )
+            # strict 失敗時でもローカルファイル（gemini + 後続 json / markdown）は生成・保護されていること
+            self.assertTrue((out_fail_dir / "gemini_brief_2026-02-15.md").exists())
+            self.assertTrue((out_fail_dir / "gemini_brief_latest.md").exists())
+            self.assertTrue((out_fail_dir / "screening_report_2026-02-15.json").exists())
+            self.assertTrue((out_fail_dir / "screening_report_2026-02-15.md").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

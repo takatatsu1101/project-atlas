@@ -1,7 +1,12 @@
+import json
 import tempfile
 import unittest
 from datetime import date, timedelta
 from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+from unittest.mock import MagicMock
+
+import requests
 
 from src.model.data_models import (
     AnalysisResultModel,
@@ -14,7 +19,11 @@ from src.model.data_models import (
     SymbolMarketMetricsModel,
 )
 from src.presentation.gemini_brief import (
+    GoogleDriveBriefDelivery,
+    GoogleDriveDeliveryError,
     LocalCopyBriefDelivery,
+    _build_multipart_related_body,
+    _escape_drive_query_literal,
     build_gemini_stock_brief_data,
     compute_recent_swing_levels,
     compute_volume_poc,
@@ -371,6 +380,423 @@ class TestGeminiBrief(unittest.TestCase):
             )
             self.assertTrue(exported["gemini"].exists())
             self.assertTrue(exported["gemini_latest"].exists())
+
+
+def _make_mock_response(
+    status_code: int = 200,
+    json_data: Optional[Dict[str, Any]] = None,
+    json_error: Optional[Exception] = None,
+    reason: str = "OK",
+) -> MagicMock:
+    resp = MagicMock()
+    resp.status_code = status_code
+    resp.reason = reason
+    if json_error is not None:
+        resp.json.side_effect = json_error
+    else:
+        resp.json.return_value = json_data if json_data is not None else {}
+    return resp
+
+
+def _parse_multipart_related(
+    content_type_header: str, body: bytes
+) -> Tuple[Dict[str, Any], str, bytes]:
+    prefix = "multipart/related; boundary="
+    assert content_type_header.startswith(prefix), content_type_header
+    boundary = content_type_header[len(prefix) :].encode("ascii")
+    delimiter = b"--" + boundary
+    raw_parts = body.split(delimiter)
+    # 先頭(空), part1(metadata), part2(content), 末尾(--\r\n)
+    part1 = raw_parts[1].lstrip(b"\r\n")
+    part2 = raw_parts[2].lstrip(b"\r\n")
+    _, meta_raw = part1.split(b"\r\n\r\n", 1)
+    part2_headers, content_raw = part2.split(b"\r\n\r\n", 1)
+    if content_raw.endswith(b"\r\n"):
+        content_raw = content_raw[:-2]
+    meta_json = json.loads(meta_raw.rstrip(b"\r\n").decode("utf-8"))
+    return meta_json, part2_headers.decode("utf-8"), content_raw
+
+
+class TestGoogleDriveBriefDelivery(unittest.TestCase):
+    def test_query_escape_and_multipart_builder(self):
+        """Drive クエリエスケープと multipart/related ボディ構造を検証する"""
+        self.assertEqual(
+            _escape_drive_query_literal("brief'2026\\test.md"),
+            "brief\\'2026\\\\test.md",
+        )
+        body, boundary = _build_multipart_related_body(
+            metadata={"name": "日本語ブリーフ.md", "parents": ["fld_1"]},
+            content="テスト本文\n".encode("utf-8"),
+            boundary="test_boundary_123",
+        )
+        meta, headers, content = _parse_multipart_related(
+            f"multipart/related; boundary={boundary}", body
+        )
+        self.assertEqual(meta, {"name": "日本語ブリーフ.md", "parents": ["fld_1"]})
+        self.assertIn("Content-Type: text/markdown; charset=utf-8", headers)
+        self.assertEqual(content.decode("utf-8"), "テスト本文\n")
+
+    def test_init_and_from_env_validation(self):
+        """必須パラメータ・数値制約バリデーションとシークレット非露出、from_env 優先順位を検証する"""
+        with self.assertRaises(ValueError) as ctx:
+            GoogleDriveBriefDelivery(
+                client_id="secret_cid",
+                client_secret="   ",
+                refresh_token="secret_rt_do_not_leak",
+                folder_id="fld_1",
+            )
+        msg = str(ctx.exception)
+        self.assertIn("client_secret", msg)
+        self.assertNotIn("secret_cid", msg)
+        self.assertNotIn("secret_rt_do_not_leak", msg)
+
+        for bad_kwargs in (
+            {"timeout": 0},
+            {"timeout": True},
+            {"timeout": float("nan")},
+            {"timeout": float("inf")},
+            {"timeout": "30"},
+            {"max_retries": -1},
+            {"max_retries": True},
+            {"backoff_base": -0.1},
+            {"backoff_base": False},
+            {"backoff_base": float("nan")},
+            {"backoff_base": float("inf")},
+            {"backoff_base": "1"},
+        ):
+            with self.subTest(bad_kwargs=bad_kwargs):
+                with self.assertRaises(ValueError):
+                    GoogleDriveBriefDelivery(
+                        client_id="cid",
+                        client_secret="csec",
+                        refresh_token="rt",
+                        folder_id="fld",
+                        **bad_kwargs,
+                    )
+
+        with self.assertRaises(ValueError) as missing_ctx:
+            GoogleDriveBriefDelivery.from_env(
+                environ={
+                    "GOOGLE_DRIVE_CLIENT_ID": "cid",
+                    "GOOGLE_DRIVE_CLIENT_SECRET": "csec",
+                }
+            )
+        missing_msg = str(missing_ctx.exception)
+        self.assertIn("GOOGLE_DRIVE_REFRESH_TOKEN", missing_msg)
+        self.assertIn("GOOGLE_DRIVE_FOLDER_ID", missing_msg)
+        self.assertNotIn("csec", missing_msg)
+
+        # 引数 folder_id が環境変数より優先される
+        delivery = GoogleDriveBriefDelivery.from_env(
+            folder_id="override_folder",
+            environ={
+                "GOOGLE_DRIVE_CLIENT_ID": "cid",
+                "GOOGLE_DRIVE_CLIENT_SECRET": "csec",
+                "GOOGLE_DRIVE_REFRESH_TOKEN": "rt",
+                "GOOGLE_DRIVE_FOLDER_ID": "env_folder",
+            },
+        )
+        self.assertEqual(delivery.folder_id, "override_folder")
+
+    def test_deliver_create_multiple_files_single_token(self):
+        """新規作成（POST + parents あり + text/markdown）と複数ファイルでトークン取得1回を検証"""
+        mock_session = MagicMock(spec=requests.Session)
+        mock_session.request.side_effect = [
+            _make_mock_response(200, {"access_token": "acc_tok_123"}),
+            _make_mock_response(200, {"files": []}),
+            _make_mock_response(200, {"id": "created_dated_id", "name": "gemini_brief_2026-08-28.md"}),
+            _make_mock_response(200, {"files": []}),
+            _make_mock_response(200, {"id": "created_latest_id", "name": "gemini_brief_latest.md"}),
+        ]
+        delivery = GoogleDriveBriefDelivery(
+            client_id="cid",
+            client_secret="csec",
+            refresh_token="rt",
+            folder_id="folder_target",
+            session=mock_session,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dated_path = Path(tmpdir) / "gemini_brief_2026-08-28.md"
+            latest_path = Path(tmpdir) / "gemini_brief_latest.md"
+            dated_path.write_text("# dated brief", encoding="utf-8")
+            latest_path.write_text("# latest brief", encoding="utf-8")
+
+            delivered = delivery.deliver(
+                {"gemini": dated_path, "gemini_latest": latest_path},
+                as_of_date=date(2026, 8, 28),
+            )
+
+        self.assertEqual(
+            delivered,
+            {
+                "gemini": "gdrive://created_dated_id",
+                "gemini_latest": "gdrive://created_latest_id",
+            },
+        )
+        self.assertEqual(mock_session.request.call_count, 5)
+        token_call = mock_session.request.call_args_list[0]
+        self.assertEqual(token_call.args[0], "POST")
+        self.assertEqual(token_call.args[1], "https://oauth2.googleapis.com/token")
+
+        upload_call = mock_session.request.call_args_list[2]
+        self.assertEqual(upload_call.args[0], "POST")
+        self.assertEqual(upload_call.args[1], "https://www.googleapis.com/upload/drive/v3/files")
+        self.assertEqual(upload_call.kwargs["headers"]["Authorization"], "Bearer acc_tok_123")
+        meta, part_headers, body_bytes = _parse_multipart_related(
+            upload_call.kwargs["headers"]["Content-Type"],
+            upload_call.kwargs["data"],
+        )
+        self.assertEqual(meta["name"], "gemini_brief_2026-08-28.md")
+        self.assertEqual(meta["parents"], ["folder_target"])
+        self.assertEqual(meta["mimeType"], "text/markdown")
+        self.assertIn("Content-Type: text/markdown; charset=utf-8", part_headers)
+        self.assertEqual(body_bytes.decode("utf-8"), "# dated brief")
+
+    def test_deliver_update_existing_excludes_parents_and_picks_latest(self):
+        """同名既存（複数ヒット含む）では先頭1件へ PATCH 上書きし、メタデータに parents を含めない"""
+        mock_session = MagicMock(spec=requests.Session)
+        mock_session.request.side_effect = [
+            _make_mock_response(200, {"access_token": "acc_tok_patch"}),
+            _make_mock_response(
+                200,
+                {
+                    "files": [
+                        {"id": "newest_file_id", "name": "gemini_brief_latest.md"},
+                        {"id": "older_file_id", "name": "gemini_brief_latest.md"},
+                    ]
+                },
+            ),
+            _make_mock_response(200, {"id": "newest_file_id", "name": "gemini_brief_latest.md"}),
+        ]
+        delivery = GoogleDriveBriefDelivery(
+            client_id="cid",
+            client_secret="csec",
+            refresh_token="rt",
+            folder_id="folder_target",
+            session=mock_session,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            latest_path = Path(tmpdir) / "gemini_brief_latest.md"
+            latest_path.write_text("# updated brief", encoding="utf-8")
+            delivered = delivery.deliver(
+                {"gemini_latest": latest_path},
+                as_of_date=date(2026, 8, 28),
+            )
+
+        self.assertEqual(delivered, {"gemini_latest": "gdrive://newest_file_id"})
+        patch_call = mock_session.request.call_args_list[2]
+        self.assertEqual(patch_call.args[0], "PATCH")
+        self.assertEqual(
+            patch_call.args[1],
+            "https://www.googleapis.com/upload/drive/v3/files/newest_file_id",
+        )
+        meta, _, _ = _parse_multipart_related(
+            patch_call.kwargs["headers"]["Content-Type"],
+            patch_call.kwargs["data"],
+        )
+        self.assertNotIn("parents", meta)
+        self.assertEqual(meta["mimeType"], "text/markdown")
+
+    def test_deliver_retry_backoff_and_exhaustion(self):
+        """429 / 503 / ConnectionError で指数バックオフリトライし、上限超過で GoogleDriveDeliveryError"""
+        sleeps: List[float] = []
+        mock_session = MagicMock(spec=requests.Session)
+        mock_session.request.side_effect = [
+            _make_mock_response(200, {"access_token": "acc_retry"}),
+            requests.ConnectionError("temporary network glitch"),
+            _make_mock_response(429, {"error": {"message": "rate limit"}}),
+            _make_mock_response(503, {"error": {"message": "backend unavailable"}}),
+            _make_mock_response(200, {"files": []}),
+            _make_mock_response(200, {"id": "ok_after_retry"}),
+        ]
+        delivery = GoogleDriveBriefDelivery(
+            client_id="cid",
+            client_secret="csec",
+            refresh_token="rt",
+            folder_id="fld",
+            max_retries=3,
+            backoff_base=1.0,
+            session=mock_session,
+            sleep_fn=sleeps.append,
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            latest_path = Path(tmpdir) / "gemini_brief_latest.md"
+            latest_path.write_text("ok", encoding="utf-8")
+            delivered = delivery.deliver(
+                {"gemini_latest": latest_path},
+                as_of_date=date(2026, 8, 28),
+            )
+            self.assertEqual(delivered, {"gemini_latest": "gdrive://ok_after_retry"})
+            self.assertEqual(sleeps, [1.0, 2.0, 4.0])
+
+            # リトライ上限超過ケース
+            sleeps_fail: List[float] = []
+            mock_fail_session = MagicMock(spec=requests.Session)
+            mock_fail_session.request.side_effect = [
+                _make_mock_response(503, {"error": {"message": "down"}}),
+                _make_mock_response(503, {"error": {"message": "still down"}}),
+                _make_mock_response(503, {"error": {"message": "always down"}}),
+            ]
+            delivery_fail = GoogleDriveBriefDelivery(
+                client_id="cid",
+                client_secret="super_secret_val",
+                refresh_token="super_refresh_val",
+                folder_id="fld",
+                max_retries=2,
+                backoff_base=0.5,
+                session=mock_fail_session,
+                sleep_fn=sleeps_fail.append,
+            )
+            with self.assertRaises(GoogleDriveDeliveryError):
+                delivery_fail.deliver(
+                    {"gemini_latest": latest_path},
+                    as_of_date=date(2026, 8, 28),
+                )
+            self.assertEqual(sleeps_fail, [0.5, 1.0])
+            self.assertEqual(mock_fail_session.request.call_count, 3)
+
+    def test_deliver_non_retryable_errors_token_failures_and_missing_files(self):
+        """4xx即失敗・トークン欠損停止・機密非露出・実在ファイル0件スキップを検証"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            latest_path = Path(tmpdir) / "gemini_brief_latest.md"
+            latest_path.write_text("body", encoding="utf-8")
+            missing_path = Path(tmpdir) / "does_not_exist.md"
+
+            # 1) 実在ファイル 0 件なら通信ゼロで {}
+            empty_session = MagicMock(spec=requests.Session)
+            empty_delivery = GoogleDriveBriefDelivery(
+                "cid", "csec", "rt", "fld", session=empty_session
+            )
+            self.assertEqual(
+                empty_delivery.deliver({"missing": missing_path}, date(2026, 8, 28)),
+                {},
+            )
+            empty_session.request.assert_not_called()
+
+            # 2) トークン取得 400 -> リトライせず即失敗し検索/アップロードへ進まない
+            sleeps: List[float] = []
+            token_err_session = MagicMock(spec=requests.Session)
+            token_err_session.request.return_value = _make_mock_response(
+                400,
+                {
+                    "error": "invalid_grant",
+                    "error_description": "Bad Request csec_secret rt_secret",
+                },
+            )
+            token_err_delivery = GoogleDriveBriefDelivery(
+                "cid",
+                "csec_secret",
+                "rt_secret",
+                "fld",
+                max_retries=3,
+                session=token_err_session,
+                sleep_fn=sleeps.append,
+            )
+            with self.assertRaises(GoogleDriveDeliveryError) as ctx_tok:
+                token_err_delivery.deliver({"latest": latest_path}, date(2026, 8, 28))
+            self.assertEqual(token_err_session.request.call_count, 1)
+            self.assertEqual(sleeps, [])
+            self.assertNotIn("csec_secret", str(ctx_tok.exception))
+            self.assertNotIn("rt_secret", str(ctx_tok.exception))
+
+            # 3) access_token 欠損時も検索へ進まない
+            missing_tok_session = MagicMock(spec=requests.Session)
+            missing_tok_session.request.return_value = _make_mock_response(200, {"token_type": "Bearer"})
+            missing_tok_delivery = GoogleDriveBriefDelivery(
+                "cid", "csec", "rt", "fld", session=missing_tok_session
+            )
+            with self.assertRaises(GoogleDriveDeliveryError):
+                missing_tok_delivery.deliver({"latest": latest_path}, date(2026, 8, 28))
+            self.assertEqual(missing_tok_session.request.call_count, 1)
+
+            # 4) 検索 403/401 で即座に GoogleDriveDeliveryError（access_token も非露出）
+            authz_session = MagicMock(spec=requests.Session)
+            authz_session.request.side_effect = [
+                _make_mock_response(200, {"access_token": "acc_leak_guard"}),
+                _make_mock_response(
+                    403,
+                    {"error": {"message": "Permission denied for acc_leak_guard"}},
+                ),
+            ]
+            authz_delivery = GoogleDriveBriefDelivery(
+                "cid",
+                "csec",
+                "rt",
+                "fld",
+                max_retries=3,
+                session=authz_session,
+                sleep_fn=sleeps.append,
+            )
+            with self.assertRaises(GoogleDriveDeliveryError) as ctx_authz:
+                authz_delivery.deliver({"latest": latest_path}, date(2026, 8, 28))
+            self.assertEqual(authz_session.request.call_count, 2)
+            self.assertEqual(sleeps, [])
+            self.assertNotIn("acc_leak_guard", str(ctx_authz.exception))
+
+    def test_export_gemini_brief_multiple_backends_and_strict_mode(self):
+        """LocalCopy と GoogleDrive 併用時のキー分離と fail_on_delivery_error 挙動を検証する"""
+        mock_session = MagicMock(spec=requests.Session)
+        mock_session.request.side_effect = [
+            _make_mock_response(200, {"access_token": "acc_ok"}),
+            _make_mock_response(200, {"files": []}),
+            _make_mock_response(200, {"id": "id_dated"}),
+            _make_mock_response(200, {"files": []}),
+            _make_mock_response(200, {"id": "id_latest"}),
+        ]
+        drive_delivery = GoogleDriveBriefDelivery(
+            "cid", "csec", "rt", "fld", session=mock_session
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_dir = Path(tmpdir) / "out"
+            copy_dir = Path(tmpdir) / "local_sync"
+            copy_dir.mkdir(parents=True, exist_ok=True)
+            local_delivery = LocalCopyBriefDelivery(copy_dir)
+
+            exported = export_gemini_brief(
+                markdown_content="# multi delivery brief",
+                output_dir=out_dir,
+                as_of_date=date(2026, 8, 28),
+                deliveries=[local_delivery, drive_delivery],
+            )
+            self.assertTrue(Path(exported["gemini"]).exists())
+            self.assertTrue(Path(exported["gemini_latest"]).exists())
+            self.assertTrue(Path(exported["gemini_copy"]).exists())
+            self.assertTrue(Path(exported["gemini_latest_copy"]).exists())
+            self.assertEqual(exported["gemini_drive"], "gdrive://id_dated")
+            self.assertEqual(exported["gemini_latest_drive"], "gdrive://id_latest")
+
+            # fail_on_delivery_error=False では配信失敗してもローカル出力が返る
+            fail_session = MagicMock(spec=requests.Session)
+            fail_session.request.return_value = _make_mock_response(401, {"error": "unauthorized"})
+            broken_drive = GoogleDriveBriefDelivery(
+                "cid", "csec", "rt", "fld", max_retries=0, session=fail_session
+            )
+            out_soft = Path(tmpdir) / "out_soft"
+            soft_exported = export_gemini_brief(
+                markdown_content="# soft fail brief",
+                output_dir=out_soft,
+                as_of_date=date(2026, 8, 29),
+                deliveries=[broken_drive],
+                fail_on_delivery_error=False,
+            )
+            self.assertTrue(Path(soft_exported["gemini"]).exists())
+            self.assertNotIn("gemini_drive", soft_exported)
+
+            # fail_on_delivery_error=True ではローカルファイル生成後に送出する
+            out_strict = Path(tmpdir) / "out_strict"
+            with self.assertRaises(GoogleDriveDeliveryError):
+                export_gemini_brief(
+                    markdown_content="# strict fail brief",
+                    output_dir=out_strict,
+                    as_of_date=date(2026, 8, 30),
+                    deliveries=[broken_drive],
+                    fail_on_delivery_error=True,
+                )
+            self.assertTrue((out_strict / "gemini_brief_2026-08-30.md").exists())
+            self.assertTrue((out_strict / "gemini_brief_latest.md").exists())
 
 
 if __name__ == "__main__":

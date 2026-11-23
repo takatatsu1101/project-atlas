@@ -41,12 +41,19 @@ flowchart LR
   - `key: atlas-data-${{ github.run_id }}`
   - `restore-keys: |`
     `  atlas-data-`
-- **挙動**: 平日毎日実行されるため通常は 7 日 TTL で失効せず直近キャッシュが復元される。初回実行時や長期連休（GW・年末年始等）明けでキャッシュが失効した場合は、パイプラインが Yahoo Finance / IR BANK / JPX マスタから自動で再取得する。
+- **挙動**: 平日毎日実行されるため通常は 7 日 TTL で失効せず直近キャッシュが復元される。初回実行時や長期連休（GW・年末年始等）明けでキャッシュが空・失効した場合は、ワークフロー側で `data/master/` が空なら自動で `--update-master` を付与し、さらに `run_full_pipeline` が事前スクリーニング前に IR BANK 財務キャッシュ（`warmup_irbank_cache`）を自動取得することでコールドスタート時の 0 銘柄化を防ぐ。
 
-### 2.3 ワークフロー実行・監視銘柄（`watch_symbols`）管理
+### 2.3 ワークフロー実行・監視銘柄（`watch_symbols`）・CLI オプション
 - **実行スケジュール**:
   - `schedule`: `cron: '30 7 * * 1-5'`（平日 JST 16:30 頃＝東証 15:30 大引けおよびデータ反映後）
-  - `workflow_dispatch`: 任意のタイミングで手動実行可能（`watch_symbols`, `as_of_date` 等の入力をサポート）
+  - `workflow_dispatch`: 任意のタイミングで手動実行可能。以下の入力をサポートする:
+    - `watch_symbols`: 継続監視する銘柄コード（空白・カンマ・読点区切り対応）
+    - `as_of_date`: 分析基準日 `YYYY-MM-DD`（空欄時は直近完了営業日）
+    - `update_master`: JPX 東証上場銘柄マスタの強制更新フラグ（`boolean`）
+    - `skip_drive_upload`: Google Drive API アップロードをスキップするドライラン用フラグ（`boolean`）
+- **CLI オプション連携（`src/main.py`）**:
+  - `--brief-drive-folder-id`: Drive API 配信先フォルダ ID（優先順位: CLI 引数 ＞ `config` YAML `output.gemini_brief_drive_folder_id` ＞ 環境変数 `GOOGLE_DRIVE_FOLDER_ID`）。
+  - `--strict-brief-delivery`: Google Drive API 等の外部配信や必須環境変数検証に失敗した際、警告ログのみで終わらせず終了コード `1` でパイプラインを失敗させるフラグ（GitHub Actions の `daily_gemini_brief.yml` で使用。この場合もローカルの `output/` 生成とキャッシュ保全・Artifacts アップロードは完了した状態で終了する）。
 - **監視銘柄の優先順位**:
   1. `workflow_dispatch` の入力値（指定時）
   2. GitHub Repository Variables の `WATCH_SYMBOLS`（例: `7203.T,6758.T,8035.T` またはスペース区切り）
@@ -88,12 +95,12 @@ flowchart LR
 ## 5. PR #2 実装タスク分割
 
 1. **`GoogleDriveBriefDelivery` 実装**（`src/presentation/gemini_brief.py`）
-   - OAuth アクセストークン取得、フォルダ内同名検索、`files.create` / `files.update`（multipart）、リトライ、エラーハンドリング。
-2. **CLI・Presenter 統合**（`src/presentation/presenter.py`, `src/main.py`, `src/config/screening_config.py`）
-   - `--brief-drive-folder-id` / 環境変数連携、`BriefDeliveryBackend` 複数併用・切り替え対応。
-3. **単体テスト整備**（`tests/unit/presentation/test_gemini_brief.py`, `test_presenter.py`）
-   - `requests` モックで新規作成・上書き更新・トークン更新失敗・リトライ・ローカル出力保護を網羅。
-4. **GitHub Actions ワークフロー追加**（`.github/workflows/daily_gemini_brief.yml`）
-   - `actions/cache`、環境セットアップ、`WATCH_SYMBOLS` 解決、`src.main` 実行、`actions/upload-artifact`。
+   - OAuth アクセストークン取得、フォルダ内同名検索、`files.create` / `files.update`（`multipart/related`、更新時は `parents` 除外）、指数バックオフリトライ、機密値非露出のエラーハンドリング。
+2. **CLI・Presenter・設定統合**（`src/presentation/presenter.py`, `src/main.py`, `src/config/screening_config.py`, `config/screening_gemini.yaml`）
+   - `--brief-drive-folder-id` / `--strict-brief-delivery` / 環境変数連携、`BriefDeliveryBackend` 複数併用時のキー分離、コールドスタート時の IR BANK 事前ウォームアップ。
+3. **単体・結合テスト整備**（`tests/unit/presentation/test_gemini_brief.py`, `test_presenter.py`, `tests/unit/config/test_screening_config.py`, `tests/integration/test_pipeline_integration.py`）
+   - `requests` モックで新規作成・上書き更新・トークン更新失敗・リトライ・機密非露出・ローカル出力保護・strict 失敗を網羅。
+4. **GitHub Actions ワークフロー追加**（`.github/workflows/daily_gemini_brief.yml`, `.gitignore`）
+   - `actions/cache`、`TZ=Asia/Tokyo`、初回 `data/master` 空時自動 `--update-master`、`WATCH_SYMBOLS` 解決、`--strict-brief-delivery`、`actions/upload-artifact`（失敗時もキャッシュ＆Artifacts を保全）。
 5. **動作確認**:
-   - 全テストパス確認および GitHub Actions `workflow_dispatch` での Drive アップロード疎通確認。
+   - 全単体・結合テストパス確認、ワークフロー YAML 構文検証、および GitHub Secrets 登録後の `workflow_dispatch` 疎通確認。

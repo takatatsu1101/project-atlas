@@ -39,7 +39,8 @@ pip-delete-this-directory.txt
 log.txt
 
 # Custom agents / IDE specific
-.github/
+.github/*
+!.github/workflows/
 .agents/
 
 cover/

@@ -28,6 +28,7 @@ class OutputConfig(BaseModel):
     output_dir: str = "./output"
     formats: List[str] = Field(default_factory=lambda: ["json", "markdown"])
     gemini_brief_copy_dir: Optional[str] = None
+    gemini_brief_drive_folder_id: Optional[str] = None
     gemini_brief_prefix: str = "gemini_brief"
     gemini_brief_latest_name: str = "gemini_brief_latest.md"
     watch_symbols: List[str] = Field(default_factory=list)
