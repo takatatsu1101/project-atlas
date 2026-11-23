@@ -208,6 +208,20 @@ ranking:
         self.assertEqual(cfg.pre_screening.max_close, 5000.0)
         self.assertIn("gemini", cfg.output.formats)
         self.assertEqual(cfg.output.gemini_brief_latest_name, "gemini_brief_latest.md")
+        self.assertIsNone(cfg.output.gemini_brief_drive_folder_id)
+
+    def test_output_config_drive_folder_id_default_and_yaml(self):
+        """OutputConfig.gemini_brief_drive_folder_id のデフォルト None と YAML 上書きを検証"""
+        self.assertIsNone(OutputConfig().gemini_brief_drive_folder_id)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            yaml_path = Path(tmpdir) / "drive_cfg.yaml"
+            yaml_path.write_text(
+                "output:\n  gemini_brief_drive_folder_id: \"folder_abc_123\"\n",
+                encoding="utf-8",
+            )
+            cfg = load_screening_config(yaml_path)
+            self.assertEqual(cfg.output.gemini_brief_drive_folder_id, "folder_abc_123")
 
 
 if __name__ == "__main__":

@@ -14,6 +14,7 @@ from src.model.data_models import (
 )
 from src.presentation.gemini_brief import (
     BriefDeliveryBackend,
+    DeliveryTarget,
     GeminiStockBriefData,
     LocalCopyBriefDelivery,
     export_gemini_brief as _export_gemini_brief_files,
@@ -1093,8 +1094,9 @@ class Presenter:
         latest_name: str = "gemini_brief_latest.md",
         copy_dir: Optional[Union[str, Path]] = None,
         deliveries: Optional[Iterable[BriefDeliveryBackend]] = None,
-    ) -> Dict[str, Path]:
-        """Gemini 連携用の高密度 Markdown ブリーフを出力し、必要に応じて同期先へコピーする。"""
+        fail_on_delivery_error: bool = False,
+    ) -> Dict[str, DeliveryTarget]:
+        """Gemini 連携用の高密度 Markdown ブリーフを出力し、必要に応じて同期先・外部バックエンドへ配信する。"""
         combined_results = [item.result for item in candidate_items] + [
             item.result for item in watch_items
         ]
@@ -1119,6 +1121,7 @@ class Presenter:
             prefix=prefix,
             latest_name=latest_name,
             deliveries=delivery_list,
+            fail_on_delivery_error=fail_on_delivery_error,
         )
 
     def export_reports(
@@ -1138,11 +1141,14 @@ class Presenter:
         gemini_brief_latest_name: str = "gemini_brief_latest.md",
         gemini_brief_copy_dir: Optional[Union[str, Path]] = None,
         gemini_as_of_date: Optional[date] = None,
-    ) -> Dict[str, Path]:
+        gemini_brief_deliveries: Optional[Iterable[BriefDeliveryBackend]] = None,
+        fail_on_brief_delivery_error: bool = False,
+    ) -> Dict[str, DeliveryTarget]:
         """
         指定された複数フォーマット（json, markdown, gemini）のレポートをまとめて出力する。
         """
-        exported: Dict[str, Path] = {}
+        exported: Dict[str, DeliveryTarget] = {}
+        deferred_brief_error: Optional[Exception] = None
         for fmt in formats:
             norm_fmt = str(fmt).strip().lower()
             if norm_fmt == "json":
@@ -1175,20 +1181,45 @@ class Presenter:
                     as_of_date if as_of_date is not None else (None if has_result_date else gemini_as_of_date),
                     evaluation_summary=evaluation_summary,
                 )
-                brief_paths = self.export_gemini_brief(
-                    candidate_items=gemini_candidate_items or (),
-                    watch_items=gemini_watch_items or (),
-                    output_dir=output_dir,
-                    as_of_date=brief_as_of,
-                    market_context=market_context,
-                    metadata=metadata,
-                    prefix=gemini_brief_prefix,
-                    latest_name=gemini_brief_latest_name,
-                    copy_dir=gemini_brief_copy_dir,
-                )
-                exported.update(brief_paths)
+                try:
+                    brief_paths = self.export_gemini_brief(
+                        candidate_items=gemini_candidate_items or (),
+                        watch_items=gemini_watch_items or (),
+                        output_dir=output_dir,
+                        as_of_date=brief_as_of,
+                        market_context=market_context,
+                        metadata=metadata,
+                        prefix=gemini_brief_prefix,
+                        latest_name=gemini_brief_latest_name,
+                        copy_dir=gemini_brief_copy_dir,
+                        deliveries=gemini_brief_deliveries,
+                        fail_on_delivery_error=fail_on_brief_delivery_error,
+                    )
+                    exported.update(brief_paths)
+                except Exception as e:
+                    if not fail_on_brief_delivery_error:
+                        raise
+                    deferred_brief_error = e
+                    dated_fallback = (
+                        Path(output_dir)
+                        / f"{gemini_brief_prefix}_{brief_as_of.isoformat()}.md"
+                    )
+                    latest_fallback = Path(output_dir) / gemini_brief_latest_name
+                    if dated_fallback.exists():
+                        exported["gemini"] = dated_fallback
+                    if latest_fallback.exists():
+                        exported["gemini_latest"] = latest_fallback
             else:
                 logger.warning(f"未対応のレポートフォーマットが指定されました: {fmt}")
+
+        if deferred_brief_error is not None:
+            if exported:
+                paths_str = ", ".join(f"{k}={v}" for k, v in exported.items())
+                logger.info(
+                    f"外部ブリーフ配信は失敗しましたがローカルレポート出力は完了しています: {paths_str}"
+                )
+            raise deferred_brief_error
+
         return exported
 
     def display_batch_backtest_results(

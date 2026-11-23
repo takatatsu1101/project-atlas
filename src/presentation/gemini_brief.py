@@ -8,12 +8,33 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
+import json
+import math
+import mimetypes
+import os
 import shutil
+import time
+import uuid
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Protocol, Sequence, Tuple, Union
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Mapping,
+    Optional,
+    Protocol,
+    Sequence,
+    Tuple,
+    Union,
+)
+from urllib.parse import quote
 
 from pydantic import BaseModel, Field
+import requests
 
 from src.common.logger import get_logger
 from src.model.data_models import (
@@ -101,18 +122,27 @@ class GeminiStockBriefData(BaseModel):
     relative_valuation_score: Optional[float] = None
 
 
+DeliveryTarget = Union[Path, str]
+
+
+class GoogleDriveDeliveryError(RuntimeError):
+    """Google Drive API を用いたブリーフ配信処理の失敗を表す例外。"""
+
+
 class BriefDeliveryBackend(Protocol):
     """ブリーフファイル配信バックエンドの抽象プロトコル（方式A: ローカルコピー / 方式B: Drive API）"""
 
     def deliver(
         self, files: Dict[str, Path], as_of_date: date
-    ) -> Dict[str, Path]:
-        """生成されたブリーフファイルを配信先へ配置し、成功したキーと出力先パスを返す。"""
+    ) -> Dict[str, DeliveryTarget]:
+        """生成されたブリーフファイルを配信先へ配置し、成功したキーと出力先（Path または URI 等）を返す。"""
         ...
 
 
 class LocalCopyBriefDelivery:
     """方式A: Google ドライブ デスクトップ同期フォルダ等のローカルディレクトリへコピーする配信実装"""
+
+    key_suffix: str = "copy"
 
     def __init__(self, copy_dir: Union[str, Path]):
         self.copy_dir = Path(copy_dir).expanduser()
@@ -153,6 +183,428 @@ class LocalCopyBriefDelivery:
                 f"ブリーフの同期フォルダコピーに失敗しました（ローカル出力は成功しています）[{self.copy_dir}]: {e}"
             )
             return delivered
+
+        return delivered
+
+
+def _escape_drive_query_literal(value: str) -> str:
+    """Google Drive API v3 の q パラメータ文字列リテラル用にバックスラッシュとシングルクォートをエスケープする。"""
+    return value.replace("\\", "\\\\").replace("'", "\\'")
+
+
+def _resolve_upload_mime_type(src_path: Path) -> str:
+    """配信対象ファイルの拡張子に応じた純粋な MIME タイプ（パラメータなし）を解決する。"""
+    if src_path.suffix.lower() in (".md", ".markdown"):
+        return "text/markdown"
+    guessed, _ = mimetypes.guess_type(src_path.name)
+    return guessed or "application/octet-stream"
+
+
+def _build_multipart_related_body(
+    metadata: Dict[str, Any],
+    content: bytes,
+    content_type: str = "text/markdown; charset=utf-8",
+    boundary: Optional[str] = None,
+) -> Tuple[bytes, str]:
+    """Google Drive REST API v3 uploadType=multipart 向けの multipart/related ボディと境界文字列を構築する。"""
+    meta_bytes = json.dumps(metadata, ensure_ascii=False).encode("utf-8")
+    if boundary is not None:
+        resolved_boundary = boundary
+    else:
+        while True:
+            candidate = f"atlas_drive_{uuid.uuid4().hex}"
+            candidate_bytes = candidate.encode("ascii")
+            if candidate_bytes not in meta_bytes and candidate_bytes not in content:
+                resolved_boundary = candidate
+                break
+
+    b_bytes = resolved_boundary.encode("ascii")
+    body = b"".join(
+        [
+            b"--",
+            b_bytes,
+            b"\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n",
+            meta_bytes,
+            b"\r\n--",
+            b_bytes,
+            b"\r\nContent-Type: ",
+            content_type.encode("utf-8"),
+            b"\r\n\r\n",
+            content,
+            b"\r\n--",
+            b_bytes,
+            b"--\r\n",
+        ]
+    )
+    return body, resolved_boundary
+
+
+def _extract_safe_error_detail(response: requests.Response) -> str:
+    """HTTP エラーレスポンスから機密値を含めない安全なエラー要約を抽出する。"""
+    status = getattr(response, "status_code", "unknown")
+    try:
+        payload = response.json()
+    except ValueError:
+        reason = getattr(response, "reason", None)
+        if isinstance(reason, str) and reason.strip():
+            return f"HTTP {status} ({reason.strip()[:120]})"
+        return f"HTTP {status}"
+
+    if isinstance(payload, dict):
+        err = payload.get("error")
+        if isinstance(err, dict):
+            msg = err.get("message")
+            if isinstance(msg, str) and msg.strip():
+                return f"HTTP {status}: {msg.strip()[:300]}"
+        elif isinstance(err, str) and err.strip():
+            desc = payload.get("error_description")
+            if isinstance(desc, str) and desc.strip():
+                return f"HTTP {status}: {err.strip()[:100]} ({desc.strip()[:200]})"
+            return f"HTTP {status}: {err.strip()[:200]}"
+        msg = payload.get("message")
+        if isinstance(msg, str) and msg.strip():
+            return f"HTTP {status}: {msg.strip()[:300]}"
+    return f"HTTP {status}"
+
+
+class GoogleDriveBriefDelivery:
+    """方式B: OAuth 2.0 と Google Drive REST API v3（requests 直接実装）でマイドライブへ配信する実装"""
+
+    key_suffix: str = "drive"
+    _TOKEN_URL: str = "https://oauth2.googleapis.com/token"
+    _FILES_URL: str = "https://www.googleapis.com/drive/v3/files"
+    _UPLOAD_URL: str = "https://www.googleapis.com/upload/drive/v3/files"
+    _ENV_VAR_CLIENT_ID: str = "GOOGLE_DRIVE_CLIENT_ID"
+    _ENV_VAR_CLIENT_SECRET: str = "GOOGLE_DRIVE_CLIENT_SECRET"
+    _ENV_VAR_REFRESH_TOKEN: str = "GOOGLE_DRIVE_REFRESH_TOKEN"
+    _ENV_VAR_FOLDER_ID: str = "GOOGLE_DRIVE_FOLDER_ID"
+
+    def __init__(
+        self,
+        client_id: str,
+        client_secret: str,
+        refresh_token: str,
+        folder_id: str,
+        *,
+        timeout: float = 30.0,
+        max_retries: int = 3,
+        backoff_base: float = 1.0,
+        session: Optional[requests.Session] = None,
+        sleep_fn: Optional[Callable[[float], None]] = None,
+    ):
+        required_fields = (
+            ("client_id", client_id),
+            ("client_secret", client_secret),
+            ("refresh_token", refresh_token),
+            ("folder_id", folder_id),
+        )
+        empty_names = [
+            name
+            for name, raw in required_fields
+            if not isinstance(raw, str) or not raw.strip()
+        ]
+        if empty_names:
+            raise ValueError(
+                f"Google Drive 配信の必須パラメータが未設定または空です: {', '.join(empty_names)}"
+            )
+
+        if (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or not math.isfinite(float(timeout))
+            or timeout <= 0
+        ):
+            raise ValueError(f"timeout は有限の正の数値を指定してください: {timeout}")
+        if isinstance(max_retries, bool) or not isinstance(max_retries, int) or max_retries < 0:
+            raise ValueError(f"max_retries は 0 以上の整数を指定してください: {max_retries}")
+        if (
+            isinstance(backoff_base, bool)
+            or not isinstance(backoff_base, (int, float))
+            or not math.isfinite(float(backoff_base))
+            or backoff_base < 0
+        ):
+            raise ValueError(f"backoff_base は有限の 0 以上の数値を指定してください: {backoff_base}")
+
+        self.client_id = client_id.strip()
+        self.client_secret = client_secret.strip()
+        self.refresh_token = refresh_token.strip()
+        self.folder_id = folder_id.strip()
+        self.timeout = float(timeout)
+        self.max_retries = max_retries
+        self.backoff_base = float(backoff_base)
+        self._session = session
+        self._sleep_fn = sleep_fn or time.sleep
+
+    @classmethod
+    def from_env(
+        cls,
+        folder_id: Optional[str] = None,
+        environ: Optional[Mapping[str, str]] = None,
+        **kwargs: Any,
+    ) -> "GoogleDriveBriefDelivery":
+        """環境変数（GOOGLE_DRIVE_*）から設定を読み込み、GoogleDriveBriefDelivery を生成する。"""
+        env = environ if environ is not None else os.environ
+        resolved_folder = (
+            folder_id.strip()
+            if isinstance(folder_id, str) and folder_id.strip()
+            else str(env.get(cls._ENV_VAR_FOLDER_ID, "") or "").strip()
+        )
+        client_id = str(env.get(cls._ENV_VAR_CLIENT_ID, "") or "").strip()
+        client_secret = str(env.get(cls._ENV_VAR_CLIENT_SECRET, "") or "").strip()
+        refresh_token = str(env.get(cls._ENV_VAR_REFRESH_TOKEN, "") or "").strip()
+
+        missing_vars = [
+            env_name
+            for env_name, val in (
+                (cls._ENV_VAR_CLIENT_ID, client_id),
+                (cls._ENV_VAR_CLIENT_SECRET, client_secret),
+                (cls._ENV_VAR_REFRESH_TOKEN, refresh_token),
+                (cls._ENV_VAR_FOLDER_ID, resolved_folder),
+            )
+            if not val
+        ]
+        if missing_vars:
+            raise ValueError(
+                f"Google Drive 配信に必要な環境変数が未設定です: {', '.join(missing_vars)}"
+            )
+
+        return cls(
+            client_id=client_id,
+            client_secret=client_secret,
+            refresh_token=refresh_token,
+            folder_id=resolved_folder,
+            **kwargs,
+        )
+
+    def _redact_secrets(self, text: str, extra_secrets: Sequence[str] = ()) -> str:
+        """エラー文言から認証シークレット・トークン文字列を確実に除去する。"""
+        sanitized = text
+        for secret in (
+            self.client_secret,
+            self.refresh_token,
+            *extra_secrets,
+        ):
+            if secret:
+                sanitized = sanitized.replace(secret, "***")
+        return sanitized
+
+    def _request_with_retry(
+        self,
+        session: requests.Session,
+        method: str,
+        url: str,
+        *,
+        operation: str,
+        extra_secrets: Sequence[str] = (),
+        **kwargs: Any,
+    ) -> requests.Response:
+        """ネットワーク例外・429・5xx に対して指数バックオフ付きでリトライし、非2xx時は GoogleDriveDeliveryError を送出する。"""
+        kwargs.setdefault("timeout", self.timeout)
+
+        for attempt in range(self.max_retries + 1):
+            try:
+                resp = session.request(method, url, **kwargs)
+            except requests.RequestException as e:
+                safe_err = self._redact_secrets(str(e), extra_secrets=extra_secrets)
+                if attempt < self.max_retries:
+                    delay = self.backoff_base * (2**attempt)
+                    logger.warning(
+                        f"Google Drive API {operation} で通信例外が発生したためリトライします "
+                        f"({attempt + 1}/{self.max_retries}, 待機={delay:.1f}s): {safe_err}"
+                    )
+                    self._sleep_fn(delay)
+                    continue
+                raise GoogleDriveDeliveryError(
+                    f"Google Drive API {operation} に失敗しました（リトライ上限到達）: {safe_err}"
+                ) from e
+
+            status = resp.status_code
+            if 200 <= status < 300:
+                return resp
+
+            detail = self._redact_secrets(
+                _extract_safe_error_detail(resp), extra_secrets=extra_secrets
+            )
+            is_retryable = status == 429 or 500 <= status < 600
+            if is_retryable and attempt < self.max_retries:
+                delay = self.backoff_base * (2**attempt)
+                logger.warning(
+                    f"Google Drive API {operation} が一時エラーを返したためリトライします "
+                    f"({attempt + 1}/{self.max_retries}, 待機={delay:.1f}s): {detail}"
+                )
+                self._sleep_fn(delay)
+                continue
+
+            raise GoogleDriveDeliveryError(
+                f"Google Drive API {operation} に失敗しました: {detail}"
+            )
+
+        raise GoogleDriveDeliveryError(f"Google Drive API {operation} に失敗しました。")
+
+    def _fetch_access_token(self, session: requests.Session) -> str:
+        """リフレッシュトークンを用いて OAuth 2.0 アクセストークンを取得する。"""
+        resp = self._request_with_retry(
+            session,
+            "POST",
+            self._TOKEN_URL,
+            operation="OAuthトークン取得",
+            data={
+                "client_id": self.client_id,
+                "client_secret": self.client_secret,
+                "refresh_token": self.refresh_token,
+                "grant_type": "refresh_token",
+            },
+        )
+        try:
+            payload = resp.json()
+        except ValueError as e:
+            raise GoogleDriveDeliveryError(
+                "Google OAuth トークン応答の JSON 解析に失敗しました。"
+            ) from e
+
+        token = payload.get("access_token") if isinstance(payload, dict) else None
+        if not isinstance(token, str) or not token.strip():
+            raise GoogleDriveDeliveryError(
+                "Google OAuth トークン応答に有効な access_token が含まれていません。"
+            )
+        return token.strip()
+
+    def _find_existing_file_id(
+        self,
+        session: requests.Session,
+        access_token: str,
+        file_name: str,
+    ) -> Optional[str]:
+        """指定フォルダ配下から未削除の同名ファイルを検索し、存在すれば最新更新の fileId を返す。"""
+        escaped_name = _escape_drive_query_literal(file_name)
+        escaped_folder = _escape_drive_query_literal(self.folder_id)
+        query = f"name = '{escaped_name}' and '{escaped_folder}' in parents and trashed = false"
+        resp = self._request_with_retry(
+            session,
+            "GET",
+            self._FILES_URL,
+            operation=f"同名ファイル検索({file_name})",
+            extra_secrets=(access_token,),
+            headers={"Authorization": f"Bearer {access_token}"},
+            params={
+                "q": query,
+                "fields": "files(id, name, modifiedTime)",
+                "orderBy": "modifiedTime desc",
+                "pageSize": 10,
+                "spaces": "drive",
+            },
+        )
+        try:
+            payload = resp.json()
+        except ValueError as e:
+            raise GoogleDriveDeliveryError(
+                f"Google Drive ファイル検索応答の JSON 解析に失敗しました ({file_name})。"
+            ) from e
+
+        files = payload.get("files") if isinstance(payload, dict) else None
+        if not isinstance(files, list) or not files:
+            return None
+
+        if len(files) > 1:
+            logger.warning(
+                f"Google ドライブ指定フォルダ内に同名ファイルが {len(files)} 件存在するため最新ファイルへ上書き更新します: {file_name}"
+            )
+
+        first = files[0]
+        file_id = first.get("id") if isinstance(first, dict) else None
+        if not isinstance(file_id, str) or not file_id.strip():
+            return None
+        return file_id.strip()
+
+    def _upload_file(
+        self,
+        session: requests.Session,
+        access_token: str,
+        src_path: Path,
+        existing_file_id: Optional[str],
+    ) -> str:
+        """対象ファイルを Google Drive へ新規作成（POST）または上書き更新（PATCH）する。"""
+        mime_type = _resolve_upload_mime_type(src_path)
+        content = src_path.read_bytes()
+        if existing_file_id:
+            # Drive API v3 では PATCH のメタデータに parents を含めるとエラーになるため除外する
+            metadata: Dict[str, Any] = {"name": src_path.name, "mimeType": mime_type}
+            method = "PATCH"
+            url = f"{self._UPLOAD_URL}/{quote(existing_file_id, safe='')}"
+            operation = f"ファイル上書き更新({src_path.name})"
+        else:
+            metadata = {
+                "name": src_path.name,
+                "parents": [self.folder_id],
+                "mimeType": mime_type,
+            }
+            method = "POST"
+            url = self._UPLOAD_URL
+            operation = f"ファイル新規作成({src_path.name})"
+
+        part_content_type = (
+            f"{mime_type}; charset=utf-8" if mime_type.startswith("text/") else mime_type
+        )
+        body, boundary = _build_multipart_related_body(
+            metadata=metadata,
+            content=content,
+            content_type=part_content_type,
+        )
+        resp = self._request_with_retry(
+            session,
+            method,
+            url,
+            operation=operation,
+            extra_secrets=(access_token,),
+            params={"uploadType": "multipart", "fields": "id,name"},
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": f"multipart/related; boundary={boundary}",
+            },
+            data=body,
+        )
+        try:
+            payload = resp.json()
+        except ValueError as e:
+            raise GoogleDriveDeliveryError(
+                f"Google Drive アップロード応答の JSON 解析に失敗しました ({src_path.name})。"
+            ) from e
+
+        file_id = payload.get("id") if isinstance(payload, dict) else None
+        if not isinstance(file_id, str) or not file_id.strip():
+            raise GoogleDriveDeliveryError(
+                f"Google Drive アップロード応答にファイル ID が含まれていません ({src_path.name})。"
+            )
+        return file_id.strip()
+
+    def deliver(
+        self, files: Dict[str, Path], as_of_date: date
+    ) -> Dict[str, DeliveryTarget]:
+        """実在するブリーフファイルを指定 Google ドライブフォルダへアップロードし、gdrive://<fileId> マップを返す。"""
+        target_files = [
+            (key, src_path) for key, src_path in files.items() if src_path.exists()
+        ]
+        if not target_files:
+            return {}
+
+        delivered: Dict[str, DeliveryTarget] = {}
+        session_cm = (
+            nullcontext(self._session)
+            if self._session is not None
+            else requests.Session()
+        )
+        with session_cm as session:
+            access_token = self._fetch_access_token(session)
+            for key, src_path in target_files:
+                existing_id = self._find_existing_file_id(
+                    session, access_token, src_path.name
+                )
+                file_id = self._upload_file(session, access_token, src_path, existing_id)
+                delivered[key] = f"gdrive://{file_id}"
+                action_label = "上書き更新" if existing_id else "新規作成"
+                logger.info(
+                    f"Google ドライブへブリーフを{action_label}しました: {src_path.name} -> gdrive://{file_id}"
+                )
 
         return delivered
 
@@ -842,10 +1294,11 @@ def export_gemini_brief(
     prefix: str = "gemini_brief",
     latest_name: str = "gemini_brief_latest.md",
     deliveries: Optional[Iterable[BriefDeliveryBackend]] = None,
-) -> Dict[str, Path]:
+    fail_on_delivery_error: bool = False,
+) -> Dict[str, DeliveryTarget]:
     """
     生成済みブリーフ Markdown をローカル output_dir へ書き出し（日付付き + latest 固定名）、
-    必要に応じて外部配信バックエンド（Google ドライブ同期フォルダ等）へ配信する。
+    必要に応じて外部配信バックエンド（ローカル同期フォルダ / Google Drive API 等）へ配信する。
     """
     resolved_date = as_of_date or date.today()
     out_dir = Path(output_dir)
@@ -857,21 +1310,34 @@ def export_gemini_brief(
     dated_path.write_text(markdown_content, encoding="utf-8")
     latest_path.write_text(markdown_content, encoding="utf-8")
 
-    exported: Dict[str, Path] = {
+    exported: Dict[str, DeliveryTarget] = {
         "gemini": dated_path,
         "gemini_latest": latest_path,
     }
 
+    delivery_errors: List[Exception] = []
     if deliveries:
         source_files = {"gemini": dated_path, "gemini_latest": latest_path}
         for backend in deliveries:
             try:
                 delivered = backend.deliver(source_files, resolved_date)
-                for key, dst_path in delivered.items():
-                    exported[f"{key}_copy"] = dst_path
+                suffix = str(getattr(backend, "key_suffix", "copy") or "copy").strip()
+                for key, dst_target in delivered.items():
+                    base_key = f"{key}_{suffix}"
+                    export_key = base_key
+                    if export_key in exported:
+                        seq = 2
+                        while f"{base_key}_{seq}" in exported:
+                            seq += 1
+                        export_key = f"{base_key}_{seq}"
+                    exported[export_key] = dst_target
             except Exception as e:
+                delivery_errors.append(e)
                 logger.warning(
                     f"ブリーフ配信バックエンドの実行に失敗しました（ローカル出力は成功しています）: {e}"
                 )
+
+    if fail_on_delivery_error and delivery_errors:
+        raise delivery_errors[0]
 
     return exported

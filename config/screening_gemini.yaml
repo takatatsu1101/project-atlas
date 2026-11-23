@@ -111,6 +111,8 @@ output:
     - "gemini"
   # Google ドライブ デスクトップ版のローカル同期フォルダ（例: ~/Library/CloudStorage/GoogleDrive-.../マイドライブ/ProjectAtlas）
   gemini_brief_copy_dir: null
+  # Google Drive API 配信先フォルダID（環境変数 GOOGLE_DRIVE_FOLDER_ID または --brief-drive-folder-id で指定推奨）
+  gemini_brief_drive_folder_id: null
   gemini_brief_prefix: "gemini_brief"
   gemini_brief_latest_name: "gemini_brief_latest.md"
   # 継続評価対象の監視銘柄コード一覧（CLI --watch-symbols 指定時はそちらが優先）

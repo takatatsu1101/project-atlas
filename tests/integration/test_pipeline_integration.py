@@ -25,6 +25,8 @@ from src.feature_engine.registry import feature_registry
 from src.indicator_calculator.calculator import IndicatorCalculator
 from src.main import (
     DEFAULT_PARALLEL_MIN_SYMBOLS,
+    _resolve_brief_drive_folder_id,
+    _resolve_watch_symbols,
     _resolve_worker_count,
     main,
     parse_args,
@@ -2496,6 +2498,224 @@ market_context:
             brief_text2 = res2["report_paths"]["gemini"].read_text(encoding="utf-8")
             self.assertIn("1321.T", brief_text2)
             self.assertIn("OHLCV データが取得できないため", brief_text2)
+
+    def test_drive_delivery_cli_watch_symbols_and_cold_start_warmup(self):
+        """
+        PR #2 統合テスト:
+        1) parse_args (--brief-drive-folder-id / --strict-brief-delivery)
+        2) _resolve_watch_symbols のカンマ・空白・読点区切り正規化 & フォルダID優先順位
+        3) GoogleDriveBriefDelivery と brief_copy_dir 併用 & 認証欠損時のローカル保護/strict失敗
+        4) symbols=None 時、_resolve_target_symbols より前に warmup_irbank_cache が実行されること
+        """
+        # 1) CLI パース検証（先頭 '-' を含む Drive フォルダ ID の = 形式指定も検証）
+        parsed = parse_args(
+            [
+                "--gemini-brief",
+                "--brief-drive-folder-id=-1AbCdEf_HyphenStart",
+                "--strict-brief-delivery",
+            ]
+        )
+        self.assertTrue(parsed.gemini_brief)
+        self.assertEqual(parsed.brief_drive_folder_id, "-1AbCdEf_HyphenStart")
+        self.assertTrue(parsed.strict_brief_delivery)
+
+        # 2) _resolve_watch_symbols とフォルダ ID 優先順位
+        self.assertEqual(
+            _resolve_watch_symbols(["7203, 6758.t、8035 7203"], []),
+            ["7203.T", "6758.T", "8035.T"],
+        )
+        with patch.dict(os.environ, {"GOOGLE_DRIVE_FOLDER_ID": "fld_env"}):
+            self.assertEqual(
+                _resolve_brief_drive_folder_id("fld_cli", "fld_cfg"),
+                "fld_cli",
+            )
+            self.assertEqual(
+                _resolve_brief_drive_folder_id(None, "fld_cfg"),
+                "fld_cfg",
+            )
+            self.assertEqual(
+                _resolve_brief_drive_folder_id("  ", None),
+                "fld_env",
+            )
+
+        bars_7203 = _build_uptrend_breakout_ohlcv("7203.T", days=90)
+        as_of = bars_7203[-1].date
+        fin_7203 = _build_sample_financial("7203.T")
+        master_7203 = StockMasterModel(
+            code="7203",
+            symbol="7203.T",
+            name="トヨタ自動車",
+            market="プライム",
+            sector_33="輸送用機器",
+        )
+
+        class _FakeDriveBackend:
+            key_suffix = "drive"
+
+            def __init__(self):
+                self.called_with = []
+
+            def deliver(self, files, as_of_date):
+                self.called_with.append((dict(files), as_of_date))
+                return {k: f"gdrive://fake_{k}" for k in files}
+
+        fake_drive = _FakeDriveBackend()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg_path = Path(tmpdir) / "gemini_drive.yaml"
+            cfg_path.write_text(
+                "screener:\n"
+                "  min_total_score: 50.0\n"
+                "  require_gate1_passed: false\n"
+                "  exclude_watch: false\n",
+                encoding="utf-8",
+            )
+
+            # 3-a) brief_copy_dir と Drive 配信バックエンドの併用成功
+            out_ok = Path(tmpdir) / "out_ok"
+            copy_ok = Path(tmpdir) / "copy_ok"
+            copy_ok.mkdir(parents=True, exist_ok=True)
+            with patch("src.main.prefetch_ohlcv_batch"), \
+                 patch("src.main.collect_ohlcv_data", return_value=bars_7203), \
+                 patch("src.main.collect_financial_data", return_value=fin_7203), \
+                 patch("src.main.MasterManager") as mock_master_cls, \
+                 patch("src.main.GoogleDriveBriefDelivery.from_env", return_value=fake_drive) as mock_from_env, \
+                 redirect_stdout(io.StringIO()):
+                mock_master_cls.return_value.load_master.return_value = [master_7203]
+                res_ok = run_full_pipeline(
+                    symbols=["7203.T"],
+                    start_date=bars_7203[0].date,
+                    end_date=as_of,
+                    as_of_date=as_of,
+                    config_path=cfg_path,
+                    output_dir=out_ok,
+                    export_reports=True,
+                    use_cache=False,
+                    allow_irbank_download=False,
+                    workers=1,
+                    gemini_brief=True,
+                    brief_copy_dir=str(copy_ok),
+                    brief_drive_folder_id="fld_target",
+                )
+
+            mock_from_env.assert_called_once_with(folder_id="fld_target")
+            self.assertEqual(len(fake_drive.called_with), 1)
+            self.assertIn("gemini_copy", res_ok["report_paths"])
+            self.assertEqual(res_ok["report_paths"]["gemini_drive"], "gdrive://fake_gemini")
+            self.assertEqual(
+                res_ok["report_paths"]["gemini_latest_drive"], "gdrive://fake_gemini_latest"
+            )
+
+            # 3-b) 認証環境変数不足時: strict=False でローカル保護、strict=True でローカル生成後に ValueError
+            clean_env = {
+                k: v for k, v in os.environ.items() if not k.startswith("GOOGLE_DRIVE_")
+            }
+            out_soft = Path(tmpdir) / "out_soft"
+            out_strict = Path(tmpdir) / "out_strict"
+            with patch.dict(os.environ, clean_env, clear=True), \
+                 patch("src.main.prefetch_ohlcv_batch"), \
+                 patch("src.main.collect_ohlcv_data", return_value=bars_7203), \
+                 patch("src.main.collect_financial_data", return_value=fin_7203), \
+                 patch("src.main.MasterManager") as mock_master_cls, \
+                 redirect_stdout(io.StringIO()):
+                mock_master_cls.return_value.load_master.return_value = [master_7203]
+                res_soft = run_full_pipeline(
+                    symbols=["7203.T"],
+                    start_date=bars_7203[0].date,
+                    end_date=as_of,
+                    as_of_date=as_of,
+                    config_path=cfg_path,
+                    output_dir=out_soft,
+                    export_reports=True,
+                    use_cache=False,
+                    allow_irbank_download=False,
+                    workers=1,
+                    gemini_brief=True,
+                    brief_drive_folder_id="fld_target",
+                    strict_brief_delivery=False,
+                )
+                self.assertTrue(res_soft["report_paths"]["gemini"].exists())
+                self.assertTrue(res_soft["report_paths"]["gemini_latest"].exists())
+
+                with self.assertRaises(ValueError):
+                    run_full_pipeline(
+                        symbols=["7203.T"],
+                        start_date=bars_7203[0].date,
+                        end_date=as_of,
+                        as_of_date=as_of,
+                        config_path=cfg_path,
+                        output_dir=out_strict,
+                        export_reports=True,
+                        use_cache=False,
+                        allow_irbank_download=False,
+                        workers=1,
+                        gemini_brief=True,
+                        brief_drive_folder_id="fld_target",
+                        strict_brief_delivery=True,
+                    )
+                self.assertTrue((out_strict / f"gemini_brief_{as_of.isoformat()}.md").exists())
+                self.assertTrue((out_strict / "gemini_brief_latest.md").exists())
+
+            # 4) symbols=None 時に _resolve_target_symbols (load_financial_snapshot) より前に warmup_irbank_cache が呼ばれる
+            call_order = []
+
+            def _record_warmup(*args, **kwargs):
+                call_order.append("warmup")
+
+            def _record_snapshot(*args, **kwargs):
+                call_order.append("snapshot")
+                return {"7203": fin_7203}
+
+            with patch("src.main.MasterManager") as mock_master_cls, \
+                 patch("src.main.data_collector") as mock_dc, \
+                 patch("src.main.prefetch_ohlcv_batch"), \
+                 patch("src.main.collect_ohlcv_data", return_value=bars_7203), \
+                 patch("src.main.collect_financial_data", return_value=fin_7203), \
+                 redirect_stdout(io.StringIO()):
+                mock_master_cls.return_value.load_master.return_value = [master_7203]
+                mock_dc.warmup_irbank_cache.side_effect = _record_warmup
+                mock_dc.load_financial_snapshot.side_effect = _record_snapshot
+
+                res_cold = run_full_pipeline(
+                    symbols=None,
+                    start_date=bars_7203[0].date,
+                    end_date=as_of,
+                    fiscal_year=as_of.year,
+                    as_of_date=as_of,
+                    config_path=cfg_path,
+                    export_reports=False,
+                    use_cache=False,
+                    allow_irbank_download=True,
+                    workers=1,
+                )
+
+            self.assertEqual(call_order, ["warmup", "snapshot"])
+            mock_dc.warmup_irbank_cache.assert_called_once()
+            self.assertEqual(res_cold["processed_symbols"], ["7203.T"])
+
+            # 5) symbols=None でも master_stocks が空のときは warmup_irbank_cache を実行しない
+            with patch("src.main.MasterManager") as mock_master_cls, \
+                 patch("src.main.data_collector") as mock_dc_empty, \
+                 patch("src.main.prefetch_ohlcv_batch"), \
+                 redirect_stdout(io.StringIO()):
+                mock_master_cls.return_value.load_master.return_value = []
+                mock_dc_empty.load_financial_snapshot.return_value = {}
+
+                res_empty_master = run_full_pipeline(
+                    symbols=None,
+                    start_date=bars_7203[0].date,
+                    end_date=as_of,
+                    fiscal_year=as_of.year,
+                    as_of_date=as_of,
+                    config_path=cfg_path,
+                    export_reports=False,
+                    use_cache=False,
+                    allow_irbank_download=True,
+                    workers=1,
+                )
+
+            mock_dc_empty.warmup_irbank_cache.assert_not_called()
+            self.assertEqual(res_empty_master["processed_symbols"], [])
 
 
 if __name__ == "__main__":

@@ -4,7 +4,9 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from contextlib import nullcontext
 from datetime import date, datetime, timedelta
 import logging
+import os
 from pathlib import Path
+import re
 import sys
 import time
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
@@ -51,7 +53,9 @@ from src.pipeline_worker import (
     process_symbol_task,
 )
 from src.presentation.gemini_brief import (
+    BriefDeliveryBackend,
     GeminiStockBriefData,
+    GoogleDriveBriefDelivery,
     build_gemini_stock_brief_data,
     normalize_symbol,
 )
@@ -270,16 +274,34 @@ def _resolve_watch_symbols(
     cli_watch_symbols: Optional[Sequence[str]],
     config_watch_symbols: Sequence[str],
 ) -> List[str]:
-    """CLI 指定または設定ファイルから監視銘柄リストを解決し、重複排除して返す。"""
+    """CLI 指定（空白/カンマ/読点区切り対応）または設定ファイルから監視銘柄リストを解決し、重複排除して返す。"""
     raw = cli_watch_symbols if cli_watch_symbols is not None else config_watch_symbols
     resolved: List[str] = []
     seen: set[str] = set()
     for sym in raw:
-        norm = normalize_symbol(str(sym))
-        if norm and norm not in seen:
-            seen.add(norm)
-            resolved.append(norm)
+        for token in re.split(r"[\s,、]+", str(sym)):
+            if not token:
+                continue
+            norm = normalize_symbol(token)
+            if norm and norm not in seen:
+                seen.add(norm)
+                resolved.append(norm)
     return resolved
+
+
+def _resolve_brief_drive_folder_id(
+    cli_folder_id: Optional[str],
+    config_folder_id: Optional[str],
+) -> Optional[str]:
+    """Google Drive 配信先フォルダIDを CLI > YAML設定 > 環境変数 の優先順位で解決する。"""
+    for candidate in (
+        cli_folder_id,
+        config_folder_id,
+        os.environ.get("GOOGLE_DRIVE_FOLDER_ID"),
+    ):
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    return None
 
 
 def _merge_unique_symbols(*symbol_lists: Sequence[str]) -> List[str]:
@@ -531,6 +553,8 @@ def run_full_pipeline(
     watch_symbols: Optional[List[str]] = None,
     gemini_brief: bool = False,
     brief_copy_dir: Optional[str] = None,
+    brief_drive_folder_id: Optional[str] = None,
+    strict_brief_delivery: bool = False,
 ) -> Dict[str, Any]:
     """
     Project Atlas 全パイプラインを実行する。
@@ -631,6 +655,20 @@ def run_full_pipeline(
             master_stocks = master_manager.load_master()
         master_map: Dict[str, StockMasterModel] = {s.symbol: s for s in master_stocks}
 
+        irbank_warmed_up = False
+        if (symbols is None or use_pre_screening) and master_stocks:
+            # コールドスタート（data/financial/ が空）でも _resolve_target_symbols 内の
+            # load_financial_snapshot(allow_download=False) が 0銘柄化しないよう先にキャッシュを準備する
+            timings_sec["setup_and_prescreen"] += time.perf_counter() - t_setup
+            t_warmup = time.perf_counter()
+            warmup_years = list(range(effective_fiscal_year - 7, effective_fiscal_year + 1))
+            data_collector.warmup_irbank_cache(
+                warmup_years, allow_download=allow_irbank_download
+            )
+            timings_sec["financial_collection"] += time.perf_counter() - t_warmup
+            irbank_warmed_up = True
+            t_setup = time.perf_counter()
+
         pre_screener = PreScreener()
         target_symbols, should_check_liquidity = _resolve_target_symbols(
             symbols=symbols,
@@ -651,7 +689,7 @@ def run_full_pipeline(
             config.market_context.enabled
             and len(target_symbols) >= config.market_context.min_universe_size
         )
-        timings_sec["setup_and_prescreen"] = time.perf_counter() - t_setup
+        timings_sec["setup_and_prescreen"] += time.perf_counter() - t_setup
         print(
             f"  対象銘柄: {len(target_symbols)}銘柄 (workers={effective_workers})",
             flush=True,
@@ -712,7 +750,7 @@ def run_full_pipeline(
             )
             timings_sec["ohlcv_collection"] += time.perf_counter() - t_bench
 
-        if effective_workers > 1 and target_symbols:
+        if effective_workers > 1 and target_symbols and not irbank_warmed_up:
             # 並列ワーカーは完全読取専用で動かすため、親プロセス側で IR BANK キャッシュを事前ウォームアップする
             t_warmup = time.perf_counter()
             warmup_years = list(range(effective_fiscal_year - 7, effective_fiscal_year + 1))
@@ -918,7 +956,8 @@ def run_full_pipeline(
             evaluation_summary=evaluation_summary,
         )
 
-        report_paths: Dict[str, Path] = {}
+        report_paths: Dict[str, Any] = {}
+        drive_init_error: Optional[Exception] = None
         if export_reports:
             resolved_output_dir = (
                 output_dir if output_dir is not None else config.output.output_dir
@@ -955,6 +994,25 @@ def run_full_pipeline(
                     verbose=verbose,
                 )
 
+            brief_deliveries: List[BriefDeliveryBackend] = []
+            if enable_gemini_brief:
+                resolved_drive_folder_id = _resolve_brief_drive_folder_id(
+                    brief_drive_folder_id,
+                    config.output.gemini_brief_drive_folder_id,
+                )
+                if resolved_drive_folder_id is not None:
+                    try:
+                        brief_deliveries.append(
+                            GoogleDriveBriefDelivery.from_env(
+                                folder_id=resolved_drive_folder_id
+                            )
+                        )
+                    except ValueError as e:
+                        drive_init_error = e
+                        logger.warning(
+                            f"Google Drive 配信の初期化をスキップします（ローカル出力は継続します）: {e}"
+                        )
+
             resolved_copy_dir = (
                 brief_copy_dir
                 if brief_copy_dir is not None
@@ -975,11 +1033,16 @@ def run_full_pipeline(
                 gemini_brief_latest_name=config.output.gemini_brief_latest_name,
                 gemini_brief_copy_dir=resolved_copy_dir,
                 gemini_as_of_date=analysis_end,
+                gemini_brief_deliveries=brief_deliveries,
+                fail_on_brief_delivery_error=strict_brief_delivery,
             )
 
         if report_paths:
             paths_str = ", ".join(f"{k}={v}" for k, v in report_paths.items())
             print(f"レポート出力先: {paths_str}", flush=True)
+
+        if strict_brief_delivery and drive_init_error is not None:
+            raise drive_init_error
 
         timing_summary = ", ".join(f"{k}={v:.3f}s" for k, v in rounded_timings.items())
         logger.debug(f"パイプラインフェーズ別所要時間: {timing_summary}")
@@ -1552,6 +1615,17 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Gemini ブリーフの自動コピー先ディレクトリ（Google ドライブ同期フォルダ等）",
     )
     parser.add_argument(
+        "--brief-drive-folder-id",
+        type=str,
+        default=None,
+        help="Gemini ブリーフの Google Drive API 直接アップロード先フォルダ ID（未指定時は設定または環境変数 GOOGLE_DRIVE_FOLDER_ID を参照）",
+    )
+    parser.add_argument(
+        "--strict-brief-delivery",
+        action="store_true",
+        help="外部配信（Google Drive API 等）に失敗した場合にパイプライン全体を失敗（終了コード 1）とする",
+    )
+    parser.add_argument(
         "--watch-symbols",
         nargs="+",
         default=None,
@@ -1654,6 +1728,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             watch_symbols=args.watch_symbols,
             gemini_brief=args.gemini_brief,
             brief_copy_dir=args.brief_copy_dir,
+            brief_drive_folder_id=args.brief_drive_folder_id,
+            strict_brief_delivery=args.strict_brief_delivery,
         )
         return 0
     except Exception as e:

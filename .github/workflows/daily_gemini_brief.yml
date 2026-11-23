@@ -1,0 +1,139 @@
+name: Daily Gemini Brief & Google Drive Sync
+
+on:
+  schedule:
+    # 平日 JST 16:30（UTC 07:30、東証大引け・データ確定後）
+    - cron: '30 7 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      watch_symbols:
+        description: '継続監視する銘柄コード（空白またはカンマ区切り、例: 7203.T 6758.T）'
+        required: false
+        default: ''
+        type: string
+      as_of_date:
+        description: '分析基準日 YYYY-MM-DD（空欄時は実行日の直近完了営業日）'
+        required: false
+        default: ''
+        type: string
+      update_master:
+        description: 'JPX 東証上場銘柄マスタを強制更新するか'
+        required: false
+        default: false
+        type: boolean
+      skip_drive_upload:
+        description: 'Google Drive API アップロードをスキップするか（ドライラン用）'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: daily-gemini-brief
+  cancel-in-progress: false
+
+jobs:
+  generate-and-sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      TZ: Asia/Tokyo
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Restore Atlas data cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/price
+            data/financial
+            data/master
+          key: atlas-data-${{ github.run_id }}
+          restore-keys: |
+            atlas-data-
+
+      - name: Run Project Atlas screening and Gemini brief upload
+        env:
+          GOOGLE_DRIVE_CLIENT_ID: ${{ secrets.GOOGLE_DRIVE_CLIENT_ID }}
+          GOOGLE_DRIVE_CLIENT_SECRET: ${{ secrets.GOOGLE_DRIVE_CLIENT_SECRET }}
+          GOOGLE_DRIVE_REFRESH_TOKEN: ${{ secrets.GOOGLE_DRIVE_REFRESH_TOKEN }}
+          GOOGLE_DRIVE_FOLDER_ID: ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
+          VAR_WATCH_SYMBOLS: ${{ vars.WATCH_SYMBOLS }}
+          INPUT_WATCH_SYMBOLS: ${{ inputs.watch_symbols }}
+          INPUT_AS_OF_DATE: ${{ inputs.as_of_date }}
+          INPUT_UPDATE_MASTER: ${{ inputs.update_master }}
+          INPUT_SKIP_DRIVE_UPLOAD: ${{ inputs.skip_drive_upload }}
+        run: |
+          set -euo pipefail
+          mkdir -p data/price data/financial data/master output
+
+          ARGS=(--config config/screening_gemini.yaml)
+
+          # 初回やキャッシュ失効時で data/master が空の場合は自動で JPX マスタを取得する
+          if [ "${INPUT_UPDATE_MASTER:-false}" = "true" ] || [ -z "$(ls -A data/master 2>/dev/null)" ]; then
+            ARGS+=(--update-master)
+          fi
+
+          # 監視銘柄の優先順位: workflow_dispatch 入力 > Repository Variables (WATCH_SYMBOLS) > YAML 設定
+          EFFECTIVE_WATCH="$(printf '%s' "${INPUT_WATCH_SYMBOLS:-}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+          if [ -z "${EFFECTIVE_WATCH}" ]; then
+            EFFECTIVE_WATCH="$(printf '%s' "${VAR_WATCH_SYMBOLS:-}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+          fi
+          if [ -n "${EFFECTIVE_WATCH}" ]; then
+            ARGS+=(--watch-symbols "${EFFECTIVE_WATCH}")
+          fi
+
+          EFFECTIVE_AS_OF="$(printf '%s' "${INPUT_AS_OF_DATE:-}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+          if [ -n "${EFFECTIVE_AS_OF}" ]; then
+            ARGS+=(--as-of-date "${EFFECTIVE_AS_OF}")
+          fi
+
+          if [ "${INPUT_SKIP_DRIVE_UPLOAD:-false}" = "true" ]; then
+            unset GOOGLE_DRIVE_FOLDER_ID
+          else
+            FOLDER_ID_TRIMMED="$(printf '%s' "${GOOGLE_DRIVE_FOLDER_ID:-}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+            if [ -z "${FOLDER_ID_TRIMMED}" ]; then
+              echo "::error::GOOGLE_DRIVE_FOLDER_ID secret is not set. Configure secrets or enable skip_drive_upload."
+              exit 1
+            fi
+            ARGS+=(--brief-drive-folder-id="${FOLDER_ID_TRIMMED}" --strict-brief-delivery)
+          fi
+
+          python -m src.main "${ARGS[@]}"
+
+      - name: Save Atlas data cache
+        if: always() && !cancelled()
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            data/price
+            data/financial
+            data/master
+          key: atlas-data-${{ github.run_id }}
+
+      - name: Upload Gemini brief artifacts
+        if: always() && !cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gemini-brief-${{ github.run_id }}
+          path: |
+            output/gemini_brief_*.md
+            output/screening_report_*
+          retention-days: 14
+          if-no-files-found: warn
