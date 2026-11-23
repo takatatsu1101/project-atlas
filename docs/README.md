@@ -29,6 +29,7 @@ Project Atlas は、スイングトレード向けの株式分析支援システ
 - [パターン一覧](specifications/patterns/pattern_list.md)
 - [指標仕様](specifications/indicators.md)
 - [スコアリング仕様](specifications/scoreing.md)
+- [GitHub Actions 定期実行・Google Drive 連携仕様](specifications/github_actions_drive_sync.md)
 
 ### ③ 設計（Design）
 「どのように」システムを構築し、各モジュールを実装するかを定義しています。
