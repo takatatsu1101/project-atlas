@@ -307,8 +307,8 @@ Project Atlas は、スイングトレード（数週間〜3ヶ月保有）向�
           - `src/main.py`, `src/presentation/presenter.py`, `src/config/screening_config.py` に Drive API 配信オプション（`--brief-drive-folder-id`, `--strict-brief-delivery` / 環境変数 `GOOGLE_DRIVE_FOLDER_ID`, `GOOGLE_DRIVE_CLIENT_ID`, `GOOGLE_DRIVE_CLIENT_SECRET`, `GOOGLE_DRIVE_REFRESH_TOKEN` 等）を統合。
           - 複数バックエンド併用時のキー分離、カンマ・空白区切り `WATCH_SYMBOLS` 分割、およびコールドスタート時の IR BANK 事前ウォームアップを実装。
         - [x] **GitHub Actions ワークフロー（`.github/workflows/daily_gemini_brief.yml`）構築**:
-          - 実行タイミング: 平日 JST 16:30（`cron: '30 7 * * 1-5'`）の定期実行＋`workflow_dispatch` 手動実行（`watch_symbols`, `as_of_date`, `update_master`, `skip_drive_upload`）。
-          - キャッシュ引き継ぎ: `actions/cache`（`key: atlas-data-${{ github.run_id }}` / `restore-keys: atlas-data-`）により `data/price/`, `data/financial/`, `data/master/`（合計約 60MB）を引き継ぎ、初回・長期連休後の失効時は `--update-master` 自動付与等により再取得する（3.3GB の `data/cache/` は対象外）。
+          - 実行タイミング: 平日 JST 16:30（`cron: '30 7 * * 1-5'`）の定期実行＋`workflow_dispatch` 手動実行（`watch_symbols`, `as_of_date`, `update_master`, `refresh_financial_from_drive`, `skip_drive_upload`）。
+          - キャッシュ引き継ぎ: `actions/cache`（`key: atlas-data-${{ github.run_id }}` / `restore-keys: atlas-data-`）により `data/price/`, `data/financial/`, `data/master/`（合計約 60MB）を引き継ぎ、初回・長期連休後の失効時は JPX マスタは `--update-master` 自動付与、財務データは Google Drive 上の `financial_data.zip`（`src/data_collector/financial_archive.py`）から復元し `--no-irbank-download` で IR BANK への通信をゼロ化する（3.3GB の `data/cache/` は対象外）。
           - 監視銘柄の受け渡し: `workflow_dispatch` 入力 ＞ GitHub Repository Variables（`WATCH_SYMBOLS`） ＞ `config/screening_gemini.yaml` の優先順位で `--watch-symbols` を適用する。
           - 出力ファイル（`output/gemini_brief_*.md` 等）を Actions Artifacts にも保存する（Drive 配信失敗時もローカル出力・キャッシュ・Artifacts を保全）。
         - [x] **運用・セットアップ手順書整備**:

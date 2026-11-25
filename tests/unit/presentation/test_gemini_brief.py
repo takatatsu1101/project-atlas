@@ -798,6 +798,62 @@ class TestGoogleDriveBriefDelivery(unittest.TestCase):
             self.assertTrue((out_strict / "gemini_brief_2026-08-30.md").exists())
             self.assertTrue((out_strict / "gemini_brief_latest.md").exists())
 
+    def test_download_named_file_and_upload_single_zip(self):
+        """download_named_file (alt=media) と upload_single_file (.zip MIME) を検証する"""
+        dl_resp = _make_mock_response(200)
+        dl_resp.content = b"PK\x03\x04dummy_zip"
+        mock_session = MagicMock(spec=requests.Session)
+        mock_session.request.side_effect = [
+            _make_mock_response(200, {"access_token": "acc_dl"}),
+            _make_mock_response(
+                200, {"files": [{"id": "file_zip_1", "name": "financial_data.zip"}]}
+            ),
+            dl_resp,
+            _make_mock_response(200, {"access_token": "acc_miss"}),
+            _make_mock_response(200, {"files": []}),
+            _make_mock_response(200, {"access_token": "acc_up"}),
+            _make_mock_response(200, {"files": []}),
+            _make_mock_response(200, {"id": "uploaded_zip_id", "name": "financial_data.zip"}),
+        ]
+        delivery = GoogleDriveBriefDelivery(
+            "cid", "csec", "rt", "fld", session=mock_session
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dest_zip = Path(tmpdir) / "dl" / "financial_data.zip"
+            saved = delivery.download_named_file("financial_data.zip", dest_zip)
+            self.assertEqual(saved, dest_zip)
+            self.assertEqual(dest_zip.read_bytes(), b"PK\x03\x04dummy_zip")
+            media_call = mock_session.request.call_args_list[2]
+            self.assertEqual(media_call.args[0], "GET")
+            self.assertEqual(
+                media_call.args[1], "https://www.googleapis.com/drive/v3/files/file_zip_1"
+            )
+            self.assertEqual(media_call.kwargs["params"], {"alt": "media"})
+
+            # 存在しないファイルは None
+            missing = delivery.download_named_file(
+                "nonexistent.zip", Path(tmpdir) / "none.zip"
+            )
+            self.assertIsNone(missing)
+
+            with self.assertRaises(ValueError):
+                delivery.download_named_file("   ", dest_zip)
+
+            # 単一 ZIP アップロードの MIME 検証
+            file_id = delivery.upload_single_file(dest_zip)
+            self.assertEqual(file_id, "uploaded_zip_id")
+            up_call = mock_session.request.call_args_list[7]
+            meta, part_headers, _ = _parse_multipart_related(
+                up_call.kwargs["headers"]["Content-Type"],
+                up_call.kwargs["data"],
+            )
+            self.assertEqual(meta["mimeType"], "application/zip")
+            self.assertIn("Content-Type: application/zip", part_headers)
+
+            with self.assertRaises(FileNotFoundError):
+                delivery.upload_single_file(Path(tmpdir) / "no_file.zip")
+
 
 if __name__ == "__main__":
     unittest.main()
