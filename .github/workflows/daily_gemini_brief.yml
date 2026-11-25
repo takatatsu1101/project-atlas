@@ -21,8 +21,13 @@ on:
         required: false
         default: false
         type: boolean
+      refresh_financial_from_drive:
+        description: 'Google Drive 上の financial_data.zip から財務データを強制再取得するか'
+        required: false
+        default: false
+        type: boolean
       skip_drive_upload:
-        description: 'Google Drive API アップロードをスキップするか（ドライラン用）'
+        description: 'Google Drive API ブリーフアップロードをスキップするか（ドライラン用）'
         required: false
         default: false
         type: boolean
@@ -77,12 +82,37 @@ jobs:
           INPUT_WATCH_SYMBOLS: ${{ inputs.watch_symbols }}
           INPUT_AS_OF_DATE: ${{ inputs.as_of_date }}
           INPUT_UPDATE_MASTER: ${{ inputs.update_master }}
+          INPUT_REFRESH_FINANCIAL: ${{ inputs.refresh_financial_from_drive }}
           INPUT_SKIP_DRIVE_UPLOAD: ${{ inputs.skip_drive_upload }}
         run: |
           set -euo pipefail
           mkdir -p data/price data/financial data/master output
 
-          ARGS=(--config config/screening_gemini.yaml)
+          FOLDER_ID_TRIMMED="$(printf '%s' "${GOOGLE_DRIVE_FOLDER_ID:-}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+
+          # data/financial キャッシュが空（初回・失効時）または強制更新指定時は Google Drive から financial_data.zip を復元する
+          HAS_FINANCIAL_JSON="false"
+          if compgen -G "data/financial/*-fy-*.json" > /dev/null; then
+            HAS_FINANCIAL_JSON="true"
+          fi
+
+          if [ "${INPUT_REFRESH_FINANCIAL:-false}" = "true" ] || [ "${HAS_FINANCIAL_JSON}" = "false" ]; then
+            if [ -n "${FOLDER_ID_TRIMMED}" ]; then
+              RESTORE_ARGS=(--restore --drive-folder-id="${FOLDER_ID_TRIMMED}")
+              if [ "${INPUT_REFRESH_FINANCIAL:-false}" = "true" ]; then
+                RESTORE_ARGS+=(--force)
+              fi
+              python -m src.data_collector.financial_archive "${RESTORE_ARGS[@]}"
+            elif [ "${INPUT_SKIP_DRIVE_UPLOAD:-false}" = "true" ]; then
+              echo "::warning::data/financial is empty and GOOGLE_DRIVE_FOLDER_ID is not set (dry-run)."
+            else
+              echo "::error::GOOGLE_DRIVE_FOLDER_ID secret is not set. Configure secrets or enable skip_drive_upload."
+              exit 1
+            fi
+          fi
+
+          # IR BANK への直接アクセスは行わず（--no-irbank-download）、復元済みキャッシュのみを使用する
+          ARGS=(--config config/screening_gemini.yaml --no-irbank-download)
 
           # 初回やキャッシュ失効時で data/master が空の場合は自動で JPX マスタを取得する
           if [ "${INPUT_UPDATE_MASTER:-false}" = "true" ] || [ -z "$(ls -A data/master 2>/dev/null)" ]; then
@@ -106,7 +136,6 @@ jobs:
           if [ "${INPUT_SKIP_DRIVE_UPLOAD:-false}" = "true" ]; then
             unset GOOGLE_DRIVE_FOLDER_ID
           else
-            FOLDER_ID_TRIMMED="$(printf '%s' "${GOOGLE_DRIVE_FOLDER_ID:-}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
             if [ -z "${FOLDER_ID_TRIMMED}" ]; then
               echo "::error::GOOGLE_DRIVE_FOLDER_ID secret is not set. Configure secrets or enable skip_drive_upload."
               exit 1

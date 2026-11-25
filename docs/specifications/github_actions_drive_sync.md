@@ -41,7 +41,9 @@ flowchart LR
   - `key: atlas-data-${{ github.run_id }}`
   - `restore-keys: |`
     `  atlas-data-`
-- **挙動**: 平日毎日実行されるため通常は 7 日 TTL で失効せず直近キャッシュが復元される。初回実行時や長期連休（GW・年末年始等）明けでキャッシュが空・失効した場合は、ワークフロー側で `data/master/` が空なら自動で `--update-master` を付与し、さらに `run_full_pipeline` が事前スクリーニング前に IR BANK 財務キャッシュ（`warmup_irbank_cache`）を自動取得することでコールドスタート時の 0 銘柄化を防ぐ。
+- **挙動**: 平日毎日実行されるため通常は 7 日 TTL で失効せず直近キャッシュが復元される。
+  - **銘柄マスタ（`data/master/`）**: 初回実行時やキャッシュ失効で空の場合は、ワークフロー側で自動で `--update-master` を付与して JPX から取得する。
+  - **財務データ（`data/financial/`）**: IR BANK へのクラウドからの連続アクセス制限（HTTP 302 等）を発生させないため、GitHub Actions では常に `--no-irbank-download` を指定して IR BANK への通信を完全オフにする。初回実行時・キャッシュ失効時・または `refresh_financial_from_drive=true` 指定時は、手元で作成して Google ドライブ保存先フォルダに配置した `financial_data.zip`（`src/data_collector/financial_archive.py`）を Drive API 経由でダウンロード・検証展開して `actions/cache` へ引き継ぐ。
 
 ### 2.3 ワークフロー実行・監視銘柄（`watch_symbols`）・CLI オプション
 - **実行スケジュール**:
@@ -50,7 +52,8 @@ flowchart LR
     - `watch_symbols`: 継続監視する銘柄コード（空白・カンマ・読点区切り対応）
     - `as_of_date`: 分析基準日 `YYYY-MM-DD`（空欄時は直近完了営業日）
     - `update_master`: JPX 東証上場銘柄マスタの強制更新フラグ（`boolean`）
-    - `skip_drive_upload`: Google Drive API アップロードをスキップするドライラン用フラグ（`boolean`）
+    - `refresh_financial_from_drive`: Google ドライブ上の `financial_data.zip` から財務データを強制再取得するフラグ（`boolean`、決算期の ZIP 更新後に使用）
+    - `skip_drive_upload`: Google Drive API ブリーフアップロードをスキップするドライラン用フラグ（`boolean`）
 - **CLI オプション連携（`src/main.py`）**:
   - `--brief-drive-folder-id`: Drive API 配信先フォルダ ID（優先順位: CLI 引数 ＞ `config` YAML `output.gemini_brief_drive_folder_id` ＞ 環境変数 `GOOGLE_DRIVE_FOLDER_ID`）。
   - `--strict-brief-delivery`: Google Drive API 等の外部配信や必須環境変数検証に失敗した際、警告ログのみで終わらせず終了コード `1` でパイプラインを失敗させるフラグ（GitHub Actions の `daily_gemini_brief.yml` で使用。この場合もローカルの `output/` 生成とキャッシュ保全・Artifacts アップロードは完了した状態で終了する）。
@@ -87,8 +90,10 @@ flowchart LR
    - 「認証情報」から **OAuth クライアント ID**（デスクトップアプリ または Web アプリケーション）を作成し、`Client ID` と `Client Secret` を控える。
 2. **リフレッシュトークンの取得**:
    - OAuth 2.0 Playground またはローカルのワンショットスクリプトで認可コードを取得し、`refresh_token` を発行して GitHub Secrets へ登録する。
-3. **アップロード先フォルダ ID の確認**:
+3. **アップロード先フォルダ ID の確認と初回財務データ ZIP の配置**:
    - Google ドライブ上で保存先フォルダ（例: `マイドライブ/ProjectAtlas`）を開き、URL `https://drive.google.com/drive/folders/<FOLDER_ID>` の `<FOLDER_ID>` を `GOOGLE_DRIVE_FOLDER_ID` へ登録する。
+   - 手元 Mac で `python -m src.data_collector.financial_archive --pack` を実行して生成される `output/financial_data.zip` を、同じ Google ドライブ保存先フォルダへ配置する（または環境変数設定後に `--upload` で直接アップロード可能。決算期の手元データ更新時は Google ドライブ上の `financial_data.zip` を差し替え、Actions 手動実行時に `refresh_financial_from_drive=true` を指定して反映する）。
+   - ※ `https://www.googleapis.com/auth/drive` スコープを使用することで、ブラウザから手動配置した `financial_data.zip` の読み取りにも対応できる。
 
 ---
 

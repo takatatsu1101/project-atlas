@@ -14,6 +14,7 @@ import math
 import mimetypes
 import os
 import shutil
+import tempfile
 import time
 import uuid
 from datetime import date, datetime
@@ -194,8 +195,11 @@ def _escape_drive_query_literal(value: str) -> str:
 
 def _resolve_upload_mime_type(src_path: Path) -> str:
     """配信対象ファイルの拡張子に応じた純粋な MIME タイプ（パラメータなし）を解決する。"""
-    if src_path.suffix.lower() in (".md", ".markdown"):
+    suffix = src_path.suffix.lower()
+    if suffix in (".md", ".markdown"):
         return "text/markdown"
+    if suffix == ".zip":
+        return "application/zip"
     guessed, _ = mimetypes.guess_type(src_path.name)
     return guessed or "application/octet-stream"
 
@@ -577,6 +581,94 @@ class GoogleDriveBriefDelivery:
             )
         return file_id.strip()
 
+    def _session_context(self):
+        return (
+            nullcontext(self._session)
+            if self._session is not None
+            else requests.Session()
+        )
+
+    def _download_file_bytes(
+        self,
+        session: requests.Session,
+        access_token: str,
+        file_id: str,
+        file_name: str,
+    ) -> bytes:
+        """fileId を指定して Google Drive からファイル本体（alt=media）を取得する。"""
+        url = f"{self._FILES_URL}/{quote(file_id, safe='')}"
+        resp = self._request_with_retry(
+            session,
+            "GET",
+            url,
+            operation=f"ファイルダウンロード({file_name})",
+            extra_secrets=(access_token,),
+            headers={"Authorization": f"Bearer {access_token}"},
+            params={"alt": "media"},
+        )
+        return resp.content
+
+    def download_named_file(
+        self,
+        file_name: str,
+        dest_path: Union[str, Path],
+    ) -> Optional[Path]:
+        """指定フォルダ内から同名ファイルを検索し、存在すれば dest_path へ原子的に保存して返す。"""
+        clean_name = str(file_name or "").strip()
+        if not clean_name:
+            raise ValueError("ダウンロード対象の file_name を指定してください。")
+
+        target_path = Path(dest_path)
+        with self._session_context() as session:
+            access_token = self._fetch_access_token(session)
+            file_id = self._find_existing_file_id(session, access_token, clean_name)
+            if file_id is None:
+                return None
+            content = self._download_file_bytes(
+                session, access_token, file_id, clean_name
+            )
+
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{target_path.name}.",
+            suffix=".tmp",
+            dir=str(target_path.parent),
+        )
+        tmp_path = Path(tmp_name)
+        try:
+            with os.fdopen(fd, "wb") as fp:
+                fp.write(content)
+            os.replace(tmp_path, target_path)
+        except Exception:
+            if tmp_path.exists():
+                tmp_path.unlink(missing_ok=True)
+            raise
+
+        logger.info(
+            f"Google ドライブからファイルをダウンロードしました: {clean_name} (gdrive://{file_id}) -> {target_path}"
+        )
+        return target_path
+
+    def upload_single_file(self, src_path: Union[str, Path]) -> str:
+        """単一ファイルを指定 Google ドライブフォルダへ新規作成または上書き更新し、fileId を返す。"""
+        target = Path(src_path)
+        if not target.is_file():
+            raise FileNotFoundError(
+                f"アップロード対象ファイルが見つかりません: {target}"
+            )
+
+        with self._session_context() as session:
+            access_token = self._fetch_access_token(session)
+            existing_id = self._find_existing_file_id(
+                session, access_token, target.name
+            )
+            file_id = self._upload_file(session, access_token, target, existing_id)
+            action_label = "上書き更新" if existing_id else "新規作成"
+            logger.info(
+                f"Google ドライブへファイルを{action_label}しました: {target.name} -> gdrive://{file_id}"
+            )
+            return file_id
+
     def deliver(
         self, files: Dict[str, Path], as_of_date: date
     ) -> Dict[str, DeliveryTarget]:
@@ -588,12 +680,7 @@ class GoogleDriveBriefDelivery:
             return {}
 
         delivered: Dict[str, DeliveryTarget] = {}
-        session_cm = (
-            nullcontext(self._session)
-            if self._session is not None
-            else requests.Session()
-        )
-        with session_cm as session:
+        with self._session_context() as session:
             access_token = self._fetch_access_token(session)
             for key, src_path in target_files:
                 existing_id = self._find_existing_file_id(
